@@ -45,6 +45,26 @@ def git(*argv):
     return subprocess.check_output(['git', *argv], cwd=ROOT, text=True).strip()
 
 
+def verify_checkout_bytes():
+    """Every tracked file must hold its exact git blob bytes (no CRLF or filter rewrites).
+
+    Line-ending conversion changes compiled-in text such as SQL migrations,
+    whose checksums the database records, so a converted checkout is refused.
+    """
+    listing = subprocess.check_output(['git', 'ls-files', '-s', '-z'], cwd=ROOT).split(b'\0')
+    count = 0
+    for entry in filter(None, listing):
+        meta, path = entry.split(b'\t', 1)
+        mode, blob = meta.split(b' ')[:2]
+        if mode in (b'120000', b'160000'):
+            continue
+        data = (ROOT / path.decode()).read_bytes()
+        if hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest() != blob.decode():
+            raise ValueError('Checkout bytes differ from git for ' + path.decode() + ' (disable core.autocrlf)')
+        count += 1
+    return count
+
+
 def toolchain_channel():
     match = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / 'rust-toolchain.toml').read_text(), re.M)
     if not match:
@@ -144,6 +164,8 @@ def main():
     dirty = status != ''
     if dirty and not args.allow_dirty:
         raise ValueError('Refusing to build a release target from a modified checkout')
+    # git status normalizes line endings, so a converted checkout still looks clean.
+    checked_files = None if dirty else verify_checkout_bytes()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     target_dir = (args.target_dir or output.parent / 'cargo-target').resolve()
@@ -154,7 +176,7 @@ def main():
     report = {
         'schema': 'aelix-studio-host.build-receipt/1', 'status': 'failed',
         'repository': policy['repository'], 'commit': commit, 'tree': git('rev-parse', 'HEAD^{tree}'),
-        'dirty': dirty, 'upstream': policy['upstream'], 'label': args.label,
+        'dirty': dirty, 'checkoutFilesVerified': checked_files, 'upstream': policy['upstream'], 'label': args.label,
         'target': args.target, 'rustTarget': rust_target, 'binary': binary_name,
         'rustToolchain': channel, 'rustFlags': spec.get('rustFlags', ''), 'profile': 'release',
         'policySha256': digest(POLICY), 'buildRecipeSha256': digest(Path(__file__)),

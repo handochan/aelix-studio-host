@@ -142,7 +142,7 @@ def assemble(label, source, output, commit, environment):
             'smoke': {key: smoke.get(key) for key in ('status', 'checks', 'version')},
         }
     for key in ('tree', 'cargoLockSha256', 'licenseSha256', 'noticeSha256', 'rustToolchain', 'policySha256',
-                'buildRecipeSha256'):
+                'buildRecipeSha256', 'checkoutFilesVerified'):
         if len({receipt[key] for receipt in receipts}) != 1:
             raise ValueError('Targets disagree on ' + key)
     first = receipts[0]

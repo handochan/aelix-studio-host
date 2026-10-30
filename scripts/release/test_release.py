@@ -60,6 +60,21 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(archive.getinfo('f').date_time, (1980, 1, 1, 0, 0, 0))
 
 
+class CheckoutBytesTests(unittest.TestCase):
+    def test_line_ending_rewrites_are_refused(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '-q'], cwd=root, check=True)
+            (root / 'migration.sql').write_bytes(b'CREATE TABLE t (id INTEGER);\n')
+            subprocess.run(['git', 'add', 'migration.sql'], cwd=root, check=True)
+            with mock.patch.object(build, 'ROOT', root):
+                self.assertEqual(build.verify_checkout_bytes(), 1)
+                (root / 'migration.sql').write_bytes(b'CREATE TABLE t (id INTEGER);\r\n')
+                with self.assertRaises(ValueError):
+                    build.verify_checkout_bytes()
+
+
 class LabelTests(unittest.TestCase):
     def label(self, event, ref, on_main=True, version='0.2.2'):
         with mock.patch.object(provenance, 'is_ancestor', return_value=on_main), \
@@ -102,7 +117,7 @@ class AssembleTests(unittest.TestCase):
             'binaryCodeSha256': hashlib.sha256(binary_bytes).hexdigest(), 'rustFlags': spec.get('rustFlags', ''),
             'cargoVersion': 'cargo 1.95.0', 'rustcVersionVerbose': 'rustc 1.95.0', 'rustToolchain': '1.95.0',
             'cargoLockSha256': 'c' * 64, 'licenseSha256': 'd' * 64, 'noticeSha256': 'e' * 64,
-            'policySha256': 'f' * 64, 'buildRecipeSha256': '0' * 64,
+            'policySha256': 'f' * 64, 'buildRecipeSha256': '0' * 64, 'checkoutFilesVerified': 1440,
             'archive': build.archive_name(label, spec['rustTarget']),
         }
         (directory / 'build-receipt.json').write_text(json.dumps(receipt))

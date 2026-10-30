@@ -107,8 +107,10 @@ resolver pattern.
 2. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
    Ubuntu 24.04 arm64 and x64, Windows Server 2022.
    [`build.py`](scripts/release/build.py) checks the pinned Rust toolchain and a
-   clean checkout, builds `--locked --release`, and writes the receipt and
-   archive. Linux builds run in [`hostBuild.Dockerfile`](scripts/release/hostBuild.Dockerfile)
+   clean checkout whose files equal their git blobs byte for byte (Windows
+   checks out with `core.autocrlf=false`; converted line endings would change
+   compiled-in text such as migration checksums), builds `--locked --release`,
+   and writes the receipt and archive. Linux builds run in [`hostBuild.Dockerfile`](scripts/release/hostBuild.Dockerfile)
    (Debian 11, pinned image digest and apt snapshot) and must stay within the
    upstream GLIBC ceilings (x64 2.34, arm64 2.30). Windows uses
    `-C target-feature=+crt-static`.

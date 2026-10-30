@@ -53,10 +53,12 @@ jobs:
           ref: ${{ env.BUILD_SHA }}
           fetch-depth: 0
       - id: gate
+        # Explicit bash adds pipefail, so a failed gate is not masked by tee.
+        shell: bash
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
-          python3 -I -B scripts/release/provenance.py prepare --event "${GITHUB_EVENT_NAME}" --ref "${GITHUB_REF}" >> "${GITHUB_OUTPUT}"
-      - run: cat "${GITHUB_OUTPUT}"
+          echo "sha=$(git rev-parse HEAD)" | tee -a "${GITHUB_OUTPUT}"
+          python3 -I -B scripts/release/provenance.py prepare --event "${GITHUB_EVENT_NAME}" --ref "${GITHUB_REF}" \
+            | tee -a "${GITHUB_OUTPUT}"
 
   build:
     name: Build ${{ matrix.target }}
@@ -79,6 +81,9 @@ jobs:
       PYTHON: ${{ matrix.python }}
       LABEL: ${{ needs.prepare.outputs.label }}
     steps:
+      - name: Check out exact repository bytes (no CRLF conversion)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
