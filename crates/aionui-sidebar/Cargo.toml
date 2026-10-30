@@ -2,6 +2,7 @@
 name = "aionui-sidebar"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 aionui-api-types.workspace = true

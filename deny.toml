@@ -1,0 +1,79 @@
+# cargo-deny policy for the Aelix Studio host. CI runs every check on each
+# push and pull request; see README.md "Dependency checks".
+
+[graph]
+# The five release targets (README.md "Releases").
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# aionrs' hakari-generated feature-unification crate. It has no code and no
+# license metadata; every dependency it lists is also reached through the
+# aion-* crates, so excluding it removes nothing else from the graph.
+exclude = ["workspace-hack"]
+
+[advisories]
+# Baseline: advisories already present in the upstream v0.2.2 Cargo.lock when
+# this policy was introduced (cargo-deny 0.20.2, 2026-10-31). They are listed
+# so CI fails on any NEW advisory; they are not accepted risks. Remove an
+# entry when the dependency update lands (cargo-deny warns once an entry no
+# longer matches). README.md "Dependency checks" tracks the follow-up.
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "v0.2.2 baseline: unsafe-libyaml unmaintained" },
+    { id = "RUSTSEC-2026-0190", reason = "v0.2.2 baseline: anyhow 1.0.102 unsound downcast_mut" },
+    { id = "RUSTSEC-2026-0285", reason = "v0.2.2 baseline: rustls 0.23.40" },
+    { id = "RUSTSEC-2026-0346", reason = "v0.2.2 baseline: rustls 0.23.40" },
+    { id = "RUSTSEC-2026-0348", reason = "v0.2.2 baseline: rustls 0.23.40" },
+    { id = "RUSTSEC-2026-0349", reason = "v0.2.2 baseline: rustls 0.23.40" },
+    { id = "RUSTSEC-2026-0367", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
+    { id = "RUSTSEC-2026-0368", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
+    { id = "RUSTSEC-2026-0369", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
+    { id = "RUSTSEC-2026-0381", reason = "v0.2.2 baseline: webpki-roots 1.0.7" },
+    { id = "RUSTSEC-2026-0382", reason = "v0.2.2 baseline: rustls-webpki 0.103.13" },
+    { id = "RUSTSEC-2026-0385", reason = "v0.2.2 baseline: ctutils 0.4.2" },
+    { id = "RUSTSEC-2026-0386", reason = "v0.2.2 baseline: tokio 1.52.3 unsound AsyncFd constructors" },
+    { id = "RUSTSEC-2026-0387", reason = "v0.2.2 baseline: crypto-bigint 0.4.9 and 0.5.5" },
+    { id = "RUSTSEC-2026-0391", reason = "v0.2.2 baseline: zstd 0.13.3" },
+    { id = "RUSTSEC-2026-0398", reason = "v0.2.2 baseline: zstd-safe 7.2.4" },
+    { id = "RUSTSEC-2026-0403", reason = "v0.2.2 baseline: zstd-safe 7.2.4" },
+    { id = "RUSTSEC-2026-0410", reason = "v0.2.2 baseline: zstd-sys 2.0.16" },
+    { id = "RUSTSEC-2026-0418", reason = "v0.2.2 baseline: libz-sys 1.1.28 build script" },
+]
+
+[licenses]
+# Workspace crates are unpublished (publish = false) and are not checked
+# here. Their upstream license metadata is discussed in README.md "License".
+private = { ignore = true }
+confidence-threshold = 0.93
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Upstream's aionrs agent runtime, pinned by tag in Cargo.toml.
+allow-git = ["https://github.com/iOfficeAI/aionrs.git"]

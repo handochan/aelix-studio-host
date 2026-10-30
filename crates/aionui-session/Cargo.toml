@@ -2,6 +2,7 @@
 name = "aionui-session"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 # Feature 002: server-authoritative SessionState control plane. Domain layer.
 # Self-contained: depends ONLY on aionui-process (001) + aionui-common. Spawns

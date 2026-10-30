@@ -2,6 +2,7 @@
 name = "aionui-ai-agent"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 async-trait.workspace = true
