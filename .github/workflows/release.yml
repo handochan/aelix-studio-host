@@ -20,6 +20,7 @@ on:
       - "Cargo.lock"
       - "crates/*/Cargo.toml"
       - "rust-toolchain.toml"
+      - ".gitattributes"
       - "LICENSE"
       - "NOTICE"
   workflow_dispatch:
