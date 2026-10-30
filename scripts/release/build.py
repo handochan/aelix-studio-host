@@ -46,17 +46,24 @@ def git(*argv):
 
 
 def verify_checkout_bytes():
-    """Every tracked file must hold its exact git blob bytes (no CRLF or filter rewrites).
+    """Tracked files must hold their exact git blob bytes (no core.autocrlf or filter rewrites).
 
     Line-ending conversion changes compiled-in text such as SQL migrations,
     whose checksums the database records, so a converted checkout is refused.
+    Files that .gitattributes itself declares `eol=crlf` (PowerShell scripts)
+    are the only exception.
     """
     listing = subprocess.check_output(['git', 'ls-files', '-s', '-z'], cwd=ROOT).split(b'\0')
+    paths = b'\0'.join(entry.split(b'\t', 1)[1] for entry in listing if entry) + b'\0'
+    attributes = subprocess.run(['git', 'check-attr', '--stdin', '-z', 'eol'], cwd=ROOT, input=paths,
+                                capture_output=True, check=True).stdout.split(b'\0')
+    declared_crlf = {attributes[index] for index in range(0, len(attributes) - 2, 3)
+                     if attributes[index + 2] == b'crlf'}
     count = 0
     for entry in filter(None, listing):
         meta, path = entry.split(b'\t', 1)
         mode, blob = meta.split(b' ')[:2]
-        if mode in (b'120000', b'160000'):
+        if mode in (b'120000', b'160000') or path in declared_crlf:
             continue
         data = (ROOT / path.decode()).read_bytes()
         if hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest() != blob.decode():

@@ -67,9 +67,12 @@ class CheckoutBytesTests(unittest.TestCase):
             root = Path(temporary)
             subprocess.run(['git', 'init', '-q'], cwd=root, check=True)
             (root / 'migration.sql').write_bytes(b'CREATE TABLE t (id INTEGER);\n')
-            subprocess.run(['git', 'add', 'migration.sql'], cwd=root, check=True)
+            (root / '.gitattributes').write_bytes(b'*.ps1 text eol=crlf\n')
+            (root / 'tool.ps1').write_bytes(b'Write-Output 1\n')
+            subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+            (root / 'tool.ps1').write_bytes(b'Write-Output 1\r\n')
             with mock.patch.object(build, 'ROOT', root):
-                self.assertEqual(build.verify_checkout_bytes(), 1)
+                self.assertEqual(build.verify_checkout_bytes(), 2)
                 (root / 'migration.sql').write_bytes(b'CREATE TABLE t (id INTEGER);\r\n')
                 with self.assertRaises(ValueError):
                     build.verify_checkout_bytes()
