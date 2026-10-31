@@ -32,8 +32,10 @@ The facts below are recorded without a legal interpretation.
   That line dates from `673a5e7` ("feat: initialize cargo workspace with 17
   crate stubs", 2026-04-12), before `LICENSE` was added, and has not changed
   since. Only `aionui-assistant` inherits it; the other 26 crates declare no
-  license. This repository keeps that metadata unchanged; the discrepancy is
-  not resolved here.
+  license. The repository owner decided on 2026-10-31 to align this metadata
+  with `LICENSE` (Apache-2.0); the change lands in
+  [#2](https://github.com/handochan/aelix-studio-host/issues/2). Until then it is
+  unchanged here.
 - Upstream has no README or NOTICE file. The sibling upstream projects
   [AionUi](https://github.com/iOfficeAI/AionUi) (`package.json`) and
   [aionrs](https://github.com/iOfficeAI/aionrs) (`Cargo.toml` at `v0.2.11`, a
@@ -100,10 +102,13 @@ resolver pattern.
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
-1. **Validate ref.** Only a pushed `host-v<version>-aelix.<n>` tag whose
-   version equals the workspace version and whose commit is already on `main`
-   can publish. Pull requests (when release inputs change) and manual runs are
-   dry runs labelled `dryrun-<commit>`.
+1. **Validate ref.** This workflow publishes only for a pushed
+   `host-v<version>-aelix.<n>` tag whose version equals the workspace version
+   and whose commit is already on `main`. Pull requests (when release inputs
+   change) and manual runs are dry runs labelled `dryrun-<commit>`. The gate
+   runs from the tagged commit's own workflow file, so a `host-v*` tag on a
+   commit with an edited `release.yml` would not be held by it; see
+   [What actually controls releases](#what-actually-controls-releases).
 2. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
    Ubuntu 24.04 arm64 and x64, Windows Server 2022.
    [`build.py`](scripts/release/build.py) checks the pinned Rust toolchain and a
@@ -122,11 +127,19 @@ resolver pattern.
 4. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
    every receipt, archive member and smoke report, then writes the checksums
    and provenance.
-5. **Publish** (tag runs only) creates the GitHub release. It refuses to
-   replace an existing release.
+5. **Publish** (tag runs only) creates the GitHub release. This workflow
+   refuses an existing release and never replaces its assets; that is a
+   property of this workflow, not of the repository.
 
 Creating a release tag requires the repository owner's approval (see
 `AGENTS.md`). Dry-run assets are available as workflow artifacts for 30 days.
+
+### What actually controls releases
+
+The workflow gate is a consistency check, not an access control. What keeps a
+release trustworthy is: push access to this repository, the push/tag rules in
+`AGENTS.md`, the `block-upstream-v-tags` ruleset (no creation, update or
+deletion of `refs/tags/v*`), and Studio pinning each archive by SHA-256.
 
 ### Building locally
 
@@ -149,13 +162,17 @@ immutability, `cargo fmt`, `cargo clippy -D warnings`, `cargo nextest`, the
 release-script tests, a linux-x64 host smoke, and `cargo deny check`
 ([`deny.toml`](deny.toml)): advisories, licenses, bans and sources.
 
-- **Licenses:** third-party crates must use a license on the allow list.
-  Workspace crates are unpublished and excluded (see [License](#license)).
+- **Licenses:** crates must use a license on the allow list. Every crate
+  marked `publish = false` is skipped, including third-party ones: our
+  workspace crates (see [License](#license)) and, today, only aionrs'
+  code-less hakari `workspace-hack` crate. `[sources]` limits git dependencies
+  to aionrs.
 - **Advisories:** the upstream v0.2.2 `Cargo.lock` already matches 19 RustSec
   advisories (rustls, rustls-webpki, webpki-roots, zip, zstd, tokio,
   crypto-bigint and others). They are listed in `deny.toml` as a baseline so
   that any new advisory fails CI. They are known, unresolved issues, not
-  accepted risks; a dependency update is a separate change.
+  accepted risks. The owner decided they must be resolved before the Beta
+  release ([#7](https://github.com/handochan/aelix-studio-host/issues/7)).
 
 ## Tags and upstream remotes
 
@@ -165,13 +182,18 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
   `contents: write`), so pushing a new upstream tag would try to publish a
   release here. The upstream tags already on origin do not trigger anything
   by existing.
-- Repository Actions settings add a second guard: actions must be pinned to a
-  full commit SHA, and only GitHub-owned actions plus `Swatinem/rust-cache`
-  and `taiki-e/install-action` may run. Upstream's workflows reference actions
-  by tag and fail before running any step. Adding another third-party action
-  requires the repository owner to extend that allowlist.
-- Keep the `upstream` remote fetch-only, and prefer
-  `git config remote.upstream.tagOpt --no-tags` in local clones.
+- The `block-upstream-v-tags` ruleset rejects creating, updating or deleting
+  `refs/tags/v*`; `host-v*` tags are not affected.
+- Repository Actions settings require every action to be pinned to a full
+  commit SHA and allow only GitHub-owned actions plus `Swatinem/rust-cache`
+  and `taiki-e/install-action`. Upstream jobs that reference actions by tag
+  fail before their first step. Jobs made only of `run:` steps are not stopped
+  by this: upstream's `build-manual.yml` has two (matrix preparation and
+  summary, `workflow_dispatch` only, `contents: read`) and stayed dispatchable
+  on `main` until this repository's workflows replaced it. Adding another
+  third-party action requires the repository owner to extend the allowlist.
+- Keep the `upstream` remote fetch-only, and every local clone must set
+  `git config remote.upstream.tagOpt --no-tags`.
 - Upstream changes are adopted deliberately (stable tags or selected commits)
   on a separate branch with review and the same CI; `.github/workflows/` here
   is ours and upstream workflow changes are not taken.

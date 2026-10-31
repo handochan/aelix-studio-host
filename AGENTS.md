@@ -37,8 +37,8 @@ gh project item-list 9 --owner handochan --format json --limit 100
 
 - Push only when the user authorized it, only your own branch (`git push -u origin <branch>`). Never push `main`, never force-push shared branches, never merge without approval.
 - Never push tags unless the user approved that specific release. Release tags are `host-v<workspace version>-aelix.<n>` on a commit already on `main` (README.md "Releases").
-- Never push upstream tags (`v*`) to origin, and never use `git push --tags`, `--follow-tags` or `--mirror`. Upstream tag commits carry upstream's release workflow, which would publish a release here once Actions are enabled.
-- The `upstream` remote is fetch-only. Never open issues, PRs or comments on iOfficeAI repositories without the user's approval.
+- Never push upstream tags (`v*`) to origin, and never use `git push --tags`, `--follow-tags` or `--mirror`. Upstream tag commits carry upstream's release workflow; the `block-upstream-v-tags` ruleset also rejects `refs/tags/v*`.
+- The `upstream` remote is fetch-only and must have `remote.upstream.tagOpt --no-tags`. Never open issues, PRs or comments on iOfficeAI repositories without the user's approval.
 - `.github/workflows/` belongs to this repository; do not adopt upstream workflow changes. Keep CI green: fmt, clippy, tests, cargo-deny and the host smoke.
 - Pin every action to a full commit SHA. Only GitHub-owned actions and the third-party actions allowlisted in the repository's Actions settings can run; ask the owner before adding another.
 - Commits and PR titles use Conventional Commits in English. Never add AI signatures (Co-Authored-By, "Generated with" and similar) to commits, PRs or comments.

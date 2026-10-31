@@ -60,6 +60,23 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(archive.getinfo('f').date_time, (1980, 1, 1, 0, 0, 0))
 
 
+class ContainerTests(unittest.TestCase):
+    def test_container_selects_the_pinned_toolchain(self):
+        image = [{'Id': 'sha256:image', 'Os': 'linux', 'Architecture': 'amd64',
+                  'Config': {'Labels': {'org.aelix.host-build.recipe': build.digest(build.RECIPE)}}}]
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(build.shutil, 'which', return_value='/usr/bin/docker'), \
+                mock.patch.object(build.platform, 'system', return_value='Linux'), \
+                mock.patch.object(build.subprocess, 'run'), \
+                mock.patch.object(build.subprocess, 'check_output', return_value=json.dumps(image)):
+            root = Path(temporary)
+            argv = build.container_prefix(POLICY['targets']['linux-x64'], '1.95.0', root / 'out', root / 'target',
+                                          root / 'cache', {})
+        environment = [argv[index + 1] for index, value in enumerate(argv) if value == '--env']
+        self.assertIn('RUSTUP_TOOLCHAIN=1.95.0', environment)
+        self.assertIn('sha256:image', argv)
+
+
 class CheckoutBytesTests(unittest.TestCase):
     def test_line_ending_rewrites_are_refused(self):
         import subprocess
@@ -106,9 +123,17 @@ class LabelTests(unittest.TestCase):
     def test_workspace_version_is_read_from_the_workspace_table(self):
         self.assertRegex(provenance.workspace_version(), r'^\d+\.\d+\.\d+$')
 
+    def test_a_stale_upstream_tag_in_the_policy_is_refused(self):
+        with mock.patch.object(provenance, 'workspace_version', return_value='0.2.3'), \
+                mock.patch.object(provenance, 'is_ancestor', return_value=True):
+            with self.assertRaises(ValueError):
+                provenance.check_upstream(POLICY)
+        self.assertEqual(POLICY['upstream']['tag'], 'v' + provenance.workspace_version())
+
 
 class AssembleTests(unittest.TestCase):
-    def make_target(self, source, name, spec, label, binary_bytes=b'host', smoke_status='passed'):
+    def make_target(self, source, name, spec, label, binary_bytes=b'host', smoke_status='passed',
+                    version='aioncore 0.2.2'):
         directory = source / ('release-' + name)
         directory.mkdir(parents=True)
         binary = 'aioncore.exe' if name.startswith('win32-') else 'aioncore'
@@ -121,7 +146,7 @@ class AssembleTests(unittest.TestCase):
             'cargoVersion': 'cargo 1.95.0', 'rustcVersionVerbose': 'rustc 1.95.0', 'rustToolchain': '1.95.0',
             'cargoLockSha256': 'c' * 64, 'licenseSha256': 'd' * 64, 'noticeSha256': 'e' * 64,
             'policySha256': 'f' * 64, 'buildRecipeSha256': '0' * 64, 'checkoutFilesVerified': 1440,
-            'archive': build.archive_name(label, spec['rustTarget']),
+            'archive': build.archive_name(label, spec['rustTarget']), 'version': version,
         }
         (directory / 'build-receipt.json').write_text(json.dumps(receipt))
         members = [(binary, directory / binary, 0o755), ('LICENSE', ROOT / 'LICENSE', 0o644),
@@ -158,6 +183,8 @@ class AssembleTests(unittest.TestCase):
         cases = {
             'smoke': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
                                                      'host-v0.2.2-aelix.1', smoke_status='failed'),
+            'version': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
+                                                       'host-v0.2.2-aelix.1', version='aioncore 0.2.3'),
             'missing': lambda source: None,
         }
         for case, last in cases.items():

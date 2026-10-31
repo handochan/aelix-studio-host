@@ -10,10 +10,6 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ]
-# aionrs' hakari-generated feature-unification crate. It has no code and no
-# license metadata; every dependency it lists is also reached through the
-# aion-* crates, so excluding it removes nothing else from the graph.
-exclude = ["workspace-hack"]
 
 [advisories]
 # Baseline: advisories already present in the upstream v0.2.2 Cargo.lock when
@@ -44,8 +40,10 @@ ignore = [
 ]
 
 [licenses]
-# Workspace crates are unpublished (publish = false) and are not checked
-# here. Their upstream license metadata is discussed in README.md "License".
+# Every crate marked publish = false is skipped, including third-party ones.
+# That is our workspace crates (license metadata: README.md "License") and,
+# today, only aionrs' code-less hakari workspace-hack crate; [sources] limits
+# git dependencies to aionrs.
 private = { ignore = true }
 confidence-threshold = 0.93
 allow = [

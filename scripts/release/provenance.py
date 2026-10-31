@@ -54,8 +54,11 @@ def load_policy():
 
 
 def check_upstream(policy):
-    """The recorded upstream base must be in our history and match its tag."""
+    """The recorded upstream base must be in our history, match its tag, and be the workspace's version."""
     upstream = policy['upstream']
+    if upstream['tag'] != 'v' + workspace_version():
+        raise ValueError('policy.json upstream tag ' + upstream['tag'] + ' is stale for workspace version '
+                         + workspace_version())
     if not is_ancestor(upstream['commit'], 'HEAD'):
         raise ValueError('Upstream base ' + upstream['commit'] + ' is not an ancestor of HEAD')
     tagged = git('rev-parse', '--verify', '--quiet', upstream['tag'] + '^{commit}', check=False)
@@ -128,6 +131,9 @@ def assemble(label, source, output, commit, environment):
                 raise ValueError(name + ': archived ' + notice + ' differs from the checkout')
         if smoke.get('status') != 'passed' or smoke.get('binarySha256') != receipt['binarySha256']:
             raise ValueError(name + ': host smoke did not pass for this binary')
+        expected_version = 'aioncore ' + workspace_version()
+        if receipt.get('version') != expected_version or smoke.get('version') != expected_version:
+            raise ValueError(name + ': binary version is not ' + expected_version)
         receipts.append(receipt)
         shutil.copy2(archive, output / archive.name)
         targets[name] = {

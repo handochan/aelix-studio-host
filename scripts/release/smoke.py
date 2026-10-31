@@ -28,6 +28,9 @@ import urllib.error
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from provenance import workspace_version  # noqa: E402
+
 AGENT_NAME = 'Host smoke synthetic agent'
 PROMPT = 'HOST_SMOKE_PROMPT'
 REPLY = 'HOST_SMOKE_OK'
@@ -175,6 +178,8 @@ def run(binary, python, keep, report):
     report['binarySha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
     report['version'] = subprocess.run([str(binary), '--version'], capture_output=True, text=True,
                                        timeout=30, check=True).stdout.strip()
+    expected_version = 'aioncore ' + workspace_version()
+    assert report['version'] == expected_version, ('--version', report['version'], expected_version)
     checks.append('version')
     if any(character.isspace() for character in python):
         # The host resolves a custom agent command by its first whitespace token.
@@ -206,8 +211,10 @@ def run(binary, python, keep, report):
         assert model['current_value'] == MODEL, model
         assert len(model['options']) == 1, model
         checks.append('runtime_ensure_model_selector')
-        code, _ = http(host.port, route + '/config-options/model', 'PUT', {'value': 'fixture/two'})
-        assert code == 400, ('unavailable model', code)
+        code, rejection = http(host.port, route + '/config-options/model', 'PUT', {'value': 'fixture/two'})
+        # Raised by the ACP agent manager for a value outside the advertised options.
+        assert (code, rejection.get('code'), rejection.get('error')) == (
+            400, 'BAD_REQUEST', "Value 'fixture/two' is not selectable for config option 'model'"), (code, rejection)
         checks.append('unavailable_model_rejected')
         host.api(route + '/messages', 'POST', {'content': PROMPT})
 

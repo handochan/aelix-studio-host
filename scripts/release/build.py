@@ -120,7 +120,7 @@ def write_archive(destination, members, epoch):
             compressed.write(raw.getvalue())
 
 
-def container_prefix(spec, output, target_dir, cache_dir, report):
+def container_prefix(spec, channel, output, target_dir, cache_dir, report):
     """Build the pinned compiler image and return the docker-run prefix for it."""
     if platform.system() not in ('Darwin', 'Linux') or not shutil.which('docker'):
         raise ValueError('Linux targets require Docker on a Linux or macOS runner')
@@ -139,6 +139,9 @@ def container_prefix(spec, output, target_dir, cache_dir, report):
     return ['docker', 'run', '--rm', '--platform', docker_platform,
             '--user', str(os.getuid()) + ':' + str(os.getgid()),
             '--env', 'HOME=/tmp/host-build', '--env', 'LC_ALL=C', '--env', 'CARGO_INCREMENTAL=0',
+            # Select the image's toolchain directly. Without this the rustup proxy
+            # reads rust-toolchain.toml and downloads its extra components.
+            '--env', 'RUSTUP_TOOLCHAIN=' + channel,
             '--env', 'RUSTFLAGS=' + spec.get('rustFlags', ''),
             '--volume', str(ROOT) + ':' + str(ROOT) + ':ro',
             '--volume', str(output) + ':' + str(output) + ':ro',
@@ -191,7 +194,7 @@ def main():
     }
     receipt = output / 'build-receipt.json'
     try:
-        prefix = container_prefix(spec, output, target_dir, target_dir.parent / 'container-cargo', report) if container else []
+        prefix = container_prefix(spec, channel, output, target_dir, target_dir.parent / 'container-cargo', report) if container else []
         if not container and not args.cargo:
             raise ValueError('Cargo with the pinned toolchain is required')
         cargo = '/usr/local/cargo/bin/cargo' if container else str(Path(args.cargo).absolute())

@@ -3,10 +3,14 @@ name: Release
 # Builds the five aioncore release targets, runs the host smoke on each
 # target's own runner, and assembles checksums and provenance.
 #
-# Only a pushed tag matching host-v<version>-aelix.<n> on a commit already on
-# main publishes a GitHub release. Upstream AionCore tags (v*) never match.
-# Pull requests and manual runs are dry runs: they upload the same assets as
-# workflow artifacts and publish nothing. See README.md "Releases".
+# This workflow publishes a GitHub release only for a pushed tag matching
+# host-v<version>-aelix.<n> on a commit already on main; upstream AionCore
+# tags (v*) never match. Pull requests and manual runs are dry runs: they
+# upload the same assets as workflow artifacts and publish nothing.
+# A tag runs the workflow file from its own commit, so this gate is a
+# consistency check. Push access, the AGENTS.md rules, the
+# block-upstream-v-tags ruleset and Studio's SHA-256 pin are the controls
+# (README.md "What actually controls releases").
 on:
   push:
     tags: ["host-v*"]
@@ -166,6 +170,6 @@ jobs:
           TAG: ${{ needs.prepare.outputs.label }}
         run: |
           (cd dist/assets && sha256sum -c aioncore-checksums.txt)
-          # Refuses an existing release; assets are never replaced in place.
+          # This step refuses an existing release and never replaces its assets.
           gh release create "${TAG}" dist/assets/* --repo "${GITHUB_REPOSITORY}" --verify-tag \
             --title "${TAG}" --notes-file dist/release-notes.md --latest
