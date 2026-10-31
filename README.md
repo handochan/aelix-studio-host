@@ -4,8 +4,8 @@ This repository is the **Aelix Studio host**: a modified version of
 [AionCore](https://github.com/iOfficeAI/AionCore), the Rust backend server
 (`aelix-studio-host`, formerly `aioncore`) for
 [Aelix Studio](https://github.com/handochan/aelix-studio). It is maintained
-for Aelix Studio, separately from the upstream project. Aelix Studio consumes its tagged releases, pinned by version and
-checksum.
+for Aelix Studio, separately from the upstream project. Aelix Studio consumes
+its tagged releases, pinned by version and checksum.
 
 - **Upstream:** [iOfficeAI/AionCore](https://github.com/iOfficeAI/AionCore),
   cloned with its full history. The current upstream base is recorded in
@@ -77,10 +77,10 @@ separate, reviewed commits.
 
 | Item         | Value                                                                    |
 | ------------ | ------------------------------------------------------------------------ |
-| Tag          | `host-v<upstream version>-aelix.<n>`, for example `host-v0.2.2-aelix.1`  |
-| Archives     | `aioncore-<tag>-<rust target>.tar.gz` (`.zip` for Windows)               |
-| Checksums    | `aioncore-checksums.txt` (`sha256sum -c` format)                         |
-| Provenance   | `aioncore-<tag>-provenance.json`                                         |
+| Tag          | `host-v<upstream version>-aelix.<n>`, for example `host-v0.2.2-aelix.2`  |
+| Archives     | `aelix-studio-host-<upstream version>-aelix.<n>-<rust target>.tar.gz` (`.zip` for Windows)               |
+| Checksums    | `aelix-studio-host-checksums.txt` (`sha256sum -c` format)                         |
+| Provenance   | `aelix-studio-host-<upstream version>-aelix.<n>-provenance.json`                                         |
 | Targets      | darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64               |
 
 - `<upstream version>` is the Cargo workspace version of the release commit
@@ -103,12 +103,19 @@ separate, reviewed commits.
   record, not a signed attestation.
 
 Studio pins a release by tag plus the archive SHA-256 from
-`aioncore-checksums.txt`, and downloads
+`aelix-studio-host-checksums.txt`, and downloads
 `https://github.com/handochan/aelix-studio-host/releases/download/<tag>/<archive>`.
-The archive name keeps Studio's existing `aioncore-${tag}-${rust target}`
-resolver pattern. Archive, checksum and provenance filenames retain this
-legacy prefix; the executable inside changes. Releases before this identity
-change contain `aioncore` instead. Studio must adopt the new member name in
+The release asset label omits the tag's leading `host-v`: tag
+`host-v0.2.2-aelix.2` produces, for example,
+`aelix-studio-host-0.2.2-aelix.2-aarch64-apple-darwin.tar.gz` and
+`aelix-studio-host-0.2.2-aelix.2-provenance.json`. Dry runs retain their
+`dryrun-<commit>` label, for example
+`aelix-studio-host-dryrun-<commit>-aarch64-apple-darwin.tar.gz`.
+
+The already published `host-v0.2.2-aelix.1` release is immutable and keeps
+its original `aioncore-…` archives, checksum and provenance names, and
+`aioncore` executable. This naming rule applies to newly built assets.
+Studio must adopt both the archive naming rule and executable member name in
 its bundle preparation, resolver and verification together with a new exact
 release pin ([Studio #28](https://github.com/handochan/aelix-studio/issues/28),
 [identity #14](https://github.com/handochan/aelix-studio/issues/14)); host-only
@@ -136,8 +143,10 @@ checks do not establish that Studio launches it.
    upstream GLIBC ceilings (x64 2.34, arm64 2.30). Windows uses
    `-C target-feature=+crt-static`.
 3. **Host smoke** ([`smoke.py`](scripts/release/smoke.py)) runs each built
-   binary on its runner: startup and listening event, `/health`, custom ACP
-   agent registration with a synthetic agent, conversation, runtime warm-up,
+   binary on its runner: startup and listening event, `/health`,
+   `update_check_disabled_by_default` (HTTP 400 / `UPDATE_CHECK_DISABLED`), custom ACP
+   agent registration with a synthetic agent, ACP client identity, conversation,
+   runtime warm-up,
    launch-only model selector, unavailable-model rejection, a prompt/reply
    turn, idle state and graceful shutdown.
 4. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
@@ -163,8 +172,8 @@ Linux targets need only Docker on a machine of the same CPU architecture:
 
 ```sh
 python3 scripts/release/build.py --target linux-arm64 --label dryrun-local \
-  --output /tmp/aioncore-linux-arm64
-python3 scripts/release/smoke.py --binary /tmp/aioncore-linux-arm64/aelix-studio-host
+  --output /tmp/aelix-studio-host-linux-arm64
+python3 scripts/release/smoke.py --binary /tmp/aelix-studio-host-linux-arm64/aelix-studio-host
 ```
 
 On Linux the smoke can run directly; from macOS, run it inside the build image
@@ -174,7 +183,7 @@ the Rust toolchain pinned in `rust-toolchain.toml`.
 ## Update checks and existing data
 
 `POST /api/system/check-update` is disabled by default, including requests
-that supply a `repo`. It returns HTTP 400 with an explanation before making
+that supply a `repo`. It returns HTTP 400 / `UPDATE_CHECK_DISABLED` with an explanation before making
 an update request. To opt in, set `AELIX_STUDIO_HOST_UPDATE_CHECK=1` before
 starting the host and explicitly supply a repository in the request or via
 `AIONUI_GITHUB_REPO=owner/repo`. There is no built-in upstream repository
@@ -182,7 +191,9 @@ fallback. This endpoint retains its existing semantic-version release lookup;
 it does not install host releases or interpret `host-v*` release tags.
 
 The HTTP User-Agent is `aelix-studio-host/<workspace version>`; the DingTalk
-stream registration's `ua` identity is `aelix-studio-host`.
+stream registration's `ua` identity and ACP `clientInfo.name` are
+`aelix-studio-host`. The canonical ACP `Implementation` contract defines the
+name as implementation metadata (`agent-client-protocol-schema-1.5.0/src/v1/agent.rs`).
 
 The executable rename does not migrate data. The host still uses `--data-dir`
 (default `data`), `aionui-backend.db`, existing `AIONUI_*_DIR` overrides and
@@ -190,6 +201,26 @@ existing log filenames. Work directories come from `--work-dir`,
 `AIONUI_WORK_DIR`, then `--data-dir`; bundled resources are located relative
 to the executable's parent directory, not its filename. Studio owns the
 choice of its data directory and its separate app identity work.
+
+### Interfaces whose names stay unchanged
+
+Studio continues to consume these compatibility interfaces. Renaming the
+executable and release assets does not rename their wire markers, identifiers,
+storage paths or configuration:
+
+- Stdout markers: `AIONCORE_LISTENING` and `AIONCORE_READY`.
+- Log filename suffix: `.aioncore.log`.
+- Benign peer-already-running result: exit code `3` and
+  `BOOTSTRAP_PEER_ALREADY_RUNNING` (the explanatory text uses the new host name).
+- Bootstrap authentication: `AIONCORE_BOOTSTRAP_SECRET` and the
+  `x-aioncore-bootstrap-secret` HTTP header.
+- Existing data directories, `aionui-backend.db`, and `AIONUI_*` environment
+  variables (including directory and helper/runtime overrides).
+- Internal crate/module names and API contract identifiers remain upstream names.
+
+Studio's archive/member/resolver changes are tracked in
+[Studio #28](https://github.com/handochan/aelix-studio/issues/28). This PR changes
+the host only.
 
 Other external access defaults, mirrors and connection-attempt auditing
 remain PR ② of [#2](https://github.com/handochan/aelix-studio-host/issues/2).

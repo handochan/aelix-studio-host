@@ -108,9 +108,9 @@ impl From<ManagedResourcesModeArg> for aionui_runtime::ManagedResourcesMode {
 pub(crate) enum Command {
     /// Print the top-level agent-facing CLI capability index.
     Capabilities,
-    /// Agent-facing automation CLI for AionUi configuration.
+    /// Agent-facing automation CLI for Aelix Studio host configuration.
     Config(ConfigArgs),
-    /// Agent-facing read-only troubleshooting CLI for AionUi diagnosis.
+    /// Agent-facing read-only troubleshooting CLI for Aelix Studio host diagnosis.
     Diagnose(DiagnoseArgs),
     /// Agent-facing Team collaboration CLI fallback.
     Team(TeamArgs),
@@ -125,7 +125,7 @@ pub(crate) enum Command {
     /// `[LOAD_SKILL]` text-protocol round trip.
     Skills(SkillsArgs),
     /// PreToolUse permission gate for the Antigravity CLI (spawned by agy).
-    /// Reads the tool request on stdin, asks the running AionUi backend, and
+    /// Reads the tool request on stdin, asks the running Aelix Studio host, and
     /// writes agy's decision to stdout.
     AntigravityHook,
     /// Stdio ↔ TCP bridge for the team MCP server (spawned by the ACP agent CLI).
@@ -400,7 +400,7 @@ pub(crate) enum ConfigCommand {
     Conversation(ConfigConversationArgs),
     /// Manage assistants and assistant-owned behavior.
     Assistants(ConfigAssistantsArgs),
-    /// Manage AionUi skills.
+    /// Manage Aelix Studio skills.
     Skills(ConfigSkillsArgs),
     /// Manage MCP servers and OAuth state.
     Mcp(ConfigMcpArgs),
@@ -702,7 +702,7 @@ pub(crate) enum ConfigConversationCommand {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct PrepareManagedResourcesArgs {
-    /// Bundle output root. Aioncore writes the managed resources under
+    /// Bundle output root. Aelix Studio host writes the managed resources under
     /// `<bundle-out>/{node,acp}/...` for packaging.
     #[arg(long)]
     pub bundle_out: PathBuf,
@@ -887,15 +887,15 @@ mod tests {
     #[test]
     fn prepare_managed_resources_accepts_bundle_out() {
         let cli = Cli::parse_from([
-            "aelix-studio-host",
+            "aioncore",
             "prepare-managed-resources",
             "--bundle-out",
-            "/tmp/aelix-studio-host-bundle",
+            "/tmp/aioncore-bundle",
         ]);
 
         match cli.command {
             Some(Command::PrepareManagedResources(args)) => {
-                assert_eq!(args.bundle_out, std::path::Path::new("/tmp/aelix-studio-host-bundle"));
+                assert_eq!(args.bundle_out, std::path::Path::new("/tmp/aioncore-bundle"));
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
@@ -903,50 +903,50 @@ mod tests {
 
     #[test]
     fn managed_resources_mode_defaults_to_download() {
-        let cli = Cli::parse_from(["aelix-studio-host"]);
+        let cli = Cli::parse_from(["aioncore"]);
         assert_eq!(cli.managed_resources_mode, ManagedResourcesModeArg::Download);
     }
 
     #[test]
     fn managed_resources_mode_accepts_download() {
-        let cli = Cli::parse_from(["aelix-studio-host", "--managed-resources-mode", "download"]);
+        let cli = Cli::parse_from(["aioncore", "--managed-resources-mode", "download"]);
         assert_eq!(cli.managed_resources_mode, ManagedResourcesModeArg::Download);
     }
 
     #[test]
     fn parent_pid_accepts_positive_integer() {
-        let cli = Cli::parse_from(["aelix-studio-host", "--parent-pid", "4242"]);
+        let cli = Cli::parse_from(["aioncore", "--parent-pid", "4242"]);
         assert_eq!(cli.parent_pid, Some(4242));
     }
 
     #[test]
     fn dump_prompts_defaults_to_false() {
-        let cli = Cli::parse_from(["aelix-studio-host"]);
+        let cli = Cli::parse_from(["aioncore"]);
         assert!(!cli.dump_prompts);
     }
 
     #[test]
     fn dump_prompts_accepts_flag() {
-        let cli = Cli::parse_from(["aelix-studio-host", "--dump-prompts"]);
+        let cli = Cli::parse_from(["aioncore", "--dump-prompts"]);
         assert!(cli.dump_prompts);
     }
 
     #[test]
     fn recover_corrupted_database_flag_defaults_to_false() {
-        let cli = Cli::parse_from(["aelix-studio-host"]);
+        let cli = Cli::parse_from(["aioncore"]);
         assert!(!cli.recover_corrupted_database);
     }
 
     #[test]
     fn recover_corrupted_database_flag_is_accepted() {
-        let cli = Cli::parse_from(["aelix-studio-host", "--recover-corrupted-database"]);
+        let cli = Cli::parse_from(["aioncore", "--recover-corrupted-database"]);
         assert!(cli.recover_corrupted_database);
     }
 
     #[test]
     fn command_as_str_returns_clap_subcommand_names() {
         let prepare_args = PrepareManagedResourcesArgs {
-            bundle_out: PathBuf::from("/tmp/aelix-studio-host-bundle"),
+            bundle_out: PathBuf::from("/tmp/aioncore-bundle"),
         };
 
         let cases = [
@@ -985,75 +985,75 @@ mod tests {
     #[test]
     fn config_cli_accepts_agent_facing_design_command_paths() {
         let commands: &[&[&str]] = &[
-            &["aelix-studio-host", "config", "capabilities"],
-            &["aelix-studio-host", "config", "context"],
-            &["aelix-studio-host", "config", "conversation", "rename"],
-            &["aelix-studio-host", "config", "assistants", "list"],
-            &["aelix-studio-host", "config", "assistants", "get"],
-            &["aelix-studio-host", "config", "assistants", "create"],
-            &["aelix-studio-host", "config", "assistants", "update"],
-            &["aelix-studio-host", "config", "assistants", "delete"],
-            &["aelix-studio-host", "config", "assistants", "import"],
-            &["aelix-studio-host", "config", "assistants", "state"],
-            &["aelix-studio-host", "config", "assistants", "rule", "read"],
-            &["aelix-studio-host", "config", "assistants", "rule", "write"],
-            &["aelix-studio-host", "config", "assistants", "rule", "delete"],
-            &["aelix-studio-host", "config", "assistants", "skill", "read"],
-            &["aelix-studio-host", "config", "assistants", "skill", "write"],
-            &["aelix-studio-host", "config", "assistants", "skill", "delete"],
-            &["aelix-studio-host", "config", "skills", "list"],
-            &["aelix-studio-host", "config", "skills", "info"],
-            &["aelix-studio-host", "config", "skills", "paths"],
-            &["aelix-studio-host", "config", "skills", "import"],
-            &["aelix-studio-host", "config", "skills", "delete"],
-            &["aelix-studio-host", "config", "skills", "scan"],
-            &["aelix-studio-host", "config", "mcp", "servers", "list"],
-            &["aelix-studio-host", "config", "mcp", "servers", "get"],
-            &["aelix-studio-host", "config", "mcp", "servers", "create"],
-            &["aelix-studio-host", "config", "mcp", "servers", "update"],
-            &["aelix-studio-host", "config", "mcp", "servers", "delete"],
-            &["aelix-studio-host", "config", "mcp", "servers", "toggle"],
-            &["aelix-studio-host", "config", "mcp", "servers", "import"],
-            &["aelix-studio-host", "config", "mcp", "test-connection"],
-            &["aelix-studio-host", "config", "mcp", "agent-configs"],
-            &["aelix-studio-host", "config", "mcp", "oauth", "check-status"],
-            &["aelix-studio-host", "config", "mcp", "oauth", "login"],
-            &["aelix-studio-host", "config", "mcp", "oauth", "logout"],
-            &["aelix-studio-host", "config", "mcp", "oauth", "authenticated"],
-            &["aelix-studio-host", "config", "providers", "list"],
-            &["aelix-studio-host", "config", "providers", "create"],
-            &["aelix-studio-host", "config", "providers", "update"],
-            &["aelix-studio-host", "config", "providers", "delete"],
-            &["aelix-studio-host", "config", "providers", "detect-protocol"],
-            &["aelix-studio-host", "config", "providers", "fetch-models"],
-            &["aelix-studio-host", "config", "providers", "models", "fetch"],
-            &["aelix-studio-host", "config", "providers", "health-check"],
-            &["aelix-studio-host", "config", "settings", "get"],
-            &["aelix-studio-host", "config", "settings", "patch"],
-            &["aelix-studio-host", "config", "settings", "client", "get"],
-            &["aelix-studio-host", "config", "settings", "client", "put"],
-            &["aelix-studio-host", "config", "agents", "list"],
-            &["aelix-studio-host", "config", "agents", "enable"],
-            &["aelix-studio-host", "config", "agents", "overrides", "get"],
-            &["aelix-studio-host", "config", "agents", "overrides", "set"],
-            &["aelix-studio-host", "config", "agents", "custom", "create"],
-            &["aelix-studio-host", "config", "agents", "custom", "update"],
-            &["aelix-studio-host", "config", "agents", "custom", "delete"],
-            &["aelix-studio-host", "config", "agents", "custom", "try-connect"],
-            &["aelix-studio-host", "config", "cron", "jobs", "list"],
-            &["aelix-studio-host", "config", "cron", "jobs", "get"],
-            &["aelix-studio-host", "config", "cron", "jobs", "create"],
-            &["aelix-studio-host", "config", "cron", "jobs", "update"],
-            &["aelix-studio-host", "config", "cron", "jobs", "delete"],
-            &["aelix-studio-host", "config", "cron", "jobs", "run"],
-            &["aelix-studio-host", "config", "cron", "jobs", "skill", "get"],
-            &["aelix-studio-host", "config", "cron", "jobs", "skill", "save"],
-            &["aelix-studio-host", "config", "cron", "jobs", "skill", "delete"],
-            &["aelix-studio-host", "config", "skills", "external-paths", "list"],
-            &["aelix-studio-host", "config", "skills", "external-paths", "add"],
-            &["aelix-studio-host", "config", "skills", "external-paths", "remove"],
-            &["aelix-studio-host", "config", "skills", "market", "enable"],
-            &["aelix-studio-host", "config", "skills", "market", "disable"],
+            &["aioncore", "config", "capabilities"],
+            &["aioncore", "config", "context"],
+            &["aioncore", "config", "conversation", "rename"],
+            &["aioncore", "config", "assistants", "list"],
+            &["aioncore", "config", "assistants", "get"],
+            &["aioncore", "config", "assistants", "create"],
+            &["aioncore", "config", "assistants", "update"],
+            &["aioncore", "config", "assistants", "delete"],
+            &["aioncore", "config", "assistants", "import"],
+            &["aioncore", "config", "assistants", "state"],
+            &["aioncore", "config", "assistants", "rule", "read"],
+            &["aioncore", "config", "assistants", "rule", "write"],
+            &["aioncore", "config", "assistants", "rule", "delete"],
+            &["aioncore", "config", "assistants", "skill", "read"],
+            &["aioncore", "config", "assistants", "skill", "write"],
+            &["aioncore", "config", "assistants", "skill", "delete"],
+            &["aioncore", "config", "skills", "list"],
+            &["aioncore", "config", "skills", "info"],
+            &["aioncore", "config", "skills", "paths"],
+            &["aioncore", "config", "skills", "import"],
+            &["aioncore", "config", "skills", "delete"],
+            &["aioncore", "config", "skills", "scan"],
+            &["aioncore", "config", "mcp", "servers", "list"],
+            &["aioncore", "config", "mcp", "servers", "get"],
+            &["aioncore", "config", "mcp", "servers", "create"],
+            &["aioncore", "config", "mcp", "servers", "update"],
+            &["aioncore", "config", "mcp", "servers", "delete"],
+            &["aioncore", "config", "mcp", "servers", "toggle"],
+            &["aioncore", "config", "mcp", "servers", "import"],
+            &["aioncore", "config", "mcp", "test-connection"],
+            &["aioncore", "config", "mcp", "agent-configs"],
+            &["aioncore", "config", "mcp", "oauth", "check-status"],
+            &["aioncore", "config", "mcp", "oauth", "login"],
+            &["aioncore", "config", "mcp", "oauth", "logout"],
+            &["aioncore", "config", "mcp", "oauth", "authenticated"],
+            &["aioncore", "config", "providers", "list"],
+            &["aioncore", "config", "providers", "create"],
+            &["aioncore", "config", "providers", "update"],
+            &["aioncore", "config", "providers", "delete"],
+            &["aioncore", "config", "providers", "detect-protocol"],
+            &["aioncore", "config", "providers", "fetch-models"],
+            &["aioncore", "config", "providers", "models", "fetch"],
+            &["aioncore", "config", "providers", "health-check"],
+            &["aioncore", "config", "settings", "get"],
+            &["aioncore", "config", "settings", "patch"],
+            &["aioncore", "config", "settings", "client", "get"],
+            &["aioncore", "config", "settings", "client", "put"],
+            &["aioncore", "config", "agents", "list"],
+            &["aioncore", "config", "agents", "enable"],
+            &["aioncore", "config", "agents", "overrides", "get"],
+            &["aioncore", "config", "agents", "overrides", "set"],
+            &["aioncore", "config", "agents", "custom", "create"],
+            &["aioncore", "config", "agents", "custom", "update"],
+            &["aioncore", "config", "agents", "custom", "delete"],
+            &["aioncore", "config", "agents", "custom", "try-connect"],
+            &["aioncore", "config", "cron", "jobs", "list"],
+            &["aioncore", "config", "cron", "jobs", "get"],
+            &["aioncore", "config", "cron", "jobs", "create"],
+            &["aioncore", "config", "cron", "jobs", "update"],
+            &["aioncore", "config", "cron", "jobs", "delete"],
+            &["aioncore", "config", "cron", "jobs", "run"],
+            &["aioncore", "config", "cron", "jobs", "skill", "get"],
+            &["aioncore", "config", "cron", "jobs", "skill", "save"],
+            &["aioncore", "config", "cron", "jobs", "skill", "delete"],
+            &["aioncore", "config", "skills", "external-paths", "list"],
+            &["aioncore", "config", "skills", "external-paths", "add"],
+            &["aioncore", "config", "skills", "external-paths", "remove"],
+            &["aioncore", "config", "skills", "market", "enable"],
+            &["aioncore", "config", "skills", "market", "disable"],
         ];
 
         for command in commands {
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn every_registry_tool_has_a_wired_session_cli_subcommand() {
         for tool in aionui_api_types::session_tool_descriptors() {
-            let mut argv = vec!["aelix-studio-host", "session"];
+            let mut argv = vec!["aioncore", "session"];
             argv.extend(tool.cli_command.iter().map(String::as_str));
             assert!(
                 parse_session_command(&argv).is_some(),
@@ -1110,13 +1110,13 @@ mod tests {
 
     #[test]
     fn session_cli_accepts_capabilities() {
-        assert!(parse_session_command(&["aelix-studio-host", "session", "capabilities"]).is_some());
+        assert!(parse_session_command(&["aioncore", "session", "capabilities"]).is_some());
     }
 
     #[test]
     fn unwired_session_subcommand_is_reported_as_unknown() {
         assert!(
-            parse_session_command(&["aelix-studio-host", "session", "definitely-not-a-command"]).is_none(),
+            parse_session_command(&["aioncore", "session", "definitely-not-a-command"]).is_none(),
             "the guard above only works if an unwired path resolves to Unknown"
         );
     }
@@ -1139,7 +1139,7 @@ mod tests {
     #[test]
     fn every_registry_tool_has_a_wired_conversation_cli_subcommand() {
         for tool in aionui_api_types::conversation_tool_descriptors() {
-            let mut argv = vec!["aelix-studio-host", "conversation"];
+            let mut argv = vec!["aioncore", "conversation"];
             argv.extend(tool.cli_command.iter().map(String::as_str));
             assert!(
                 parse_conversation_command(&argv).is_some(),
@@ -1156,7 +1156,7 @@ mod tests {
     fn every_wired_conversation_subcommand_has_a_registry_descriptor() {
         // `create` is the only data subcommand today; add a line per new one.
         assert!(matches!(
-            parse_conversation_command(&["aelix-studio-host", "conversation", "create"]),
+            parse_conversation_command(&["aioncore", "conversation", "create"]),
             Some(ConversationCommand::Create)
         ));
         assert!(
@@ -1167,11 +1167,9 @@ mod tests {
 
     #[test]
     fn conversation_cli_accepts_capabilities_and_reports_unknown_paths() {
-        assert!(parse_conversation_command(&["aelix-studio-host", "conversation", "capabilities"]).is_some());
-        assert!(
-            parse_conversation_command(&["aelix-studio-host", "conversation", "definitely-not-a-command"]).is_none()
-        );
-        assert!(parse_conversation_command(&["aelix-studio-host", "conversation"]).is_none());
+        assert!(parse_conversation_command(&["aioncore", "conversation", "capabilities"]).is_some());
+        assert!(parse_conversation_command(&["aioncore", "conversation", "definitely-not-a-command"]).is_none());
+        assert!(parse_conversation_command(&["aioncore", "conversation"]).is_none());
     }
 
     /// Every tool in the shared Team registry advertises a `cli_command`, and
@@ -1183,7 +1181,7 @@ mod tests {
     #[test]
     fn every_registry_tool_has_a_wired_team_cli_subcommand() {
         for tool in aionui_api_types::team_tool_descriptors() {
-            let mut argv = vec!["aelix-studio-host", "team"];
+            let mut argv = vec!["aioncore", "team"];
             argv.extend(tool.cli_command.iter().map(String::as_str));
             assert!(
                 parse_team_command(&argv).is_some(),
@@ -1199,9 +1197,9 @@ mod tests {
         // Registry-independent commands; the tool-backed paths are covered by
         // `every_registry_tool_has_a_wired_team_cli_subcommand`.
         let commands: &[&[&str]] = &[
-            &["aelix-studio-host", "team", "capabilities"],
-            &["aelix-studio-host", "team", "help"],
-            &["aelix-studio-host", "team", "context"],
+            &["aioncore", "team", "capabilities"],
+            &["aioncore", "team", "help"],
+            &["aioncore", "team", "context"],
         ];
 
         for command in commands {
@@ -1215,14 +1213,14 @@ mod tests {
     #[test]
     fn unwired_team_subcommand_is_reported_as_unknown() {
         assert!(
-            parse_team_command(&["aelix-studio-host", "team", "definitely-not-a-command"]).is_none(),
+            parse_team_command(&["aioncore", "team", "definitely-not-a-command"]).is_none(),
             "the guard above only works if an unwired path resolves to Unknown"
         );
     }
 
     #[test]
     fn prepare_managed_resources_requires_bundle_out() {
-        let err = match Cli::try_parse_from(["aelix-studio-host", "prepare-managed-resources"]) {
+        let err = match Cli::try_parse_from(["aioncore", "prepare-managed-resources"]) {
             Ok(_) => panic!("prepare-managed-resources should require --bundle-out"),
             Err(err) => err,
         };
@@ -1231,7 +1229,7 @@ mod tests {
 
     #[test]
     fn user_set_password_parses_without_username() {
-        let cli = Cli::parse_from(["aelix-studio-host", "user", "set-password"]);
+        let cli = Cli::parse_from(["aioncore", "user", "set-password"]);
         match cli.command {
             Some(Command::User(UserArgs {
                 command: UserCommand::SetPassword(args),
@@ -1246,7 +1244,7 @@ mod tests {
     #[test]
     fn user_set_password_parses_username_and_stdin() {
         let cli = Cli::parse_from([
-            "aelix-studio-host",
+            "aioncore",
             "user",
             "set-password",
             "--username",
@@ -1266,7 +1264,7 @@ mod tests {
 
     #[test]
     fn user_list_parses() {
-        let cli = Cli::parse_from(["aelix-studio-host", "user", "list"]);
+        let cli = Cli::parse_from(["aioncore", "user", "list"]);
         assert!(matches!(
             cli.command,
             Some(Command::User(UserArgs {
@@ -1277,7 +1275,7 @@ mod tests {
 
     #[test]
     fn user_disable_parses_username() {
-        let cli = Cli::parse_from(["aelix-studio-host", "user", "disable", "--username", "alice"]);
+        let cli = Cli::parse_from(["aioncore", "user", "disable", "--username", "alice"]);
         match cli.command {
             Some(Command::User(UserArgs {
                 command: UserCommand::Disable(UserStatusArgs { username }),
@@ -1288,7 +1286,7 @@ mod tests {
 
     #[test]
     fn user_enable_parses_username() {
-        let cli = Cli::parse_from(["aelix-studio-host", "user", "enable", "--username", "bob"]);
+        let cli = Cli::parse_from(["aioncore", "user", "enable", "--username", "bob"]);
         match cli.command {
             Some(Command::User(UserArgs {
                 command: UserCommand::Enable(UserStatusArgs { username }),
@@ -1299,7 +1297,7 @@ mod tests {
 
     #[test]
     fn user_disable_requires_username() {
-        let err = match Cli::try_parse_from(["aelix-studio-host", "user", "disable"]) {
+        let err = match Cli::try_parse_from(["aioncore", "user", "disable"]) {
             Ok(_) => panic!("user disable should require --username"),
             Err(err) => err,
         };
@@ -1308,14 +1306,7 @@ mod tests {
 
     #[test]
     fn user_create_parses_username_and_stdin() {
-        let cli = Cli::parse_from([
-            "aelix-studio-host",
-            "user",
-            "create",
-            "--username",
-            "alice",
-            "--password-stdin",
-        ]);
+        let cli = Cli::parse_from(["aioncore", "user", "create", "--username", "alice", "--password-stdin"]);
         match cli.command {
             Some(Command::User(UserArgs {
                 command: UserCommand::Create(args),
@@ -1333,7 +1324,7 @@ mod tests {
     // strict-create semantics would turn this red.
     #[test]
     fn user_create_requires_username() {
-        let err = match Cli::try_parse_from(["aelix-studio-host", "user", "create"]) {
+        let err = match Cli::try_parse_from(["aioncore", "user", "create"]) {
             Ok(_) => panic!("user create should require --username"),
             Err(err) => err,
         };
@@ -1342,7 +1333,7 @@ mod tests {
 
     #[test]
     fn secret_status_parses() {
-        let cli = Cli::parse_from(["aelix-studio-host", "secret", "status"]);
+        let cli = Cli::parse_from(["aioncore", "secret", "status"]);
         assert!(matches!(
             cli.command,
             Some(Command::Secret(SecretArgs {
@@ -1353,7 +1344,7 @@ mod tests {
 
     #[test]
     fn secret_generate_parses_force() {
-        let cli = Cli::parse_from(["aelix-studio-host", "secret", "generate", "--force"]);
+        let cli = Cli::parse_from(["aioncore", "secret", "generate", "--force"]);
         match cli.command {
             Some(Command::Secret(SecretArgs {
                 command: SecretCommand::Generate(args),
@@ -1364,7 +1355,7 @@ mod tests {
 
     #[test]
     fn secret_generate_defaults_without_force() {
-        let cli = Cli::parse_from(["aelix-studio-host", "secret", "generate"]);
+        let cli = Cli::parse_from(["aioncore", "secret", "generate"]);
         match cli.command {
             Some(Command::Secret(SecretArgs {
                 command: SecretCommand::Generate(args),
@@ -1375,7 +1366,7 @@ mod tests {
 
     #[test]
     fn secret_set_parses_stdin_and_force() {
-        let cli = Cli::parse_from(["aelix-studio-host", "secret", "set", "--secret-stdin", "--force"]);
+        let cli = Cli::parse_from(["aioncore", "secret", "set", "--secret-stdin", "--force"]);
         match cli.command {
             Some(Command::Secret(SecretArgs {
                 command: SecretCommand::Set(args),
@@ -1416,7 +1407,7 @@ mod tests {
                 continue;
             }
 
-            let parsed = Cli::try_parse_from(std::iter::once("aelix-studio-host").chain(argv.iter().copied()));
+            let parsed = Cli::try_parse_from(std::iter::once("aioncore").chain(argv.iter().copied()));
             assert!(
                 parsed.is_ok(),
                 "the skills index teaches `aelix-studio-host {}`, which the CLI rejects: {}",
@@ -1437,7 +1428,7 @@ mod tests {
         // argument after `show` or `cat` is not a wording preference, it is a
         // command the binary refuses.
         assert!(
-            Cli::try_parse_from(["aelix-studio-host", "skills", "show", "mermaid"]).is_err(),
+            Cli::try_parse_from(["aioncore", "skills", "show", "mermaid"]).is_err(),
             "`skills show <name>` must stay a parse error, so the index can never teach it again"
         );
     }

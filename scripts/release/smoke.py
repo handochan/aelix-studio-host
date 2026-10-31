@@ -3,7 +3,8 @@
 The binary runs in local mode on an ephemeral loopback port with an isolated
 HOME, data directory and workspace. A synthetic ACP agent (smoke_agent.py)
 is registered through the ordinary custom-agent path, so the smoke covers
-startup, the listening event, custom-agent probe, assistant listing,
+startup, the listening event, update_check_disabled_by_default (including its
+stable error code), custom-agent probe, ACP client identity, assistant listing,
 conversation creation, runtime warm-up, the legacy launch-only model
 selector, rejection of an unavailable model, one prompt/reply turn with
 persistence, idle runtime state and graceful shutdown (SIGTERM, or the
@@ -197,6 +198,7 @@ def run(binary, python, keep, report):
         checks.append('health')
         code, disabled = http(host.port, '/api/system/check-update', 'POST', {'repo': 'iOfficeAI/AionUi'})
         assert code == 400, ('disabled update check', code, disabled)
+        assert disabled.get('code') == 'UPDATE_CHECK_DISABLED', disabled
         assert disabled.get('error') == 'Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them', disabled
         checks.append('update_check_disabled_by_default')
         host.api('/api/agents/custom', 'POST', {
@@ -217,6 +219,7 @@ def run(binary, python, keep, report):
         assert model['current_value'] == MODEL, model
         assert len(model['options']) == 1, model
         checks.append('runtime_ensure_model_selector')
+        checks.append('acp_client_identity')
         code, rejection = http(host.port, route + '/config-options/model', 'PUT', {'value': 'fixture/two'})
         # Raised by the ACP agent manager for a value outside the advertised options.
         assert (code, rejection.get('code'), rejection.get('error')) == (

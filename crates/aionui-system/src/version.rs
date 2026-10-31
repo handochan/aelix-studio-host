@@ -45,7 +45,7 @@ impl VersionCheckService {
     /// Check for updates against GitHub Releases.
     pub async fn check_update(&self, req: &UpdateCheckRequest) -> Result<UpdateCheckResult, SystemError> {
         if !self.enabled {
-            return Err(SystemError::BadRequest(format!(
+            return Err(SystemError::UpdateCheckDisabled(format!(
                 "Update checks are disabled; set {UPDATE_CHECK_ENV}=1 to enable them"
             )));
         }

@@ -10,6 +10,9 @@ pub enum SystemError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    #[error("{0}")]
+    UpdateCheckDisabled(String),
+
     #[error("Conflict: {0}")]
     Conflict(String),
 

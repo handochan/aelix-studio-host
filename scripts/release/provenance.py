@@ -1,4 +1,4 @@
-"""Release gate and provenance assembly for the aioncore release workflow.
+"""Release gate and provenance assembly for the Aelix Studio host release workflow.
 
 `prepare` validates the ref being built and prints `label=...` and
 `publish=...` lines for $GITHUB_OUTPUT. Only a `host-v<version>-aelix.<n>` tag
@@ -7,8 +7,8 @@ dry run labelled `dryrun-<commit>`.
 
 `assemble` checks every target's build receipt, archive members and smoke
 report against each other and the checked-out commit, then writes the
-release assets: the archives, aioncore-checksums.txt (sha256sum format) and
-aioncore-<label>-provenance.json naming the upstream base and our commit.
+release assets: the archives, aelix-studio-host-checksums.txt (sha256sum format) and
+aelix-studio-host-<normalized label>-provenance.json naming the upstream base and our commit.
 """
 import argparse
 import hashlib
@@ -18,14 +18,22 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import zipfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 TAG_PATTERN = re.compile(r'^host-v(\d+\.\d+\.\d+)-aelix\.([1-9]\d*)$')
-CHECKSUMS = 'aioncore-checksums.txt'
+sys.path.insert(0, str(HERE))
+from build import archive_name, asset_label  # noqa: E402
+
+CHECKSUMS = 'aelix-studio-host-checksums.txt'
 MEMBERS = ('LICENSE', 'NOTICE', 'build-receipt.json')
+
+
+def provenance_filename(label):
+    return 'aelix-studio-host-' + asset_label(label) + '-provenance.json'
 
 
 def digest_bytes(data):
@@ -115,7 +123,8 @@ def assemble(label, source, output, commit, environment):
         smoke = json.loads((directory / 'smoke.json').read_text())
         expected = {'status': 'built', 'commit': commit, 'dirty': False, 'label': label, 'target': name,
                     'rustTarget': spec['rustTarget'], 'upstream': policy['upstream'],
-                    'binary': policy['binary'] + ('.exe' if name.startswith('win32-') else '')}
+                    'binary': policy['binary'] + ('.exe' if name.startswith('win32-') else ''),
+                    'archive': archive_name(label, spec['rustTarget'])}
         for key, value in expected.items():
             if receipt.get(key) != value:
                 raise ValueError(name + ': build receipt ' + key + ' is ' + repr(receipt.get(key)))
@@ -178,7 +187,7 @@ def assemble(label, source, output, commit, environment):
         'noticeSha256': first['noticeSha256'],
         'targets': targets,
     }
-    provenance_name = 'aioncore-' + label + '-provenance.json'
+    provenance_name = provenance_filename(label)
     (output / provenance_name).write_text(json.dumps(provenance, indent=2) + '\n')
     names = sorted([target['archive'] for target in targets.values()] + [provenance_name])
     lines = [digest_bytes((output / name).read_bytes()) + '  ' + name for name in names]
@@ -202,7 +211,7 @@ def notes(provenance):
 | --- | --- | --- |
 {rows}
 
-Verify with `sha256sum -c {CHECKSUMS}`. `aioncore-{provenance['label']}-provenance.json`
+Verify with `sha256sum -c {CHECKSUMS}`. `{provenance_filename(provenance['label'])}`
 records the build receipts. Each archive contains `LICENSE` and `NOTICE`; see the
 repository README for the upstream license notice and the list of modifications.
 """

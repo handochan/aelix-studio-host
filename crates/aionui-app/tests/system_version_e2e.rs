@@ -76,7 +76,7 @@ async fn version_check_disabled_with_auth_sends_no_requests() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let json = body_json(resp).await;
-    assert_eq!(json["code"], "BAD_REQUEST");
+    assert_eq!(json["code"], "UPDATE_CHECK_DISABLED");
     assert_eq!(
         json["error"],
         "Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them"

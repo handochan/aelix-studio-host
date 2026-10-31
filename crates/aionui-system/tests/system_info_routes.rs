@@ -182,12 +182,37 @@ async fn test_check_update_disabled_even_with_explicit_repo_sends_no_requests() 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert_eq!(body["success"], false);
-        assert_eq!(body["code"], "BAD_REQUEST");
+        assert_eq!(body["code"], "UPDATE_CHECK_DISABLED");
         assert_eq!(
             body["error"],
             "Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them"
         );
     }
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_check_update_enabled_without_repository_sends_no_requests() {
+    assert!(
+        std::env::var("AIONUI_GITHUB_REPO")
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
+        "test requires no repository override"
+    );
+    let mock_server = MockServer::start().await;
+    let app = setup_with_mock("1.0.0", &mock_server).await;
+    let resp = app
+        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "BAD_REQUEST");
+    assert_eq!(
+        body["error"],
+        "Update repository is not configured; set repo or AIONUI_GITHUB_REPO"
+    );
     assert!(mock_server.received_requests().await.unwrap().is_empty());
 }
 

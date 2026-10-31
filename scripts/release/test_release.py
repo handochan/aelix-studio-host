@@ -23,14 +23,26 @@ COMMIT = 'a' * 40
 
 
 class ArchiveTests(unittest.TestCase):
-    def test_archive_names_follow_the_studio_resolver_pattern(self):
-        self.assertEqual(build.archive_name('host-v0.2.2-aelix.1', 'aarch64-apple-darwin'),
-                         'aioncore-host-v0.2.2-aelix.1-aarch64-apple-darwin.tar.gz')
+    def test_archive_names_strip_the_release_tag_prefix(self):
+        self.assertEqual(build.archive_name('host-v0.2.2-aelix.2', 'aarch64-apple-darwin'),
+                         'aelix-studio-host-0.2.2-aelix.2-aarch64-apple-darwin.tar.gz')
         self.assertEqual(build.archive_name('dryrun-0123456789ab', 'x86_64-pc-windows-msvc'),
-                         'aioncore-dryrun-0123456789ab-x86_64-pc-windows-msvc.zip')
+                         'aelix-studio-host-dryrun-0123456789ab-x86_64-pc-windows-msvc.zip')
         for label in ('', '../x', 'a b', 'v1/2', '-leading'):
             with self.assertRaises(ValueError):
                 build.archive_name(label, 'x86_64-unknown-linux-gnu')
+
+    def test_names_for_every_release_target_and_provenance(self):
+        for spec in POLICY['targets'].values():
+            target = spec['rustTarget']
+            extension = '.zip' if 'windows' in target else '.tar.gz'
+            self.assertEqual(build.archive_name('host-v0.2.2-aelix.2', target),
+                             'aelix-studio-host-0.2.2-aelix.2-' + target + extension)
+        self.assertEqual(provenance.CHECKSUMS, 'aelix-studio-host-checksums.txt')
+        self.assertEqual(provenance.provenance_filename('host-v0.2.2-aelix.2'),
+                         'aelix-studio-host-0.2.2-aelix.2-provenance.json')
+        self.assertEqual(provenance.provenance_filename('dryrun-0123456789ab'),
+                         'aelix-studio-host-dryrun-0123456789ab-provenance.json')
 
     def test_archives_are_deterministic_and_ordered(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -133,7 +145,7 @@ class LabelTests(unittest.TestCase):
 
 class AssembleTests(unittest.TestCase):
     def make_target(self, source, name, spec, label, binary_bytes=b'host', smoke_status='passed',
-                    version='aelix-studio-host 0.2.2', binary_name=None):
+                    version='aelix-studio-host 0.2.2', binary_name=None, archive_filename=None):
         directory = source / ('release-' + name)
         directory.mkdir(parents=True)
         binary = binary_name or POLICY['binary'] + ('.exe' if name.startswith('win32-') else '')
@@ -146,7 +158,7 @@ class AssembleTests(unittest.TestCase):
             'cargoVersion': 'cargo 1.95.0', 'rustcVersionVerbose': 'rustc 1.95.0', 'rustToolchain': '1.95.0',
             'cargoLockSha256': 'c' * 64, 'licenseSha256': 'd' * 64, 'noticeSha256': 'e' * 64,
             'policySha256': 'f' * 64, 'buildRecipeSha256': '0' * 64, 'checkoutFilesVerified': 1440,
-            'archive': build.archive_name(label, spec['rustTarget']), 'version': version,
+            'archive': archive_filename or build.archive_name(label, spec['rustTarget']), 'version': version,
         }
         (directory / 'build-receipt.json').write_text(json.dumps(receipt))
         members = [(binary, directory / binary, 0o755), ('LICENSE', ROOT / 'LICENSE', 0o644),
@@ -157,7 +169,7 @@ class AssembleTests(unittest.TestCase):
             'version': 'aelix-studio-host 0.2.2'}))
         return directory
 
-    def assemble(self, source, output, label='host-v0.2.2-aelix.1'):
+    def assemble(self, source, output, label='host-v0.2.2-aelix.2'):
         with mock.patch.object(provenance, 'check_upstream', return_value=3), \
                 mock.patch.object(provenance, 'workspace_version', return_value='0.2.2'):
             return provenance.assemble(label, source, output, COMMIT, {'GITHUB_RUN_ID': '42'})
@@ -166,7 +178,7 @@ class AssembleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source, output = Path(temporary) / 'in', Path(temporary) / 'out'
             for name, spec in POLICY['targets'].items():
-                self.make_target(source, name, spec, 'host-v0.2.2-aelix.1')
+                self.make_target(source, name, spec, 'host-v0.2.2-aelix.2')
             result = self.assemble(source, output)
             self.assertEqual(result['kind'], 'release')
             self.assertEqual(sorted(result['targets']), sorted(POLICY['targets']))
@@ -181,18 +193,20 @@ class AssembleTests(unittest.TestCase):
             for line in lines:
                 expected, name = line.split('  ')
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), expected)
-            self.assertIn('host-v0.2.2-aelix.1', provenance.notes(result))
+            self.assertIn('host-v0.2.2-aelix.2', provenance.notes(result))
 
     def test_refuses_a_failed_smoke_a_missing_target_or_a_tampered_archive(self):
         cases = {
             'smoke': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
-                                                     'host-v0.2.2-aelix.1', smoke_status='failed'),
+                                                     'host-v0.2.2-aelix.2', smoke_status='failed'),
             'version': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
-                                                       'host-v0.2.2-aelix.1', version='aelix-studio-host 0.2.3'),
+                                                       'host-v0.2.2-aelix.2', version='aelix-studio-host 0.2.3'),
             'legacy-binary': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
-                                                             'host-v0.2.2-aelix.1', binary_name='aioncore'),
+                                                             'host-v0.2.2-aelix.2', binary_name='aioncore'),
             'legacy-version': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
-                                                              'host-v0.2.2-aelix.1', version='aioncore 0.2.2'),
+                                                              'host-v0.2.2-aelix.2', version='aioncore 0.2.2'),
+            'legacy-archive': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
+                'host-v0.2.2-aelix.2', archive_filename='aioncore-host-v0.2.2-aelix.2-x86_64-unknown-linux-gnu.tar.gz'),
             'missing': lambda source: None,
         }
         for case, last in cases.items():
@@ -200,10 +214,11 @@ class AssembleTests(unittest.TestCase):
                 source = Path(temporary) / 'in'
                 for name, spec in POLICY['targets'].items():
                     if name != 'linux-x64':
-                        self.make_target(source, name, spec, 'host-v0.2.2-aelix.1')
+                        self.make_target(source, name, spec, 'host-v0.2.2-aelix.2')
                 last(source)
                 identity_errors = {
                     'legacy-binary': 'linux-x64: build receipt binary',
+                    'legacy-archive': 'linux-x64: build receipt archive',
                     'legacy-version': 'linux-x64: binary version is not aelix-studio-host 0.2.2',
                 }
                 if case in identity_errors:
@@ -215,7 +230,7 @@ class AssembleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / 'in'
             for name, spec in POLICY['targets'].items():
-                directory = self.make_target(source, name, spec, 'host-v0.2.2-aelix.1')
+                directory = self.make_target(source, name, spec, 'host-v0.2.2-aelix.2')
             receipt = json.loads((directory / 'build-receipt.json').read_text())
             receipt['binarySha256'] = '1' * 64
             (directory / 'build-receipt.json').write_text(json.dumps(receipt))

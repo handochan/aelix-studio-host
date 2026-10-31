@@ -1,4 +1,4 @@
-//! Top-level agent-readable capability index for the `aioncore` binary.
+//! Top-level agent-readable capability index for the `aelix-studio-host` binary.
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -28,7 +28,7 @@ fn data() -> Value {
         "contract": "agent-facing-aioncore-cli",
         "stability": "stable",
         "entrypoint": "aelix-studio-host capabilities",
-        "purpose": "Top-level index for agent-facing AionCore CLI domains.",
+        "purpose": "Top-level index for agent-facing Aelix Studio host CLI domains.",
         "output": {
             "stdout": "JSON envelope",
             "stderr": "single stable ..._FAILED error line when output cannot be written",
@@ -64,7 +64,7 @@ fn data() -> Value {
             {
                 "name": "config",
                 "mode": "read-write",
-                "description": "Manage AionUi configuration: assistants, assistant rules, skills, MCP servers, providers, settings, agents, and scheduled tasks.",
+                "description": "Manage Aelix Studio configuration: assistants, assistant rules, skills, MCP servers, providers, settings, agents, and scheduled tasks.",
                 "contract": "agent-facing-config-cli",
                 "contract_command": "config capabilities",
                 "invocation": "aelix-studio-host config capabilities",
@@ -78,7 +78,7 @@ fn data() -> Value {
             {
                 "name": "diagnose",
                 "mode": "read-only",
-                "description": "Diagnose a running AionUi installation: backend health, conversations, provider health, MCP, cron, teams, logs, and controlled GET reads.",
+                "description": "Diagnose a running Aelix Studio installation: backend health, conversations, provider health, MCP, cron, teams, logs, and controlled GET reads.",
                 "contract": "agent-facing-diagnose-cli",
                 "contract_command": "diagnose capabilities",
                 "invocation": "aelix-studio-host diagnose capabilities",

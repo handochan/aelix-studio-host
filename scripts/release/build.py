@@ -1,4 +1,4 @@
-"""Build, check and package one aioncore release target with a build receipt.
+"""Build, check and package one Aelix Studio host release target with a build receipt.
 
 Adapted from Aelix Studio's scripts/studio-preview/host-recovery/build.py.
 Studio built a pinned upstream archive plus a patch; this repository *is* the
@@ -85,12 +85,17 @@ def native_target():
     return str(system) + '-' + str(architecture)
 
 
-def archive_name(label, rust_target):
-    """Release asset name; matches Studio's `aioncore-${tag}-${rust-target}` resolver."""
-    if not LABEL_PATTERN.match(label):
+def asset_label(label):
+    """Strip the release tag's host-v prefix; preserve dryrun/custom labels."""
+    if not LABEL_PATTERN.fullmatch(label):
         raise ValueError('Unsafe release label: ' + label)
+    return label.removeprefix('host-v')
+
+
+def archive_name(label, rust_target):
+    """Aelix Studio host asset name, independent of the release tag prefix."""
     extension = '.zip' if 'windows' in rust_target else '.tar.gz'
-    return 'aioncore-' + label + '-' + rust_target + extension
+    return 'aelix-studio-host-' + asset_label(label) + '-' + rust_target + extension
 
 
 def write_archive(destination, members, epoch):
