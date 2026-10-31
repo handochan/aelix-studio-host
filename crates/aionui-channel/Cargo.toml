@@ -2,6 +2,7 @@
 name = "aionui-channel"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [features]
 default = []

@@ -2,6 +2,7 @@
 name = "aionui-auth"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 async-trait = { workspace = true }

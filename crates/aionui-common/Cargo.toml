@@ -2,6 +2,7 @@
 name = "aionui-common"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 thiserror.workspace = true

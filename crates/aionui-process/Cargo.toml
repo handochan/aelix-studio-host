@@ -2,6 +2,7 @@
 name = "aionui-process"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 # Self-contained subprocess mechanism (feature 001). Foundation layer:
 # depends ONLY on aionui-common + aionui-runtime. Manages ONLY the processes

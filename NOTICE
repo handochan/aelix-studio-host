@@ -1,0 +1,10 @@
+Aelix Studio host
+https://github.com/handochan/aelix-studio-host
+
+This is a modified version of AionCore (https://github.com/iOfficeAI/AionCore).
+The LICENSE file is the license text distributed with the upstream repository.
+
+Changes made for Aelix Studio are recorded as commits on top of the upstream
+base named in scripts/release/policy.json. Each release's provenance file names
+that upstream base commit and the release commit. The README lists the
+categories of modification.
