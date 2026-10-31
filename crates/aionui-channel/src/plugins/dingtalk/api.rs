@@ -163,7 +163,7 @@ impl DingtalkApi {
                     topic: "/v1.0/card/instances/callback".into(),
                 },
             ],
-            ua: Some("aioncore".into()),
+            ua: Some("aelix-studio-host".into()),
         };
 
         let raw_resp = self

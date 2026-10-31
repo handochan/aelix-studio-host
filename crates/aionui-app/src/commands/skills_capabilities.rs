@@ -1,4 +1,4 @@
-//! Self-describing contract for `aioncore skills`.
+//! Self-describing contract for `aelix-studio-host skills`.
 //!
 //! Static data touching no conversation state, so it works with no runtime env
 //! at all — which matters because this is the command an agent runs first to
@@ -11,7 +11,7 @@ pub(crate) fn data() -> Value {
         "schema_version": 1,
         "contract": "agent-facing-skills-cli",
         "stability": "stable",
-        "entrypoint": "aioncore skills capabilities",
+        "entrypoint": "aelix-studio-host skills capabilities",
         "purpose": "Read the skills enabled in THIS conversation: list them, get a skill's \
                     full body plus its absolute directory, and read its supplementary files.",
         "relationship_to_config_skills": "Distinct domain. `config skills *` is the read-write \
@@ -40,14 +40,14 @@ pub(crate) fn data() -> Value {
         "commands": [
             {
                 "name": "list",
-                "invocation": "aioncore skills list",
+                "invocation": "aelix-studio-host skills list",
                 "stdin": {},
                 "returns": { "skills": [{ "name": "string", "description": "string" }] },
                 "notes": "Only the skills this conversation enabled. Sorted by name."
             },
             {
                 "name": "show",
-                "invocation": "aioncore skills show",
+                "invocation": "aelix-studio-host skills show",
                 "stdin": { "name": "string (required)" },
                 "returns": { "name": "string", "body": "string", "path": "absolute directory" },
                 "notes": "`body` has the frontmatter stripped and is identical to what the \
@@ -56,7 +56,7 @@ pub(crate) fn data() -> Value {
             },
             {
                 "name": "cat",
-                "invocation": "aioncore skills cat",
+                "invocation": "aelix-studio-host skills cat",
                 "stdin": { "path": "string (required), of the form <skill-name>/<relative-path>" },
                 "returns": { "name": "string", "path": "string", "content": "string" },
                 "notes": "Reads a supplementary file such as references/notes.md. Confined to \

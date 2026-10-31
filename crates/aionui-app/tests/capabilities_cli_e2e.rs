@@ -1,9 +1,9 @@
-//! E2E coverage for the top-level agent-facing `aioncore capabilities` index.
+//! E2E coverage for the top-level agent-facing `aelix-studio-host capabilities` index.
 
 use tokio::process::Command;
 
 fn aioncore_command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_aioncore"))
+    Command::new(env!("CARGO_BIN_EXE_aelix-studio-host"))
 }
 
 #[tokio::test]
@@ -34,7 +34,7 @@ async fn top_level_capabilities_prints_domain_index_without_runtime_env() {
     assert_eq!(stdout["success"], true);
     assert_eq!(stdout["meta"]["schema_version"], 1);
     assert_eq!(stdout["data"]["contract"], "agent-facing-aioncore-cli");
-    assert_eq!(stdout["data"]["entrypoint"], "aioncore capabilities");
+    assert_eq!(stdout["data"]["entrypoint"], "aelix-studio-host capabilities");
     assert_eq!(stdout["data"]["runtime_context"]["primary"], "AIONUI_CONVERSATION_ID");
 
     let domains = stdout["data"]["domains"]
@@ -46,7 +46,7 @@ async fn top_level_capabilities_prints_domain_index_without_runtime_env() {
         .expect("config domain should be advertised");
     assert_eq!(config["mode"], "read-write");
     assert_eq!(config["contract_command"], "config capabilities");
-    assert_eq!(config["invocation"], "aioncore config capabilities");
+    assert_eq!(config["invocation"], "aelix-studio-host config capabilities");
 
     let diagnose = domains
         .iter()
@@ -54,7 +54,7 @@ async fn top_level_capabilities_prints_domain_index_without_runtime_env() {
         .expect("diagnose domain should be advertised");
     assert_eq!(diagnose["mode"], "read-only");
     assert_eq!(diagnose["contract_command"], "diagnose capabilities");
-    assert_eq!(diagnose["invocation"], "aioncore diagnose capabilities");
+    assert_eq!(diagnose["invocation"], "aelix-studio-host diagnose capabilities");
 
     let session = domains
         .iter()
@@ -62,7 +62,7 @@ async fn top_level_capabilities_prints_domain_index_without_runtime_env() {
         .expect("session domain should be advertised");
     assert_eq!(session["mode"], "cross-session-messaging");
     assert_eq!(session["contract_command"], "session capabilities");
-    assert_eq!(session["invocation"], "aioncore session capabilities");
+    assert_eq!(session["invocation"], "aelix-studio-host session capabilities");
     // `session capabilities` is reachable with the feature switched off and
     // without a runtime token, so the index must not claim otherwise.
     assert_eq!(

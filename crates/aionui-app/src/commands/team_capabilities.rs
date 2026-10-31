@@ -49,7 +49,9 @@ pub(crate) fn data() -> Value {
 }
 
 pub(crate) fn help_markdown() -> String {
-    let mut text = String::from("# AionCore Team CLI\n\nUse `aioncore team capabilities` for exact schemas.\n\n");
+    let mut text = String::from(
+        "# Aelix Studio host Team CLI\n\nUse `aelix-studio-host team capabilities` for exact schemas.\n\n",
+    );
     for tool in team_tool_descriptors() {
         let command = tool.cli_command.join(" ");
         let permission = if tool.lead_only() {
@@ -58,7 +60,7 @@ pub(crate) fn help_markdown() -> String {
             "any team agent"
         };
         text.push_str(&format!(
-            "- `aioncore team {command}` -> `{}` ({permission}): {}\n",
+            "- `aelix-studio-host team {command}` -> `{}` ({permission}): {}\n",
             tool.name, tool.input_summary
         ));
     }

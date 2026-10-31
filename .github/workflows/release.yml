@@ -1,6 +1,6 @@
 name: Release
 
-# Builds the five aioncore release targets, runs the host smoke on each
+# Builds the five Aelix Studio host release targets, runs the host smoke on each
 # target's own runner, and assembles checksums and provenance.
 #
 # This workflow publishes a GitHub release only for a pushed tag matching
@@ -109,8 +109,8 @@ jobs:
             --output "dist/release-${TARGET}" --target-dir "${RUNNER_TEMP}/cargo-target" "${cargo_args[@]}"
       - name: Host smoke
         run: |
-          binary=aioncore
-          if [[ "${TARGET}" == win32-* ]]; then binary=aioncore.exe; fi
+          binary=aelix-studio-host
+          if [[ "${TARGET}" == win32-* ]]; then binary=aelix-studio-host.exe; fi
           "${PYTHON}" -I -B scripts/release/smoke.py --binary "dist/release-${TARGET}/${binary}" \
             --report "dist/release-${TARGET}/smoke.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -120,7 +120,7 @@ jobs:
           path: |
             dist/release-${{ matrix.target }}/build-receipt.json
             dist/release-${{ matrix.target }}/smoke.json
-            dist/release-${{ matrix.target }}/aioncore-*
+            dist/release-${{ matrix.target }}/aelix-studio-host-*
           if-no-files-found: error
           retention-days: 30
 
@@ -142,7 +142,7 @@ jobs:
         run: |
           python3 -I -B scripts/release/provenance.py assemble --label "${LABEL}" \
             --input "${RUNNER_TEMP}/targets" --output dist/assets --notes dist/release-notes.md
-          (cd dist/assets && sha256sum -c aioncore-checksums.txt)
+          (cd dist/assets && sha256sum -c aelix-studio-host-checksums.txt)
           cat dist/release-notes.md >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -169,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.label }}
         run: |
-          (cd dist/assets && sha256sum -c aioncore-checksums.txt)
+          (cd dist/assets && sha256sum -c aelix-studio-host-checksums.txt)
           # This step refuses an existing release and never replaces its assets.
           gh release create "${TAG}" dist/assets/* --repo "${GITHUB_REPOSITORY}" --verify-tag \
             --title "${TAG}" --notes-file dist/release-notes.md --latest

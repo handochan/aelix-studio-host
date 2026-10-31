@@ -1,4 +1,4 @@
-//! CLI argument definitions for the `aioncore` binary.
+//! CLI argument definitions for the `aelix-studio-host` binary.
 //!
 //! Kept separate from `main.rs` to isolate the clap surface (struct + enum +
 //! attribute soup) from the runtime entry point. Visibility is `pub(crate)`
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "aioncore", about = "AionUi Backend Server", version)]
+#[command(name = "aelix-studio-host", about = "Aelix Studio host", version)]
 pub(crate) struct Cli {
     /// Host address to listen on.
     #[arg(long, default_value_t = String::from(aionui_common::constants::DEFAULT_HOST))]
@@ -108,9 +108,9 @@ impl From<ManagedResourcesModeArg> for aionui_runtime::ManagedResourcesMode {
 pub(crate) enum Command {
     /// Print the top-level agent-facing CLI capability index.
     Capabilities,
-    /// Agent-facing automation CLI for AionUi configuration.
+    /// Agent-facing automation CLI for Aelix Studio host configuration.
     Config(ConfigArgs),
-    /// Agent-facing read-only troubleshooting CLI for AionUi diagnosis.
+    /// Agent-facing read-only troubleshooting CLI for Aelix Studio host diagnosis.
     Diagnose(DiagnoseArgs),
     /// Agent-facing Team collaboration CLI fallback.
     Team(TeamArgs),
@@ -125,7 +125,7 @@ pub(crate) enum Command {
     /// `[LOAD_SKILL]` text-protocol round trip.
     Skills(SkillsArgs),
     /// PreToolUse permission gate for the Antigravity CLI (spawned by agy).
-    /// Reads the tool request on stdin, asks the running AionUi backend, and
+    /// Reads the tool request on stdin, asks the running Aelix Studio host, and
     /// writes agy's decision to stdout.
     AntigravityHook,
     /// Stdio ↔ TCP bridge for the team MCP server (spawned by the ACP agent CLI).
@@ -285,7 +285,7 @@ pub(crate) enum SkillsCommand {
     /// Takes no positional arguments. The skill name is read from stdin as a JSON
     /// object:
     ///
-    /// {n}  printf '%s' '{"name":"mermaid"}' | aioncore skills show
+    /// {n}  printf '%s' '{"name":"mermaid"}' | aelix-studio-host skills show
     #[command(verbatim_doc_comment)]
     Show,
     /// Read one of a skill's supplementary files.
@@ -293,7 +293,7 @@ pub(crate) enum SkillsCommand {
     /// Takes no positional arguments. The path is read from stdin as a JSON
     /// object, and must be `<skill-name>/<relative-path>`:
     ///
-    /// {n}  printf '%s' '{"path":"mermaid/references/syntax.md"}' | aioncore skills cat
+    /// {n}  printf '%s' '{"path":"mermaid/references/syntax.md"}' | aelix-studio-host skills cat
     #[command(verbatim_doc_comment)]
     Cat,
     #[command(external_subcommand)]
@@ -320,7 +320,7 @@ pub(crate) enum DiagnoseCommand {
     Cron(DiagnoseCronArgs),
     /// Inspect team summary.
     Teams(DiagnoseTeamsArgs),
-    /// Read aioncore logs.
+    /// Read aelix-studio-host logs.
     Logs(DiagnoseLogsArgs),
     /// Controlled HTTP read escape hatch.
     Http(DiagnoseHttpArgs),
@@ -400,7 +400,7 @@ pub(crate) enum ConfigCommand {
     Conversation(ConfigConversationArgs),
     /// Manage assistants and assistant-owned behavior.
     Assistants(ConfigAssistantsArgs),
-    /// Manage AionUi skills.
+    /// Manage Aelix Studio skills.
     Skills(ConfigSkillsArgs),
     /// Manage MCP servers and OAuth state.
     Mcp(ConfigMcpArgs),
@@ -702,7 +702,7 @@ pub(crate) enum ConfigConversationCommand {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct PrepareManagedResourcesArgs {
-    /// Bundle output root. Aioncore writes the managed resources under
+    /// Bundle output root. Aelix Studio host writes the managed resources under
     /// `<bundle-out>/{node,acp}/...` for packaging.
     #[arg(long)]
     pub bundle_out: PathBuf,
@@ -759,7 +759,7 @@ pub(crate) struct SetPasswordArgs {
 
     /// Read the new password from stdin (one line) instead of prompting
     /// interactively. Use for scripted/containerized bootstrap:
-    /// `echo "$PW" | aioncore user set-password --password-stdin`.
+    /// `echo "$PW" | aelix-studio-host user set-password --password-stdin`.
     #[arg(long)]
     pub password_stdin: bool,
 }
@@ -774,7 +774,7 @@ pub(crate) struct CreateUserArgs {
 
     /// Read the new password from stdin (one line) instead of prompting
     /// interactively. Use for scripted/containerized bootstrap:
-    /// `echo "$PW" | aioncore user create --username alice --password-stdin`.
+    /// `echo "$PW" | aelix-studio-host user create --username alice --password-stdin`.
     #[arg(long)]
     pub password_stdin: bool,
 }
@@ -818,7 +818,7 @@ pub(crate) struct GenerateArgs {
 pub(crate) struct SetSecretArgs {
     /// Read the secret from stdin (one line) instead of prompting
     /// interactively. Use for scripted bootstrap:
-    /// `echo "$AIONUI_ENCRYPTION_SECRET" | aioncore secret set --secret-stdin`.
+    /// `echo "$AIONUI_ENCRYPTION_SECRET" | aelix-studio-host secret set --secret-stdin`.
     #[arg(long)]
     pub secret_stdin: bool,
 
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn long_version_flag_uses_workspace_package_version() {
-        let result = Cli::try_parse_from(["aioncore", "--version"]);
+        let result = Cli::try_parse_from(["aelix-studio-host", "--version"]);
         let err = match result {
             Ok(_) => panic!("expected --version to exit through clap DisplayVersion"),
             Err(err) => err,
@@ -853,7 +853,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         let rendered = err.to_string();
         assert!(
-            rendered.contains("aioncore"),
+            rendered.contains("aelix-studio-host"),
             "version output should contain binary name, got: {rendered:?}"
         );
         assert!(
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn short_version_flag_uses_workspace_package_version() {
-        let result = Cli::try_parse_from(["aioncore", "-V"]);
+        let result = Cli::try_parse_from(["aelix-studio-host", "-V"]);
         let err = match result {
             Ok(_) => panic!("expected -V to exit through clap DisplayVersion"),
             Err(err) => err,
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         let rendered = err.to_string();
         assert!(
-            rendered.contains("aioncore"),
+            rendered.contains("aelix-studio-host"),
             "version output should contain binary name, got: {rendered:?}"
         );
         assert!(
@@ -1378,7 +1378,7 @@ mod tests {
         }
     }
 
-    /// Every `aioncore skills …` command line the injected skills index teaches an
+    /// Every `aelix-studio-host skills …` command line the injected skills index teaches an
     /// agent must actually parse.
     ///
     /// This pins two crates together. The index text lives in `aionui-ai-agent`
@@ -1410,7 +1410,7 @@ mod tests {
             let parsed = Cli::try_parse_from(std::iter::once("aioncore").chain(argv.iter().copied()));
             assert!(
                 parsed.is_ok(),
-                "the skills index teaches `aioncore {}`, which the CLI rejects: {}",
+                "the skills index teaches `aelix-studio-host {}`, which the CLI rejects: {}",
                 argv.join(" "),
                 parsed.err().map(|e| e.to_string()).unwrap_or_default()
             );

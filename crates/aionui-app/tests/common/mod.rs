@@ -115,12 +115,14 @@ pub async fn build_app_with_file_roots(allowed_roots: Vec<std::path::PathBuf>) -
 pub async fn build_app_with_mock_version(
     current_version: &str,
     mock_server: &MockServer,
+    enabled: bool,
 ) -> (axum::Router, AppServices) {
     let db = aionui_db::init_database_memory().await.unwrap();
     let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await.expect("build module states");
     states.system.version_check_service =
-        VersionCheckService::with_api_base(reqwest::Client::new(), current_version.to_owned(), mock_server.uri());
+        VersionCheckService::with_api_base(reqwest::Client::new(), current_version.to_owned(), mock_server.uri())
+            .with_update_checks_enabled(enabled);
     let router = create_router_with_states(&services, states);
     (router, services)
 }

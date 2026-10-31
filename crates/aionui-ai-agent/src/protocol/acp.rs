@@ -76,10 +76,9 @@ const CONFIG_RPC_TIMEOUT_SECS: u64 = 10;
 
 /// Client identity reported in the ACP `initialize` handshake (`clientInfo`).
 ///
-/// Some agents forward these fields downstream as client metadata — e.g. Mistral
-/// Vibe passes them to the Mistral API as `client_name`/`client_version`, which the
-/// API rejects when empty. Always send non-empty values (see issue #3326).
-const ACP_CLIENT_NAME: &str = "AionUi";
+/// Implementation metadata, with a programmatic name and version.
+/// Verified: agent-client-protocol-schema-1.5.0/src/v1/agent.rs (`Implementation`).
+const ACP_CLIENT_NAME: &str = "aelix-studio-host";
 const ACP_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,9 +89,7 @@ enum AcpConnectionPhase {
     ShuttingDown,
 }
 
-/// Build the ACP `initialize` request, always populating `clientInfo` with a
-/// non-empty name and version so downstream agents that require client metadata
-/// (e.g. Mistral Vibe) accept the request. See issue #3326.
+/// Build the ACP `initialize` request with this host's implementation metadata.
 fn build_initialize_request() -> InitializeRequest {
     // Advertised client services:
     // - terminal: full `terminal/*` suite backed by TerminalRegistry —
@@ -1484,18 +1481,17 @@ mod tests {
 
     #[test]
     fn initialize_request_sends_non_empty_client_info() {
-        // Regression test for #3326: agents like Mistral Vibe forward clientInfo
-        // downstream as client_name/client_version and reject empty values.
+        // Serialize the host identity using the canonical ACP Implementation fields.
         let req = build_initialize_request();
 
         let client_info = req.client_info.as_ref().expect("clientInfo must be present");
-        assert_eq!(client_info.name, "AionUi");
+        assert_eq!(client_info.name, "aelix-studio-host");
         assert!(!client_info.name.is_empty(), "client name must not be empty");
         assert!(!client_info.version.is_empty(), "client version must not be empty");
 
         // The serialized handshake must carry non-empty camelCase clientInfo fields.
         let json = serde_json::to_value(&req).expect("request serializes");
-        assert_eq!(json["clientInfo"]["name"], "AionUi");
+        assert_eq!(json["clientInfo"]["name"], "aelix-studio-host");
         assert_ne!(json["clientInfo"]["version"], "");
     }
 
