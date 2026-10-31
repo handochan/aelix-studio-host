@@ -12,6 +12,133 @@ fn make_session() -> AcpSession {
     AcpSession::new(Some(ModeId::new("default")), None, HashMap::new())
 }
 
+fn restored_permission_modes(current: &str) -> SessionModeState {
+    SessionModeState::new(
+        current.to_owned(),
+        vec![SessionMode::new("default", "Ask"), SessionMode::new("yolo", "Yolo")],
+    )
+}
+
+#[test]
+fn resumed_permission_does_not_replay_stale_yolo_or_mode_seed() {
+    let mut session = AcpSession::new(
+        Some(ModeId::new("yolo")),
+        None,
+        HashMap::from([(ConfigKey::new("mode"), ConfigValue::new("yolo"))]),
+    );
+    session.seed_pending_startup_config(SessionConfigOptionCategory::Mode, ConfigValue::new("yolo"));
+    session.apply_advertised_modes(restored_permission_modes("yolo"));
+    session.apply_restored_configuration(Some(restored_permission_modes("default")), None);
+    session.resolve_pending_startup_config_seeds();
+    assert_eq!(session.modes().unwrap().current_mode_id.to_string(), "default");
+    assert!(session.plan_reconcile().is_empty());
+}
+
+#[test]
+fn resumed_generic_permission_uses_reported_current_value() {
+    let mut session = AcpSession::new(
+        Some(ModeId::new("yolo")),
+        None,
+        HashMap::from([(ConfigKey::new("permissionLevel"), ConfigValue::new("yolo"))]),
+    );
+    session.seed_pending_startup_config(SessionConfigOptionCategory::Mode, ConfigValue::new("yolo"));
+    let option = SessionConfigOption::select(
+        "permissionLevel",
+        "Permission",
+        "default",
+        vec![
+            SessionConfigSelectOption::new("default", "Ask"),
+            SessionConfigSelectOption::new("yolo", "Yolo"),
+        ],
+    )
+    .category(SessionConfigOptionCategory::Mode);
+    session.apply_restored_configuration(Some(restored_permission_modes("yolo")), Some(vec![option]));
+    session.resolve_pending_startup_config_seeds();
+    assert_eq!(session.modes().unwrap().current_mode_id.to_string(), "default");
+    assert!(session.plan_reconcile().is_empty());
+}
+
+#[test]
+fn resumed_permission_preserves_model_and_thought_intent() {
+    let mut session = AcpSession::new(
+        Some(ModeId::new("yolo")),
+        Some(ModelId::new("next-model")),
+        HashMap::from([(ConfigKey::new("reasoning_effort"), ConfigValue::new("high"))]),
+    );
+    session.seed_pending_startup_config(SessionConfigOptionCategory::ThoughtLevel, ConfigValue::new("high"));
+    session.apply_restored_configuration(Some(restored_permission_modes("default")), None);
+    assert_eq!(session.desired_model(), Some("next-model"));
+    assert_eq!(
+        session
+            .desired_config_selections()
+            .get(&ConfigKey::new("reasoning_effort")),
+        Some(&ConfigValue::new("high"))
+    );
+    assert_eq!(session.desired.pending_startup_config.len(), 1);
+}
+
+#[test]
+fn resumed_legacy_mode_wins_over_cached_generic_mode_with_partial_config() {
+    let mut session = AcpSession::new(Some(ModeId::new("yolo")), None, HashMap::new());
+    session.apply_advertised_config_options(vec![
+        SessionConfigOption::select(
+            "permissionLevel",
+            "Permission",
+            "yolo",
+            vec![
+                SessionConfigSelectOption::new("default", "Ask"),
+                SessionConfigSelectOption::new("yolo", "Yolo"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Mode),
+    ]);
+    session.apply_restored_configuration(
+        Some(restored_permission_modes("default")),
+        Some(vec![
+            SessionConfigOption::select(
+                "reasoning_effort",
+                "Reasoning",
+                "low",
+                vec![SessionConfigSelectOption::new("low", "Low")],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ]),
+    );
+    assert_eq!(session.modes().unwrap().current_mode_id.to_string(), "default");
+    assert!(session.plan_reconcile().is_empty());
+    let persisted_config = session
+        .drain_events()
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            AcpSessionEvent::ObservedConfigSynced { selections } => Some(selections),
+            _ => None,
+        })
+        .expect("final observed config must be persisted");
+    assert!(!persisted_config.contains_key(&ConfigKey::new("permissionLevel")));
+}
+
+#[test]
+fn resumed_without_reported_mode_preserves_unresolved_intent() {
+    let mut session = AcpSession::new(Some(ModeId::new("yolo")), None, HashMap::new());
+    session.apply_restored_configuration(None, None);
+    assert_eq!(session.desired_mode(), Some("yolo"));
+    assert!(session.modes().is_none());
+}
+
+#[test]
+fn resumed_policy_still_allows_a_later_explicit_yolo_selection() {
+    let mut session = AcpSession::new(Some(ModeId::new("yolo")), None, HashMap::new());
+    session.apply_restored_configuration(Some(restored_permission_modes("default")), None);
+    assert!(session.set_desired_mode(ModeId::new("yolo")));
+    assert_eq!(
+        session.plan_reconcile(),
+        vec![ReconcileAction::SetMode {
+            mode: ModeId::new("yolo")
+        }]
+    );
+}
+
 #[test]
 fn assign_session_id_emits_event() {
     let mut session = make_session();

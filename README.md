@@ -58,10 +58,17 @@ Categories so far:
   `.release-please-manifest.json`, `Cross.toml` and `CHANGELOG.md` are kept
   unchanged but are not used by this repository's workflows.
 - Crate manifests: `publish = false` on all workspace crates.
+- Permission recovery: ordinary session loading adopts the returned permission
+  mode/configuration and clears stale permission intent, startup seeds and raw
+  selections before reconciliation. Model/thought preferences and later explicit
+  permission choices are retained. This ports the three-file recovery patch from
+  [Studio PR #18](https://github.com/handochan/aelix-studio/pull/18) into source,
+  with unit and synthetic stdio/SQLite/process-rebuild regression tests
+  ([#3](https://github.com/handochan/aelix-studio-host/issues/3)).
 
-Host behavior changes for Aelix Studio (for example identity and network
-defaults, permission recovery, session synchronization) land as separate,
-reviewed commits and are listed here when they do.
+Further host behavior changes for Aelix Studio (for example identity and network
+defaults and session synchronization) land as separate, reviewed commits and are
+listed here when they do.
 
 ## Releases
 

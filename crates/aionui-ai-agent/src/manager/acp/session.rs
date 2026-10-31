@@ -668,6 +668,91 @@ impl AcpSession {
         }
     }
 
+    /// Adopt state explicitly returned by session/load, without replaying an
+    /// older startup permission preference over the restored agent policy.
+    /// Fresh sessions and subsequent explicit user changes still reconcile.
+    pub(crate) fn apply_restored_configuration(
+        &mut self,
+        modes: Option<SessionModeState>,
+        options: Option<Vec<SessionConfigOption>>,
+    ) {
+        let is_mode = |option: &SessionConfigOption| {
+            option.category == Some(SessionConfigOptionCategory::Mode)
+                || matches!(option.id.to_string().as_str(), "mode" | "modes")
+        };
+        let incoming_mode_values: HashMap<ConfigKey, ConfigValue> = options
+            .iter()
+            .flatten()
+            .filter(|option| is_mode(option))
+            .filter_map(|option| {
+                extract_config_current_value(&option.kind)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| (ConfigKey::new(option.id.to_string()), ConfigValue::new(value)))
+            })
+            .collect();
+        let reported_mode = options
+            .as_deref()
+            .and_then(|options| select_option_for_startup_seed(options, &SessionConfigOptionCategory::Mode))
+            .and_then(|option| extract_config_current_value(&option.kind))
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                modes
+                    .as_ref()
+                    .map(|modes| modes.current_mode_id.to_string())
+                    .filter(|value| !value.is_empty())
+            });
+
+        if let Some(options) = options {
+            self.apply_advertised_config_options(options);
+        }
+        if incoming_mode_values.is_empty()
+            && let Some(modes) = modes
+        {
+            // A cached generic mode option must not supersede a fresh legacy
+            // mode when load returned only model/thought config options.
+            self.apply_advertised_modes(modes);
+        }
+        let Some(reported_mode) = reported_mode else {
+            return; // No reported policy: do not invent one from a DB seed.
+        };
+
+        let mut mode_keys = vec![ConfigKey::new("mode"), ConfigKey::new("modes")];
+        if let Some(options) = &mut self.advertised.config_options {
+            mode_keys.extend(
+                options
+                    .iter()
+                    .filter(|option| is_mode(option))
+                    .map(|option| ConfigKey::new(option.id.to_string())),
+            );
+            options.retain(|option| {
+                !is_mode(option) || incoming_mode_values.contains_key(&ConfigKey::new(option.id.to_string()))
+            });
+        }
+        self.desired
+            .pending_startup_config
+            .retain(|seed| seed.category != SessionConfigOptionCategory::Mode);
+        let previous_config = self.desired.config_selections.clone();
+        let previous_observed_config = self.observed.config_current.clone();
+        self.desired.config_selections.retain(|key, _| !mode_keys.contains(key));
+        self.observed.config_current.retain(|key, _| !mode_keys.contains(key));
+        self.desired.config_selections.extend(incoming_mode_values.clone());
+        self.observed.config_current.extend(incoming_mode_values.clone());
+        if previous_config != self.desired.config_selections {
+            self.pending_events.push(AcpSessionEvent::DesiredConfigChanged {
+                selections: self.desired.config_selections.clone(),
+            });
+        }
+        if previous_observed_config != self.observed.config_current {
+            self.pending_events.push(AcpSessionEvent::ObservedConfigSynced {
+                selections: self.observed.config_current.clone(),
+            });
+        }
+        self.desired.mode_id = incoming_mode_values
+            .is_empty()
+            .then(|| ModeId::new(reported_mode.clone()));
+        self.apply_observed_mode(ModeId::new(reported_mode));
+    }
+
     pub fn apply_advertised_models(&mut self, models: LegacySessionModelState) {
         let incoming_model_catalog_count = models.available_models.len();
         let existing_model_catalog_count = self
