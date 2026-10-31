@@ -62,9 +62,16 @@ Categories so far:
 - Host identity: executable, CLI help/invocations and User-Agent use
   `aelix-studio-host`. Updates require explicit host opt-in and a configured
   repository (see below).
+- Permission recovery: ordinary session loading adopts the returned permission
+  mode/configuration and clears stale permission intent, startup seeds and raw
+  selections before reconciliation. Model/thought preferences and later explicit
+  permission choices are retained. This ports the three-file recovery patch from
+  [Studio PR #18](https://github.com/handochan/aelix-studio/pull/18) into source,
+  with unit and synthetic stdio/SQLite/process-rebuild regression tests
+  ([#3](https://github.com/handochan/aelix-studio-host/issues/3)).
 
-Further host changes (network defaults, permission recovery and session
-synchronization) land as separate, reviewed commits.
+Further host changes (network defaults and session synchronization) land as
+separate, reviewed commits.
 
 ## Releases
 

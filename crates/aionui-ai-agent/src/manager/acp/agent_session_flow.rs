@@ -173,12 +173,9 @@ impl AcpAgentManager {
             };
         }
 
-        let (supports_load, preloaded_mode) = {
+        let supports_load = {
             let session = self.session.read().await;
-            (
-                session.agent_capabilities().map(|c| c.load_session).unwrap_or(false),
-                session.modes().map(|m| m.current_mode_id.to_string()),
-            )
+            session.agent_capabilities().map(|c| c.load_session).unwrap_or(false)
         };
 
         if supports_load {
@@ -202,15 +199,7 @@ impl AcpAgentManager {
                 {
                     session.apply_advertised_models(models);
                 }
-                if let Some(mut modes) = load_response.modes {
-                    if let Some(db_current) = preloaded_mode {
-                        modes.current_mode_id = db_current.into();
-                    }
-                    session.apply_advertised_modes(modes);
-                }
-                if let Some(config_options) = load_response.config_options {
-                    session.apply_advertised_config_options(config_options);
-                }
+                session.apply_restored_configuration(load_response.modes, load_response.config_options);
                 session.set_session_id(DomainSessionId::new(session_id.to_owned()));
                 self.commit_session_changes(&mut session).await;
             }
