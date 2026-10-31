@@ -1,4 +1,4 @@
-//! E2E coverage for the agent-facing `aioncore team` CLI fallback.
+//! E2E coverage for the agent-facing `aelix-studio-host team` CLI fallback.
 
 use std::process::Stdio;
 
@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 fn team_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aioncore"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aelix-studio-host"));
     command.arg("team");
     command
 }

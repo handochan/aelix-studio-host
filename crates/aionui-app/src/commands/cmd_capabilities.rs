@@ -27,7 +27,7 @@ fn data() -> Value {
         "schema_version": 1,
         "contract": "agent-facing-aioncore-cli",
         "stability": "stable",
-        "entrypoint": "aioncore capabilities",
+        "entrypoint": "aelix-studio-host capabilities",
         "purpose": "Top-level index for agent-facing AionCore CLI domains.",
         "output": {
             "stdout": "JSON envelope",
@@ -67,7 +67,7 @@ fn data() -> Value {
                 "description": "Manage AionUi configuration: assistants, assistant rules, skills, MCP servers, providers, settings, agents, and scheduled tasks.",
                 "contract": "agent-facing-config-cli",
                 "contract_command": "config capabilities",
-                "invocation": "aioncore config capabilities",
+                "invocation": "aelix-studio-host config capabilities",
                 "runtime_required": ["AIONUI_BASE_URL", "AIONUI_CONVERSATION_ID", "AIONUI_USER_ID"],
                 "safety": {
                     "can_write": true,
@@ -81,7 +81,7 @@ fn data() -> Value {
                 "description": "Diagnose a running AionUi installation: backend health, conversations, provider health, MCP, cron, teams, logs, and controlled GET reads.",
                 "contract": "agent-facing-diagnose-cli",
                 "contract_command": "diagnose capabilities",
-                "invocation": "aioncore diagnose capabilities",
+                "invocation": "aelix-studio-host diagnose capabilities",
                 "runtime_required": ["AIONUI_BASE_URL", "AIONUI_CONVERSATION_ID", "AIONUI_USER_ID"],
                 "optional_runtime": ["AIONUI_LOG_DIR"],
                 "safety": {
@@ -97,7 +97,7 @@ fn data() -> Value {
                 "description": "Agent-facing Team collaboration CLI fallback for agents without MCP injection.",
                 "contract": "agent-facing-team-cli",
                 "contract_command": "team capabilities",
-                "invocation": "aioncore team capabilities",
+                "invocation": "aelix-studio-host team capabilities",
                 "runtime_required": ["AIONUI_BASE_URL", "AIONUI_CONVERSATION_ID", "AIONUI_USER_ID", "AIONUI_RUNTIME_TOKEN"],
                 "runtime_free_commands": ["team capabilities", "team help"],
                 "safety": {
@@ -112,7 +112,7 @@ fn data() -> Value {
                 "description": "Deliver a message to another one of this user's conversations, and list the conversations that can receive one.",
                 "contract": "agent-facing-session-cli",
                 "contract_command": "session capabilities",
-                "invocation": "aioncore session capabilities",
+                "invocation": "aelix-studio-host session capabilities",
                 "runtime_required": ["AIONUI_BASE_URL", "AIONUI_CONVERSATION_ID", "AIONUI_USER_ID", "AIONUI_RUNTIME_TOKEN"],
                 "runtime_free_commands": ["session capabilities"],
                 "safety": {
@@ -128,7 +128,7 @@ fn data() -> Value {
                 "description": "Create a new conversation for this user that inherits (or overrides) this conversation's workspace and assistant. Does not send, open, or switch to it.",
                 "contract": "agent-facing-conversation-cli",
                 "contract_command": "conversation capabilities",
-                "invocation": "aioncore conversation capabilities",
+                "invocation": "aelix-studio-host conversation capabilities",
                 "runtime_required": ["AIONUI_BASE_URL", "AIONUI_CONVERSATION_ID", "AIONUI_USER_ID", "AIONUI_RUNTIME_TOKEN"],
                 "runtime_free_commands": ["conversation capabilities"],
                 "safety": {
@@ -144,7 +144,7 @@ fn data() -> Value {
                 "description": "Read the skills enabled in THIS conversation: list them, get a skill's full body plus its absolute directory, and read its supplementary files.",
                 "contract": "agent-facing-skills-cli",
                 "contract_command": "skills capabilities",
-                "invocation": "aioncore skills capabilities",
+                "invocation": "aelix-studio-host skills capabilities",
                 "runtime_required": ["AIONUI_BASE_URL", "AIONUI_CONVERSATION_ID", "AIONUI_USER_ID", "AIONUI_RUNTIME_TOKEN"],
                 "runtime_free_commands": ["skills capabilities"],
                 "safety": {
@@ -242,7 +242,7 @@ mod tests {
             .collect()
     }
 
-    /// An agent that runs `aioncore capabilities` sees only what this index
+    /// An agent that runs `aelix-studio-host capabilities` sees only what this index
     /// lists. A wired subcommand missing from both buckets is invisible — the
     /// exact failure that hid `session` and `antigravity-hook` after they
     /// shipped. Classifying every subcommand is what makes the index a
@@ -308,7 +308,7 @@ mod tests {
             );
             assert_eq!(
                 entry["invocation"],
-                json!(format!("aioncore {name} capabilities")),
+                json!(format!("aelix-studio-host {name} capabilities")),
                 "`{name}` invocation should be runnable verbatim"
             );
         }

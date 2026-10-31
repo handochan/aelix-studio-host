@@ -30,7 +30,7 @@ gh project item-list 9 --owner handochan --format json --limit 100
 - One Issue, one owner, one branch/worktree. Preserve other agents' dirty work. Update the Issue/Project at start, review submission, blockage and stop/completion; hand off with SHA/PR/worktree, verification, next action and blockers.
 - One independent review from another session, then recheck affected validation. Use `needs-decision` for product/compatibility/release choices and `blocked` for unmet dependencies. Done requires actual acceptance evidence; a host PR alone does not complete a cross-repository feature.
 - Fix behavior in the layer that owns it: execution/session rules in aelix-ai, protocol translation in aelix-acp (standard ACP first), UI in the Studio renderer, host behavior (DB, session loading, processes, network access) here. Do not copy native semantics into the host.
-- Changes are ordinary reviewed commits with tests, never patch files. Keep internal crate, module, binary, DB and API names as upstream named them.
+- Changes are ordinary reviewed commits with tests, never patch files. Keep internal crate, module, DB and API names as upstream named them.
 - Generic bug fixes may be proposed upstream only with the user's approval; releases never wait for upstream.
 
 ### Push, tags and releases

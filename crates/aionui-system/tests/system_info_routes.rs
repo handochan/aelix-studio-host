@@ -14,7 +14,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use aionui_db::{
@@ -60,7 +60,8 @@ async fn setup() -> axum::Router {
 async fn setup_with_mock(current_version: &str, mock_server: &MockServer) -> axum::Router {
     let db = init_database_memory().await.unwrap();
     let http_client = reqwest::Client::new();
-    let vcs = VersionCheckService::with_api_base(http_client, current_version.to_owned(), mock_server.uri());
+    let vcs = VersionCheckService::with_api_base(http_client, current_version.to_owned(), mock_server.uri())
+        .with_update_checks_enabled(true);
     let state = build_state(&db, vcs);
     system_routes(state)
 }
@@ -166,9 +167,54 @@ async fn test_system_info_snake_case_keys() {
 // ===========================================================================
 
 #[tokio::test]
+async fn test_check_update_disabled_even_with_explicit_repo_sends_no_requests() {
+    let mock_server = MockServer::start().await;
+    let db = init_database_memory().await.unwrap();
+    let service = VersionCheckService::with_api_base(reqwest::Client::new(), "1.0.0".into(), mock_server.uri())
+        .with_update_checks_enabled(false);
+    let app = system_routes(build_state(&db, service));
+    for body in [json!({}), json!({"repo": "iOfficeAI/AionUi"})] {
+        let resp = app
+            .clone()
+            .oneshot(json_request("POST", "/api/system/check-update", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["code"], "BAD_REQUEST");
+        assert_eq!(
+            body["error"],
+            "Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them"
+        );
+    }
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_check_update_rejects_invalid_request_before_network() {
+    let mock_server = MockServer::start().await;
+    let app = setup_with_mock("1.0.0", &mock_server).await;
+    let resp = app
+        .oneshot(json_request("POST", "/api/system/check-update", json!({"repo": 42})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["success"], false);
+    assert_eq!(body["code"], "BAD_REQUEST");
+    assert_eq!(body["error"], "Invalid JSON request body.");
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_check_update_has_new_version() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release(
@@ -187,7 +233,11 @@ async fn test_check_update_has_new_version() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -207,6 +257,10 @@ async fn test_check_update_has_new_version() {
 async fn test_check_update_no_update_available() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release("v1.0.0", false, false, vec![]),
@@ -217,7 +271,11 @@ async fn test_check_update_no_update_available() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -231,6 +289,10 @@ async fn test_check_update_no_update_available() {
 async fn test_check_update_skips_draft() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release("v5.0.0", true, false, vec![]), // draft — skip
@@ -241,7 +303,11 @@ async fn test_check_update_skips_draft() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -255,6 +321,10 @@ async fn test_check_update_skips_draft() {
 async fn test_check_update_skips_prerelease_by_default() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release("v3.0.0-beta.1", false, true, vec![]),
@@ -268,7 +338,7 @@ async fn test_check_update_skips_prerelease_by_default() {
         .oneshot(json_request(
             "POST",
             "/api/system/check-update",
-            json!({"include_prerelease": false}),
+            json!({"repo": "iOfficeAI/AionUi", "include_prerelease": false}),
         ))
         .await
         .unwrap();
@@ -282,6 +352,10 @@ async fn test_check_update_skips_prerelease_by_default() {
 async fn test_check_update_includes_prerelease_when_requested() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release("v3.0.0-beta.1", false, true, vec![]),
@@ -295,7 +369,7 @@ async fn test_check_update_includes_prerelease_when_requested() {
         .oneshot(json_request(
             "POST",
             "/api/system/check-update",
-            json!({"include_prerelease": true}),
+            json!({"repo": "iOfficeAI/AionUi", "include_prerelease": true}),
         ))
         .await
         .unwrap();
@@ -309,6 +383,10 @@ async fn test_check_update_includes_prerelease_when_requested() {
 async fn test_check_update_recommended_asset_matches_platform() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([make_github_release(
             "v2.0.0",
@@ -325,7 +403,11 @@ async fn test_check_update_recommended_asset_matches_platform() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -347,6 +429,10 @@ async fn test_check_update_recommended_asset_matches_platform() {
 async fn test_check_update_github_api_error() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
         .mount(&mock_server)
@@ -354,7 +440,11 @@ async fn test_check_update_github_api_error() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -367,6 +457,10 @@ async fn test_check_update_github_api_error() {
 async fn test_check_update_empty_releases() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&mock_server)
@@ -374,7 +468,11 @@ async fn test_check_update_empty_releases() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -387,6 +485,10 @@ async fn test_check_update_empty_releases() {
 async fn test_check_update_custom_repo() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/custom-org/custom-repo/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([make_github_release(
             "v3.0.0",
@@ -417,6 +519,10 @@ async fn test_check_update_custom_repo() {
 async fn test_check_update_invalid_tag_ignored() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release("not-semver", false, false, vec![]),
@@ -427,7 +533,11 @@ async fn test_check_update_invalid_tag_ignored() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 
@@ -440,6 +550,10 @@ async fn test_check_update_invalid_tag_ignored() {
 async fn test_check_update_response_format() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
+        .and(header(
+            "User-Agent",
+            concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")),
+        ))
         .and(path("/repos/iOfficeAI/AionUi/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([make_github_release(
             "v2.0.0",
@@ -452,7 +566,11 @@ async fn test_check_update_response_format() {
 
     let app = setup_with_mock("1.0.0", &mock_server).await;
     let resp = app
-        .oneshot(json_request("POST", "/api/system/check-update", json!({})))
+        .oneshot(json_request(
+            "POST",
+            "/api/system/check-update",
+            json!({"repo": "iOfficeAI/AionUi"}),
+        ))
         .await
         .unwrap();
 

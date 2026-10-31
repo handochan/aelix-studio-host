@@ -109,8 +109,8 @@ jobs:
             --output "dist/release-${TARGET}" --target-dir "${RUNNER_TEMP}/cargo-target" "${cargo_args[@]}"
       - name: Host smoke
         run: |
-          binary=aioncore
-          if [[ "${TARGET}" == win32-* ]]; then binary=aioncore.exe; fi
+          binary=aelix-studio-host
+          if [[ "${TARGET}" == win32-* ]]; then binary=aelix-studio-host.exe; fi
           "${PYTHON}" -I -B scripts/release/smoke.py --binary "dist/release-${TARGET}/${binary}" \
             --report "dist/release-${TARGET}/smoke.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

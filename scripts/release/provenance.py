@@ -114,7 +114,8 @@ def assemble(label, source, output, commit, environment):
         receipt = json.loads((directory / 'build-receipt.json').read_text())
         smoke = json.loads((directory / 'smoke.json').read_text())
         expected = {'status': 'built', 'commit': commit, 'dirty': False, 'label': label, 'target': name,
-                    'rustTarget': spec['rustTarget'], 'upstream': policy['upstream']}
+                    'rustTarget': spec['rustTarget'], 'upstream': policy['upstream'],
+                    'binary': policy['binary'] + ('.exe' if name.startswith('win32-') else '')}
         for key, value in expected.items():
             if receipt.get(key) != value:
                 raise ValueError(name + ': build receipt ' + key + ' is ' + repr(receipt.get(key)))
@@ -131,7 +132,7 @@ def assemble(label, source, output, commit, environment):
                 raise ValueError(name + ': archived ' + notice + ' differs from the checkout')
         if smoke.get('status') != 'passed' or smoke.get('binarySha256') != receipt['binarySha256']:
             raise ValueError(name + ': host smoke did not pass for this binary')
-        expected_version = 'aioncore ' + workspace_version()
+        expected_version = policy['binary'] + ' ' + workspace_version()
         if receipt.get('version') != expected_version or smoke.get('version') != expected_version:
             raise ValueError(name + ': binary version is not ' + expected_version)
         receipts.append(receipt)
@@ -194,7 +195,7 @@ def notes(provenance):
 
 - Release commit: `{provenance['commit']}`
 - Upstream base: `{upstream['tag']}` (`{upstream['commit']}`), {upstream['commitsSinceUpstream']} commits since
-- `aioncore --version` reports the upstream workspace version `{provenance['workspaceVersion']}`
+- `aelix-studio-host --version` reports the upstream workspace version `{provenance['workspaceVersion']}`
 - Rust {provenance['rustToolchain']}; every archive passed the host smoke on its own runner
 
 | Target | Archive | SHA-256 |

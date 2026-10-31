@@ -3,8 +3,8 @@ use serde::Deserialize;
 
 use crate::error::SystemError;
 
-const DEFAULT_REPO: &str = "iOfficeAI/AionUi";
 const GITHUB_API_BASE: &str = "https://api.github.com";
+const UPDATE_CHECK_ENV: &str = "AELIX_STUDIO_HOST_UPDATE_CHECK";
 
 /// Service that checks GitHub Releases for available updates.
 #[derive(Clone)]
@@ -14,6 +14,7 @@ pub struct VersionCheckService {
     /// Base URL for GitHub API. Defaults to `https://api.github.com`.
     /// Configurable for testing with mock servers.
     api_base: String,
+    enabled: bool,
 }
 
 impl VersionCheckService {
@@ -22,6 +23,7 @@ impl VersionCheckService {
             http_client,
             current_version,
             api_base: GITHUB_API_BASE.to_owned(),
+            enabled: update_checks_enabled(std::env::var(UPDATE_CHECK_ENV).ok().as_deref()),
         }
     }
 
@@ -29,16 +31,29 @@ impl VersionCheckService {
     #[doc(hidden)]
     pub fn with_api_base(http_client: reqwest::Client, current_version: String, api_base: String) -> Self {
         Self {
-            http_client,
-            current_version,
             api_base,
+            ..Self::new(http_client, current_version)
         }
+    }
+
+    /// Explicit host policy override, also used to isolate integration tests from process env.
+    pub fn with_update_checks_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 
     /// Check for updates against GitHub Releases.
     pub async fn check_update(&self, req: &UpdateCheckRequest) -> Result<UpdateCheckResult, SystemError> {
-        let repo = resolve_repo(req.repo.as_deref());
-        let releases = self.fetch_releases(&repo).await?;
+        if !self.enabled {
+            return Err(SystemError::BadRequest(format!(
+                "Update checks are disabled; set {UPDATE_CHECK_ENV}=1 to enable them"
+            )));
+        }
+        let configured_repo = std::env::var("AIONUI_GITHUB_REPO").ok();
+        let repo = resolve_repo(req.repo.as_deref(), configured_repo.as_deref()).ok_or_else(|| {
+            SystemError::BadRequest("Update repository is not configured; set repo or AIONUI_GITHUB_REPO".into())
+        })?;
+        let releases = self.fetch_releases(repo).await?;
 
         let current = parse_version(&self.current_version)
             .ok_or_else(|| SystemError::Internal(format!("invalid current version: {}", self.current_version)))?;
@@ -87,7 +102,7 @@ impl VersionCheckService {
                 .http_client
                 .get(&url)
                 .header("Accept", "application/vnd.github+json")
-                .header("User-Agent", "aioncore")
+                .header("User-Agent", concat!("aelix-studio-host/", env!("CARGO_PKG_VERSION")))
                 .send()
                 .await
                 .map_err(|e| SystemError::BadGateway(format!("GitHub API request failed: {e}")))?;
@@ -122,19 +137,16 @@ impl VersionCheckService {
     }
 }
 
-/// Resolve the GitHub repo from request or env or default.
-fn resolve_repo(from_request: Option<&str>) -> String {
-    if let Some(r) = from_request
-        && !r.is_empty()
-    {
-        return r.to_owned();
-    }
-    if let Ok(v) = std::env::var("AIONUI_GITHUB_REPO")
-        && !v.is_empty()
-    {
-        return v;
-    }
-    DEFAULT_REPO.to_owned()
+fn update_checks_enabled(setting: Option<&str>) -> bool {
+    setting == Some("1")
+}
+
+/// Resolve only an explicitly configured repository; never fall back to upstream.
+fn resolve_repo<'a>(from_request: Option<&'a str>, from_env: Option<&'a str>) -> Option<&'a str> {
+    from_request
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+        .or_else(|| from_env.map(str::trim).filter(|repo| !repo.is_empty()))
 }
 
 /// Parse a version string, stripping a leading `v` if present.
@@ -278,20 +290,27 @@ mod tests {
 
     #[test]
     fn test_resolve_repo_from_request() {
-        assert_eq!(resolve_repo(Some("org/repo")), "org/repo");
+        assert_eq!(resolve_repo(Some("org/repo"), Some("env/repo")), Some("org/repo"));
     }
 
     #[test]
     fn test_resolve_repo_empty_request() {
-        let result = resolve_repo(Some(""));
-        // Falls back to env or default
-        assert!(!result.is_empty());
+        assert_eq!(resolve_repo(Some(" \t"), Some("env/repo")), Some("env/repo"));
+        assert_eq!(resolve_repo(Some(""), None), None);
     }
 
     #[test]
     fn test_resolve_repo_none() {
-        let result = resolve_repo(None);
-        assert!(!result.is_empty());
+        assert_eq!(resolve_repo(None, None), None);
+        assert_eq!(resolve_repo(None, Some("")), None);
+    }
+
+    #[test]
+    fn update_checks_require_explicit_opt_in() {
+        for setting in [None, Some(""), Some("0"), Some("true"), Some("unexpected")] {
+            assert!(!update_checks_enabled(setting));
+        }
+        assert!(update_checks_enabled(Some("1")));
     }
 
     #[test]

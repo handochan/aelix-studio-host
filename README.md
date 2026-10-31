@@ -2,9 +2,9 @@
 
 This repository is the **Aelix Studio host**: a modified version of
 [AionCore](https://github.com/iOfficeAI/AionCore), the Rust backend server
-(`aioncore`) that [Aelix Studio](https://github.com/handochan/aelix-studio)
-bundles. It is maintained for Aelix Studio, separately from the upstream
-project. Aelix Studio consumes its tagged releases, pinned by version and
+(`aelix-studio-host`, formerly `aioncore`) for
+[Aelix Studio](https://github.com/handochan/aelix-studio). It is maintained
+for Aelix Studio, separately from the upstream project. Aelix Studio consumes its tagged releases, pinned by version and
 checksum.
 
 - **Upstream:** [iOfficeAI/AionCore](https://github.com/iOfficeAI/AionCore),
@@ -14,9 +14,10 @@ checksum.
 - **License:** see [License](#license) and [`LICENSE`](LICENSE).
 - **Modified:** yes. See [Modifications](#modifications) and [`NOTICE`](NOTICE).
 
-The internal crate, module, binary, database and API names stay as upstream
-named them (`aionui-*`, `aioncore`), so upstream fixes can be adopted with
-small diffs. Architecture and code conventions are in
+The executable is named `aelix-studio-host` (`aelix-studio-host.exe` on
+Windows). Internal crate, module, database and API names stay as upstream
+named them (`aionui-*`), so upstream fixes can be adopted with small diffs.
+Architecture and code conventions are in
 [ARCHITECTURE.md](ARCHITECTURE.md) and [AGENTS.md](AGENTS.md).
 
 ## License
@@ -28,14 +29,13 @@ The facts below are recorded without a legal interpretation.
   `b0d65d7` ("chore: add Apache 2.0 license", 2026-05-08). It is kept verbatim.
 - GitHub's license detection reports Apache-2.0 for both
   iOfficeAI/AionCore and this repository.
-- Upstream's root `Cargo.toml` declares `[workspace.package] license = "MIT"`.
-  That line dates from `673a5e7` ("feat: initialize cargo workspace with 17
-  crate stubs", 2026-04-12), before `LICENSE` was added, and has not changed
-  since. Only `aionui-assistant` inherits it; the other 26 crates declare no
-  license. The repository owner decided on 2026-10-31 to align this metadata
-  with `LICENSE` (Apache-2.0); the change lands in
-  [#2](https://github.com/handochan/aelix-studio-host/issues/2). Until then it is
-  unchanged here.
+- The root `Cargo.toml` declares `[workspace.package] license = "Apache-2.0"`,
+  aligned with `LICENSE` by the repository owner's decision on 2026-10-31
+  ([#2](https://github.com/handochan/aelix-studio-host/issues/2)). Only
+  `aionui-assistant` inherits it; the other 26 crates declare no license.
+  Upstream's baseline declared `MIT`, added in `673a5e7` (2026-04-12) before
+  `LICENSE` was added. This repository corrects that metadata; it does not
+  replace or edit the upstream license text.
 - Upstream has no README or NOTICE file. The sibling upstream projects
   [AionUi](https://github.com/iOfficeAI/AionUi) (`package.json`) and
   [aionrs](https://github.com/iOfficeAI/aionrs) (`Cargo.toml` at `v0.2.11`, a
@@ -57,11 +57,14 @@ Categories so far:
   test that asserted their contents. `release-please-config.json`,
   `.release-please-manifest.json`, `Cross.toml` and `CHANGELOG.md` are kept
   unchanged but are not used by this repository's workflows.
-- Crate manifests: `publish = false` on all workspace crates.
+- Crate manifests: `publish = false` on all workspace crates; workspace
+  license metadata corrected to Apache-2.0.
+- Host identity: executable, CLI help/invocations and User-Agent use
+  `aelix-studio-host`. Updates require explicit host opt-in and a configured
+  repository (see below).
 
-Host behavior changes for Aelix Studio (for example identity and network
-defaults, permission recovery, session synchronization) land as separate,
-reviewed commits and are listed here when they do.
+Further host changes (network defaults, permission recovery and session
+synchronization) land as separate, reviewed commits.
 
 ## Releases
 
@@ -75,11 +78,11 @@ reviewed commits and are listed here when they do.
 
 - `<upstream version>` is the Cargo workspace version of the release commit
   (the release gate checks it); `<n>` starts at 1 for each upstream version.
-  `aioncore --version` therefore reports the upstream version (for example
-  `aioncore 0.2.2`); the tag and provenance identify the Aelix build.
+  `aelix-studio-host --version` therefore reports the upstream version (for example
+  `aelix-studio-host 0.2.2`); the tag and provenance identify the Aelix build.
 - Release tags never start with `v`, so they cannot collide with the upstream
   `v*` tags, and the release workflow only reacts to `host-v*`.
-- Each archive contains `aioncore` (`aioncore.exe`), `LICENSE`, `NOTICE` and
+- Each archive contains `aelix-studio-host` (`aelix-studio-host.exe`), `LICENSE`, `NOTICE` and
   that target's `build-receipt.json`. Rust targets are
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
   `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. Upstream's
@@ -96,7 +99,13 @@ Studio pins a release by tag plus the archive SHA-256 from
 `aioncore-checksums.txt`, and downloads
 `https://github.com/handochan/aelix-studio-host/releases/download/<tag>/<archive>`.
 The archive name keeps Studio's existing `aioncore-${tag}-${rust target}`
-resolver pattern.
+resolver pattern. Archive, checksum and provenance filenames retain this
+legacy prefix; the executable inside changes. Releases before this identity
+change contain `aioncore` instead. Studio must adopt the new member name in
+its bundle preparation, resolver and verification together with a new exact
+release pin ([Studio #28](https://github.com/handochan/aelix-studio/issues/28),
+[identity #14](https://github.com/handochan/aelix-studio/issues/14)); host-only
+checks do not establish that Studio launches it.
 
 ### How a release is built
 
@@ -148,12 +157,35 @@ Linux targets need only Docker on a machine of the same CPU architecture:
 ```sh
 python3 scripts/release/build.py --target linux-arm64 --label dryrun-local \
   --output /tmp/aioncore-linux-arm64
-python3 scripts/release/smoke.py --binary /tmp/aioncore-linux-arm64/aioncore
+python3 scripts/release/smoke.py --binary /tmp/aioncore-linux-arm64/aelix-studio-host
 ```
 
 On Linux the smoke can run directly; from macOS, run it inside the build image
 (`docker run ... python3 scripts/release/smoke.py ...`). Native targets need
 the Rust toolchain pinned in `rust-toolchain.toml`.
+
+## Update checks and existing data
+
+`POST /api/system/check-update` is disabled by default, including requests
+that supply a `repo`. It returns HTTP 400 with an explanation before making
+an update request. To opt in, set `AELIX_STUDIO_HOST_UPDATE_CHECK=1` before
+starting the host and explicitly supply a repository in the request or via
+`AIONUI_GITHUB_REPO=owner/repo`. There is no built-in upstream repository
+fallback. This endpoint retains its existing semantic-version release lookup;
+it does not install host releases or interpret `host-v*` release tags.
+
+The HTTP User-Agent is `aelix-studio-host/<workspace version>`; the DingTalk
+stream registration's `ua` identity is `aelix-studio-host`.
+
+The executable rename does not migrate data. The host still uses `--data-dir`
+(default `data`), `aionui-backend.db`, existing `AIONUI_*_DIR` overrides and
+existing log filenames. Work directories come from `--work-dir`,
+`AIONUI_WORK_DIR`, then `--data-dir`; bundled resources are located relative
+to the executable's parent directory, not its filename. Studio owns the
+choice of its data directory and its separate app identity work.
+
+Other external access defaults, mirrors and connection-attempt auditing
+remain PR ② of [#2](https://github.com/handochan/aelix-studio-host/issues/2).
 
 ## Dependency checks
 

@@ -1,4 +1,4 @@
-"""Host smoke: drive a built aioncore binary over its real HTTP API.
+"""Host smoke: drive a built Aelix Studio host binary over its real HTTP API.
 
 The binary runs in local mode on an ephemeral loopback port with an isolated
 HOME, data directory and workspace. A synthetic ACP agent (smoke_agent.py)
@@ -9,8 +9,9 @@ selector, rejection of an unavailable model, one prompt/reply turn with
 persistence, idle runtime state and graceful shutdown (SIGTERM, or the
 desktop parent-exit path on Windows).
 
-Uses only the Python standard library. No real provider, credential or
-network access beyond 127.0.0.1 is involved.
+Uses only the Python standard library and a loopback synthetic agent, without
+real provider credentials. This functional smoke does not audit outbound
+connection attempts; that is separate acceptance work.
 """
 
 import argparse
@@ -92,6 +93,7 @@ class Host:
         for directory in (home, workspace, self.root / 'extensions'):
             directory.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
+        env.pop('AELIX_STUDIO_HOST_UPDATE_CHECK', None)
         env.update(
             HOME=str(home),
             USERPROFILE=str(home),
@@ -178,7 +180,7 @@ def run(binary, python, keep, report):
     report['binarySha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
     report['version'] = subprocess.run([str(binary), '--version'], capture_output=True, text=True,
                                        timeout=30, check=True).stdout.strip()
-    expected_version = 'aioncore ' + workspace_version()
+    expected_version = 'aelix-studio-host ' + workspace_version()
     assert report['version'] == expected_version, ('--version', report['version'], expected_version)
     checks.append('version')
     if any(character.isspace() for character in python):
@@ -193,6 +195,10 @@ def run(binary, python, keep, report):
         code, health = http(host.port, '/health')
         assert code == 200, ('/health', code, health)
         checks.append('health')
+        code, disabled = http(host.port, '/api/system/check-update', 'POST', {'repo': 'iOfficeAI/AionUi'})
+        assert code == 400, ('disabled update check', code, disabled)
+        assert disabled.get('error') == 'Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them', disabled
+        checks.append('update_check_disabled_by_default')
         host.api('/api/agents/custom', 'POST', {
             'name': AGENT_NAME, 'command': python, 'args': ['-I', '-B', str(HERE / 'smoke_agent.py')], 'env': [],
         })

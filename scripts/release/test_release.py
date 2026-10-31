@@ -133,10 +133,10 @@ class LabelTests(unittest.TestCase):
 
 class AssembleTests(unittest.TestCase):
     def make_target(self, source, name, spec, label, binary_bytes=b'host', smoke_status='passed',
-                    version='aioncore 0.2.2'):
+                    version='aelix-studio-host 0.2.2', binary_name=None):
         directory = source / ('release-' + name)
         directory.mkdir(parents=True)
-        binary = 'aioncore.exe' if name.startswith('win32-') else 'aioncore'
+        binary = binary_name or POLICY['binary'] + ('.exe' if name.startswith('win32-') else '')
         (directory / binary).write_bytes(binary_bytes)
         receipt = {
             'status': 'built', 'commit': COMMIT, 'tree': 'b' * 40, 'dirty': False, 'label': label, 'target': name,
@@ -154,7 +154,7 @@ class AssembleTests(unittest.TestCase):
         build.write_archive(directory / receipt['archive'], members, 1_700_000_000)
         (directory / 'smoke.json').write_text(json.dumps({
             'status': smoke_status, 'binarySha256': receipt['binarySha256'], 'checks': ['version'],
-            'version': 'aioncore 0.2.2'}))
+            'version': 'aelix-studio-host 0.2.2'}))
         return directory
 
     def assemble(self, source, output, label='host-v0.2.2-aelix.1'):
@@ -170,6 +170,10 @@ class AssembleTests(unittest.TestCase):
             result = self.assemble(source, output)
             self.assertEqual(result['kind'], 'release')
             self.assertEqual(sorted(result['targets']), sorted(POLICY['targets']))
+            for name, target in result['targets'].items():
+                binary = 'aelix-studio-host.exe' if name.startswith('win32-') else 'aelix-studio-host'
+                self.assertEqual(target['binary'], binary)
+                self.assertEqual(provenance.member_names(output / target['archive']), [binary, *provenance.MEMBERS])
             self.assertEqual(result['upstream']['commitsSinceUpstream'], 3)
             self.assertTrue(result['build']['runUrl'].endswith('/actions/runs/42'))
             lines = (output / provenance.CHECKSUMS).read_text().splitlines()
@@ -184,7 +188,11 @@ class AssembleTests(unittest.TestCase):
             'smoke': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
                                                      'host-v0.2.2-aelix.1', smoke_status='failed'),
             'version': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
-                                                       'host-v0.2.2-aelix.1', version='aioncore 0.2.3'),
+                                                       'host-v0.2.2-aelix.1', version='aelix-studio-host 0.2.3'),
+            'legacy-binary': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
+                                                             'host-v0.2.2-aelix.1', binary_name='aioncore'),
+            'legacy-version': lambda source: self.make_target(source, 'linux-x64', POLICY['targets']['linux-x64'],
+                                                              'host-v0.2.2-aelix.1', version='aioncore 0.2.2'),
             'missing': lambda source: None,
         }
         for case, last in cases.items():
@@ -194,8 +202,16 @@ class AssembleTests(unittest.TestCase):
                     if name != 'linux-x64':
                         self.make_target(source, name, spec, 'host-v0.2.2-aelix.1')
                 last(source)
-                with self.assertRaises((ValueError, FileNotFoundError)):
-                    self.assemble(source, Path(temporary) / 'out')
+                identity_errors = {
+                    'legacy-binary': 'linux-x64: build receipt binary',
+                    'legacy-version': 'linux-x64: binary version is not aelix-studio-host 0.2.2',
+                }
+                if case in identity_errors:
+                    with self.assertRaisesRegex(ValueError, identity_errors[case]):
+                        self.assemble(source, Path(temporary) / 'out')
+                else:
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        self.assemble(source, Path(temporary) / 'out')
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / 'in'
             for name, spec in POLICY['targets'].items():
