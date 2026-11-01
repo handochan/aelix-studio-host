@@ -1,0 +1,173 @@
+{
+  "schema": "aelix-studio-host.issue-6-evidence/1",
+  "base": "e55433d4a6d0afcfc18807ef5717d06e15ca1ee3",
+  "environment": "Linux arm64 Docker, Rust 1.95.0, unprivileged user, init, executable tmpfs, 2 build jobs",
+  "acpSnapshot": "handochan/aelix-acp@16d6555b08825d1d63c3b082de2b10a1152562c0",
+  "nativeSnapshot": "handochan/aelix-ai@e19ab55e17e871a40356fc9802f3f6669ca727de",
+  "model": "synthetic loopback; no provider credentials",
+  "implementationFilesSha256": {
+    "crates/aionui-ai-agent/src/protocol/acp.rs": "299d2ff5f8888971eb3471d17a1cca8d3e8d0efd23a4cb878493549d3133464d",
+    "crates/aionui-ai-agent/src/protocol/error.rs": "df8671432e1220f490efcbe46f733925e3566dd1b68211878e6d3dc03df56b10",
+    "crates/aionui-ai-agent/src/protocol/send_error.rs": "0c0ef9051223bd5d018a68cb1b89ff089d7bb047b03c4683be183c73b7da9343",
+    "crates/aionui-ai-agent/src/routes/error_mapping.rs": "0f345a9eb435b135a28318b84f221d49f075f3ccc3f802dd0302c42c4ac2fa63",
+    "crates/aionui-api-types/src/agent_error.rs": "248f49748b7b13633a1aaef0c116c2ef66598b88ba52b8ba3f673d039a8e1659",
+    "crates/aionui-conversation/src/turn_recovery_policy.rs": "6a45ead691fb007897783bb35624359f6ce69f747dfaf393e7086371cbe485d4"
+  },
+  "affectedCrates": {
+    "passed": 2204,
+    "failed": 0,
+    "ignored": 12,
+    "clippy": "passed -D warnings"
+  },
+  "synthetic": {
+    "schema": "aelix-studio-host.prompt-recovery/1",
+    "evidence": "synthetic ACP and loopback model",
+    "binarySha256": "6446fae7443c17cdb32938b214c7c712bc15ffba09528b187103b5b14f09ba8a",
+    "scenarios": [
+      {
+        "scenario": "process-kill",
+        "modelRequestsForTurn": 1,
+        "promptRequests": 1,
+        "sessionOpenRequests": 1,
+        "methods": [
+          "initialize",
+          "session/new",
+          "session/prompt"
+        ],
+        "status": "passed"
+      },
+      {
+        "scenario": "stdout-eof",
+        "modelRequestsForTurn": 1,
+        "promptRequests": 1,
+        "sessionOpenRequests": 1,
+        "methods": [
+          "initialize",
+          "session/new",
+          "session/prompt"
+        ],
+        "status": "passed"
+      },
+      {
+        "scenario": "stdout-read-error",
+        "modelRequestsForTurn": 1,
+        "promptRequests": 1,
+        "sessionOpenRequests": 1,
+        "methods": [
+          "initialize",
+          "session/new",
+          "session/prompt"
+        ],
+        "status": "passed"
+      },
+      {
+        "scenario": "setup-failure",
+        "modelRequestsForTurn": 0,
+        "promptRequests": 0,
+        "sessionOpenRequests": 1,
+        "methods": [
+          "initialize",
+          "session/new"
+        ],
+        "status": "passed"
+      },
+      {
+        "scenario": "before-connection-loss",
+        "modelRequestsForTurn": 1,
+        "promptRequests": 1,
+        "sessionOpenRequests": 2,
+        "methods": [
+          "initialize",
+          "session/new",
+          "initialize",
+          "session/load",
+          "session/prompt"
+        ],
+        "status": "passed"
+      }
+    ],
+    "status": "passed"
+  },
+  "realProcessProbes": {
+    "host6-real": {
+      "binarySha256": "6446fae7443c17cdb32938b214c7c712bc15ffba09528b187103b5b14f09ba8a",
+      "observed": {
+        "killNative": false,
+        "nativeChildren": 1,
+        "hostRequestsAfterCrash": [
+          "session/prompt"
+        ],
+        "errorCodes": [],
+        "modelRequestsForTurn": 1,
+        "adapterRestarts": 0,
+        "userRowsForTurn": 1
+      },
+      "expectedModelRequests": 1,
+      "status": "passed"
+    },
+    "host6-real-native-kill": {
+      "binarySha256": "6446fae7443c17cdb32938b214c7c712bc15ffba09528b187103b5b14f09ba8a",
+      "observed": {
+        "killNative": true,
+        "nativeChildren": 1,
+        "hostRequestsAfterCrash": [
+          "session/prompt"
+        ],
+        "errorCodes": [],
+        "modelRequestsForTurn": 1,
+        "adapterRestarts": 0,
+        "userRowsForTurn": 1
+      },
+      "expectedModelRequests": 1,
+      "status": "passed"
+    },
+    "host6-negative": {
+      "binarySha256": "6207e021dad7a41add697bee0fa5882d59cd573f74480189ae01688cc1f6010c",
+      "observed": {
+        "killNative": false,
+        "nativeChildren": 1,
+        "hostRequestsAfterCrash": [
+          "session/prompt",
+          "initialize",
+          "session/load",
+          "session/prompt"
+        ],
+        "errorCodes": [],
+        "modelRequestsForTurn": 2,
+        "adapterRestarts": 1,
+        "userRowsForTurn": 1
+      },
+      "expectedModelRequests": 2,
+      "status": "passed"
+    }
+  },
+  "negativeControl": "Only protocol/acp.rs restored to e55433d for the control binary; other changes retained. Fixed file restored afterward. The same real ACP/native probe then observes two model requests and two prompt dispatches.",
+  "normalSmoke": {
+    "schema": "aelix-studio-host.smoke/1",
+    "status": "passed",
+    "checks": [
+      "version",
+      "startup_listening_event",
+      "health",
+      "update_check_disabled_by_default",
+      "custom_agent_registration",
+      "custom_agent_assistant",
+      "conversation_create",
+      "runtime_ensure_model_selector",
+      "acp_client_identity",
+      "unavailable_model_rejected",
+      "prompt_reply_persisted",
+      "runtime_idle_after_turn",
+      "graceful_shutdown"
+    ],
+    "binarySha256": "6446fae7443c17cdb32938b214c7c712bc15ffba09528b187103b5b14f09ba8a",
+    "version": "aelix-studio-host 0.2.2",
+    "exitCode": 0
+  },
+  "notEstablished": [
+    "real provider/OAuth",
+    "Studio renderer",
+    "Windows/macOS runtime or installer",
+    "release readiness"
+  ]
+}

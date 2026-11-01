@@ -354,6 +354,15 @@ impl AgentSendError {
                     Some(AgentErrorResolutionTarget::AgentSettings),
                 ),
             ),
+            AcpError::PromptOutcomeUnknown => Self::new(
+                "The prompt was sent, but its outcome is unknown",
+                AgentErrorCode::UserAgentPromptOutcomeUnknown,
+                AgentErrorOwnership::UserAgent,
+                Some("The Agent connection was lost after prompt dispatch. The model or tools may have already run. This turn was not automatically sent again.".into()),
+                false,
+                false,
+                None,
+            ),
             AcpError::OtherProtocolError { .. } => Self::new(
                 "The selected Agent returned a non-standard protocol error",
                 AgentErrorCode::UserAgentProtocolError,
@@ -1111,6 +1120,57 @@ mod tests {
     use super::*;
     use aionui_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
     use serde_json::json;
+
+    #[test]
+    fn prompt_outcome_unknown_is_public_and_never_retryable() {
+        let error = AgentSendError::from(AcpError::PromptOutcomeUnknown);
+        let data = error.into_stream_error();
+        assert_eq!(data.code, Some(AgentErrorCode::UserAgentPromptOutcomeUnknown));
+        assert_eq!(data.retryable, Some(false));
+        assert!(data.resolution.is_none());
+        let wire = serde_json::to_value(data).unwrap();
+        assert_eq!(wire["code"], "USER_AGENT_PROMPT_OUTCOME_UNKNOWN");
+    }
+
+    #[test]
+    fn connection_failure_before_dispatch_retains_retry() {
+        for error in [
+            AcpError::NotConnected,
+            AcpError::Disconnected {
+                exit_code: Some(1),
+                signal: None,
+                stderr: "secret prompt".into(),
+            },
+        ] {
+            let before = AgentSendError::from_acp_error_ref(&error);
+            assert_eq!(before.code(), Some(AgentErrorCode::UserAgentDisconnected));
+            assert_eq!(before.stream_error().retryable, Some(true));
+            let after = AgentSendError::from(error.after_prompt_dispatch(false));
+            assert_eq!(after.code(), Some(AgentErrorCode::UserAgentPromptOutcomeUnknown));
+            assert_eq!(after.stream_error().retryable, Some(false));
+            assert!(
+                !serde_json::to_string(after.stream_error())
+                    .unwrap()
+                    .contains("secret prompt")
+            );
+        }
+    }
+
+    #[test]
+    fn transport_loss_after_dispatch_overrides_internal_error_classification() {
+        let error = AcpError::AgentInternal {
+            message: "internal failure".into(),
+            code: -32603,
+            data: None,
+        };
+        assert_eq!(
+            AgentSendError::from_acp_error_ref(&error).stream_error().retryable,
+            Some(true)
+        );
+        let after = AgentSendError::from(error.after_prompt_dispatch(true));
+        assert_eq!(after.code(), Some(AgentErrorCode::UserAgentPromptOutcomeUnknown));
+        assert_eq!(after.stream_error().retryable, Some(false));
+    }
 
     fn assert_classification(
         detail: &str,

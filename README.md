@@ -69,6 +69,13 @@ Categories so far:
   [Studio PR #18](https://github.com/handochan/aelix-studio/pull/18) into source,
   with unit and synthetic stdio/SQLite/process-rebuild regression tests
   ([#3](https://github.com/handochan/aelix-studio-host/issues/3)).
+- Prompt recovery: connection loss after prompt dispatch ends the turn with
+  `USER_AGENT_PROMPT_OUTCOME_UNKNOWN` and `retryable: false`. The model or tools
+  may already have run, so the host does not replay that turn. Failures observed
+  before dispatch retain their existing retry policy. The dispatch boundary is
+  handoff to the SDK, which provides no delivery receipt; loss during handoff
+  is conservatively treated as an unknown outcome. An explicit user resend is
+  a new turn ([#6](https://github.com/handochan/aelix-studio-host/issues/6)).
 
 Further host changes (network defaults and session synchronization) land as
 separate, reviewed commits.
