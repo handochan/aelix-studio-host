@@ -11,6 +11,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tarfile
@@ -47,6 +48,10 @@ def run(binary, node_root, report):
         def log_message(self, *_args):
             pass
 
+        def do_POST(self):
+            requests.append(self.path)
+            self.send_error(405)
+
         def do_GET(self):
             requests.append(self.path)
             if self.path.lower() == '/npm/@aelix-test%2fmirror-agent':
@@ -70,33 +75,38 @@ def run(binary, node_root, report):
     with ThreadingHTTPServer(('127.0.0.1', 0), Registry) as registry, tempfile.TemporaryDirectory(prefix='host-mirror-') as root:
         thread = threading.Thread(target=registry.serve_forever, daemon=True)
         thread.start()
+        launchers = list(node_root.glob('node/node-v24.11.0-*/bin/npx'))
+        assert len(launchers) == 1, 'Node fixture must contain exactly one npm/npx runtime'
+        explicit_npx = launchers[0]
         host = Host(binary, Path(root), env_overrides={
             'AELIX_STUDIO_HOST_NPM_REGISTRY': f'http://127.0.0.1:{registry.server_port}/npm/',
             'AIONUI_BUNDLED_MANAGED_RESOURCES': str(node_root),
+            'PATH': str(explicit_npx.parent) + os.pathsep + os.environ.get('PATH', ''),
         }, extra_args=('--managed-resources-mode', 'bundled'))
         try:
             host.start()
             # npx must obtain this never-published package from the configured
             # prefix, through the ordinary custom-agent/session launch path.
-            host.api('/api/agents/custom', 'POST', {
-                'name': 'Mirror smoke', 'command': 'npx', 'args': ['-y', PACKAGE + '@' + VERSION], 'env': [],
-            })
-            _, assistants = host.api('/api/assistants')
-            assistant = next(item for item in assistants if item['name'] == 'Mirror smoke')
-            _, conversation = host.api('/api/conversations', 'POST', {
-                'name': 'Mirror smoke', 'assistant': {'id': assistant['id']},
-                'extra': {'workspace': str(Path(root) / 'workspace'), 'custom_workspace': True},
-            })
-            route = '/api/conversations/' + conversation['id']
-            host.api(route + '/runtime/ensure', 'POST')
-            host.api(route + '/messages', 'POST', {'content': PROMPT})
-            wait_until(lambda: REPLY in json.dumps(host.api(route + '/messages')[1]), 60, 'Mirror agent reply missing')
+            for label, command in [('Mirror smoke', 'npx'), ('Mirror absolute', str(explicit_npx))]:
+                host.api('/api/agents/custom', 'POST', {
+                    'name': label, 'command': command, 'args': ['-y', PACKAGE + '@' + VERSION], 'env': [],
+                })
+                _, assistants = host.api('/api/assistants')
+                assistant = next(item for item in assistants if item['name'] == label)
+                _, conversation = host.api('/api/conversations', 'POST', {
+                    'name': 'Mirror smoke', 'assistant': {'id': assistant['id']},
+                    'extra': {'workspace': str(Path(root) / 'workspace'), 'custom_workspace': True},
+                })
+                route = '/api/conversations/' + conversation['id']
+                host.api(route + '/runtime/ensure', 'POST')
+                host.api(route + '/messages', 'POST', {'content': PROMPT})
+                wait_until(lambda: REPLY in json.dumps(host.api(route + '/messages')[1]), 60, 'Mirror agent reply missing')
             assert '/npm/agent.tgz' in requests, requests
             assert any(path.lower() == '/npm/@aelix-test%2fmirror-agent' for path in requests), requests
             assert all(path.lower() in ('/npm/@aelix-test%2fmirror-agent', '/npm/agent.tgz') for path in requests), requests
             assert host.stop() == 0
             report.update(status='passed', registryRequests=requests,
-                          checks=['real_npx_registry_prefix', 'real_npm_tarball', 'acp_prompt_reply', 'graceful_shutdown'])
+                          checks=['real_npx_registry_prefix', 'real_npm_tarball', 'real_npx_explicit_path', 'acp_prompt_reply', 'graceful_shutdown'])
         except BaseException:
             if host.log_path.exists():
                 report['hostLogTail'] = host.log_path.read_text(errors='replace')[-6000:]

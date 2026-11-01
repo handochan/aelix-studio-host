@@ -118,21 +118,22 @@ impl McpConnectionTestService {
     ) -> McpConnectionTestResult {
         let reporter =
             runtime_scope_id.map(|scope_id| self.runtime_reporter(user_id.map(str::to_owned), scope_id.to_owned()));
-        let mut cmd = match probe_runtime_command(command) {
-            RuntimeCommandProbe::NodeTool { .. } => {
-                let resolved = match ensure_runtime_command_with_reporter(command, reporter.as_deref()).await {
-                    Ok(resolved) => resolved,
-                    Err(error) => return spawn_error_result(command, &runtime_resolution_error(&error.to_string())),
-                };
-                CmdBuilder::from_resolved(&resolved)
-            }
-            _ => {
-                let program = resolve_stdio_command(command);
-                CmdBuilder::new(&program)
-            }
+        let needs_runtime = matches!(probe_runtime_command(command), RuntimeCommandProbe::NodeTool { .. })
+            || aionui_runtime::outbound_policy::is_registry_tool_command(command);
+        let (mut cmd, resolved_env) = if needs_runtime {
+            let resolved = match ensure_runtime_command_with_reporter(command, reporter.as_deref()).await {
+                Ok(resolved) => resolved,
+                Err(error) => return spawn_error_result(command, &runtime_resolution_error(&error.to_string())),
+            };
+            (CmdBuilder::from_resolved(&resolved), resolved.env)
+        } else {
+            (CmdBuilder::new(resolve_stdio_command(command)), Vec::new())
         };
         cmd.args(args)
             .envs(env.iter())
+            // The host's selected registry wins after user environment merging,
+            // consistently with normal agent/MCP session launch preparation.
+            .envs(resolved_env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
@@ -599,6 +600,40 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, f);
         String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn explicit_npx_connection_probe_reports_disabled_registry() {
+        const CHILD: &str = "AELIX_HOST_MCP_POLICY_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "connection_test::tests::explicit_npx_connection_probe_reports_disabled_registry",
+                ])
+                .env(CHILD, "1")
+                .env_remove(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let service = McpConnectionTestService::new(reqwest::Client::new(), Arc::new(BroadcastEventBus::new(16)));
+        for name in ["npx", "npx.cmd"] {
+            let command = temp.path().join(name);
+            std::fs::write(&command, "must not execute").unwrap();
+            let result = service
+                .test_stdio_inner(command.to_str().unwrap(), &[], &HashMap::new(), None, None)
+                .await;
+            assert_eq!(
+                result.code,
+                Some(aionui_api_types::McpConnectionTestErrorCode::CommandStartFailed)
+            );
+            let error = result.error.unwrap();
+            assert!(error.contains("OUTBOUND_DISABLED"));
+            assert!(error.contains(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV));
+        }
     }
 
     #[test]

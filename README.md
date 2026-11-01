@@ -283,7 +283,7 @@ commands/skills remain user choices.
 | --- | --- | --- |
 | Host update check (GitHub) | Disabled; `UPDATE_CHECK_DISABLED` | Existing `AELIX_STUDIO_HOST_UPDATE_CHECK=1` and repository setting |
 | Managed Node (`nodejs.org`) | Public fallback removed; cached/bundled Node still works | `AELIX_STUDIO_HOST_NODE_MIRROR=https://mirror.example/node/dist/` |
-| Host-resolved bare `npm` / `npx` (npmjs) | `OUTBOUND_DISABLED` before runtime preparation when no registry is set | `AELIX_STUDIO_HOST_NPM_REGISTRY=https://mirror.example/repository/npm/` |
+| Host-resolved `npm` / `npx` (including explicit paths and Windows wrappers) (npmjs) | `OUTBOUND_DISABLED` before runtime preparation when no registry is set | `AELIX_STUDIO_HOST_NPM_REGISTRY=https://mirror.example/repository/npm/` |
 | OfficeCLI missing binary / daily update | No installer or version-check HTTP request; restore Studio's bundled binary or put it on PATH | Studio owns installation and updates |
 | Public WebUI tunnel (`cloudflared`) | `aionui-webui-public` removed from builtin bundle/catalog | User-imported custom skills remain supported |
 | Moltbook | `moltbook` removed from builtin bundle/catalog | User-imported custom skills remain supported |
@@ -319,7 +319,8 @@ attempts, including failed calls. Loopback/Unix IPC are allowed; DNS port 53 is
 counted as outbound even on loopback. Unparseable/incomplete traces fail the gate.
 A second audited flow uses actual Node 24.11.0/npm/npx, a loopback registry
 serving a never-published synthetic ACP package, and a prompt/reply session.
-It verifies registry-prefix metadata and tarball requests through the real launch
+It exercises bare and explicit-path npx launches and verifies registry-prefix
+metadata and tarball requests through the real launch
 path. The pinned Node Docker fixture is prepared before auditing starts; it is
 test setup and is not shipped in the host release.
 A separate positive control deliberately attempts TCP and UDP to TEST-NET-3;

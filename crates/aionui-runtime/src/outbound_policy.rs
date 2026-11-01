@@ -6,6 +6,32 @@ use crate::node_runtime::NodeRuntimeError;
 pub const NODE_MIRROR_ENV: &str = "AELIX_STUDIO_HOST_NODE_MIRROR";
 pub const NPM_REGISTRY_ENV: &str = "AELIX_STUDIO_HOST_NPM_REGISTRY";
 
+/// Recognize registry tools even when a caller supplies an explicit path or a
+/// Windows launcher. Arbitrary custom scripts remain outside this policy.
+pub fn is_registry_tool_command(command: &str) -> bool {
+    matches!(
+        command
+            .trim()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "npm"
+            | "npx"
+            | "npm.bat"
+            | "npx.bat"
+            | "npm.cmd"
+            | "npx.cmd"
+            | "npm.exe"
+            | "npx.exe"
+            | "npm.ps1"
+            | "npx.ps1"
+            | "npm-cli.js"
+            | "npx-cli.js"
+    )
+}
+
 pub(crate) fn configured_url(key: &str) -> Result<reqwest::Url, NodeRuntimeError> {
     parse_url(key, std::env::var(key).ok().as_deref())
 }
@@ -17,9 +43,12 @@ fn parse_url(key: &str, value: Option<&str>) -> Result<reqwest::Url, NodeRuntime
             reason = "not_configured",
             "host-managed outbound access blocked"
         );
-        NodeRuntimeError::managed_invalid(format!(
-            "OUTBOUND_DISABLED: {key} is not configured; provide a bundled runtime or configure an internal mirror"
-        ))
+        let remedy = if key == NODE_MIRROR_ENV {
+            "provide a bundled Node runtime or configure an internal Node mirror"
+        } else {
+            "configure an internal npm registry to enable npm/npx"
+        };
+        NodeRuntimeError::managed_invalid(format!("OUTBOUND_DISABLED: {key} is not configured; {remedy}"))
     })?;
     let url = reqwest::Url::parse(value).map_err(|_| invalid_url(key))?;
     if !matches!(url.scheme(), "http" | "https")
@@ -122,5 +151,67 @@ mod tests {
         ] {
             assert!(env.contains(&(key.into(), value.into())));
         }
+    }
+    #[test]
+    fn registry_tool_paths_and_wrappers_are_recognized() {
+        for command in [
+            "npx",
+            "/usr/local/bin/npm",
+            "C:\\Node\\npx.cmd",
+            "NPX.PS1",
+            "NPX.BAT",
+            "/node/npm-cli.js",
+        ] {
+            assert!(is_registry_tool_command(command), "{command}");
+        }
+        for command in ["node", "/bin/python", "/custom/npx-agent", "npm-helper"] {
+            assert!(!is_registry_tool_command(command), "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_registry_tool_paths_require_mirror() {
+        if !crate::test_support::run_in_env_child(
+            "outbound_policy::tests::explicit_registry_tool_paths_require_mirror",
+            |command| {
+                command.env_remove(NPM_REGISTRY_ENV);
+            },
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        for name in ["npm", "npx", "npx.cmd", "npm.ps1"] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, "not executed").unwrap();
+            let error = crate::ensure_runtime_command(path.to_str().unwrap())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("OUTBOUND_DISABLED"));
+            assert!(error.contains(NPM_REGISTRY_ENV));
+            assert!(!error.contains("provide a bundled"));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_registry_tool_keeps_path_and_receives_mirror() {
+        if !crate::test_support::run_in_env_child(
+            "outbound_policy::tests::explicit_registry_tool_keeps_path_and_receives_mirror",
+            |command| {
+                command.env(NPM_REGISTRY_ENV, "http://127.0.0.1:9/internal/npm/");
+            },
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("npx.cmd");
+        std::fs::write(&path, "not executed").unwrap();
+        let resolved = crate::ensure_runtime_command(path.to_str().unwrap()).await.unwrap();
+        assert_eq!(resolved.program, path);
+        assert!(
+            resolved
+                .env
+                .contains(&("npm_config_registry".into(), "http://127.0.0.1:9/internal/npm/".into()))
+        );
     }
 }

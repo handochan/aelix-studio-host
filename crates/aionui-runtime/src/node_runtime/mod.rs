@@ -87,7 +87,14 @@ pub async fn ensure_runtime_command_with_reporter(
     command: &str,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
 ) -> Result<ResolvedCommand, NodeRuntimeError> {
-    match probe_runtime_command(command) {
+    // Gate registry tools before any runtime preparation. Explicit paths and
+    // Windows wrappers must not bypass the same source requirement.
+    let registry_env = if crate::outbound_policy::is_registry_tool_command(command) {
+        crate::outbound_policy::npm_env()?
+    } else {
+        Vec::new()
+    };
+    let mut resolved = match probe_runtime_command(command) {
         RuntimeCommandProbe::ExplicitPath { path } => {
             if !path.exists() {
                 return Err(NodeRuntimeError::system_invalid(format!(
@@ -95,25 +102,18 @@ pub async fn ensure_runtime_command_with_reporter(
                     path.display()
                 )));
             }
-            Ok(ResolvedCommand::plain(path))
+            ResolvedCommand::plain(path)
         }
         RuntimeCommandProbe::PathLookup { command } => crate::resolve_command_path(&command)
             .map(ResolvedCommand::plain)
-            .ok_or_else(|| NodeRuntimeError::system_invalid(format!("command '{command}' not found in PATH"))),
+            .ok_or_else(|| NodeRuntimeError::system_invalid(format!("command '{command}' not found in PATH")))?,
         RuntimeCommandProbe::NodeTool { tool, .. } => {
-            // Gate registry tools before Node preparation so missing mirror settings
-            // cannot trigger a runtime download as a side effect.
-            let registry_env = if matches!(tool, NodeTool::Npm | NodeTool::Npx) {
-                crate::outbound_policy::npm_env()?
-            } else {
-                Vec::new()
-            };
             let runtime = ensure_node_runtime_with_reporter(reporter).await?;
-            let mut command = tool_command(tool, &runtime);
-            command.env.extend(registry_env);
-            Ok(command)
+            tool_command(tool, &runtime)
         }
-    }
+    };
+    resolved.env.extend(registry_env);
+    Ok(resolved)
 }
 
 fn runtime_source_label(source: ResolvedNodeSource) -> &'static str {

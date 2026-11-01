@@ -214,6 +214,13 @@ def run(binary, python, keep, report):
             assert denial.get('step') == 'fail_cli', (tool, denial)
             assert 'OUTBOUND_DISABLED' in denial.get('error', ''), (tool, denial)
             assert setting in denial['error'], (tool, denial)
+        for name in ('npm', 'npx.cmd'):
+            command = root / name
+            command.write_text('must not execute')
+            _, denial = host.api('/api/agents/custom/try-connect', 'POST', {'command': str(command)})
+            assert denial.get('step') == 'fail_cli', denial
+            assert 'OUTBOUND_DISABLED' in denial.get('error', ''), denial
+            assert 'AELIX_STUDIO_HOST_NPM_REGISTRY' in denial['error'], denial
         checks.append('runtime_download_and_registry_disabled')
         _, skills = host.api('/api/skills')
         assert not {'moltbook', 'aionui-webui-public'} & {item['name'] for item in skills}, skills
