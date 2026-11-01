@@ -5247,6 +5247,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn moltbook_builtin_is_retired_without_deleting_custom_assistant() {
+        let mut fx = fixture_with_builtins(vec![mk_builtin("moltbook", "moltbook")]).await;
+        fx.service
+            .create(CreateAssistantRequest {
+                id: Some("user-moltbook".into()),
+                name: "moltbook".into(),
+                ..req_default()
+            })
+            .await
+            .unwrap();
+        fx.service.builtin = Arc::new(BuiltinAssistantRegistry::load_embedded());
+        fx.service.soft_delete_removed_builtin_definitions().await.unwrap();
+        assert!(
+            fx.definition_repo
+                .get_by_assistant_id("moltbook")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let custom = fx
+            .definition_repo
+            .get_by_assistant_id("user-moltbook")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom.source, "user");
+        assert_eq!(custom.name, "moltbook");
+    }
+
+    #[tokio::test]
     async fn bootstrap_soft_deletes_builtin_removed_from_manifest() {
         let mut fx = fixture_with_builtins(vec![mk_builtin("builtin-office", "Office")]).await;
 

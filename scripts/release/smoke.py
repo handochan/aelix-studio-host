@@ -232,6 +232,7 @@ def run(binary, python, keep, report):
         })
         checks.append('custom_agent_registration')
         _, assistants = host.api('/api/assistants')
+        assert all(item['id'] != 'moltbook' for item in assistants), assistants
         assistant = next(item for item in assistants if item['name'] == AGENT_NAME)
         checks.append('custom_agent_assistant')
         _, conversation = host.api('/api/conversations', 'POST', {

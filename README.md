@@ -305,7 +305,9 @@ On upgrade, the host removes retired directories only within its materialized
 Stale builtin override trees are filtered from builtin discovery/read/resolution.
 If refresh fails while an old builtin still carries OfficeCLI remote installer
 instructions, startup fails with its bootstrap error rather than serving that
-old guidance. User-owned custom skill directories and catalog rows, including same-name
+old guidance. The associated Moltbook builtin assistant/rules and Butler public-link offers
+are removed too; existing builtin assistant definitions are retired by the
+normal manifest reconciliation. User-owned custom skill directories and catalog rows, including same-name
 imports, remain available.
 
 Linux CI runs `scripts/release/outbound_audit.py` around the functional smoke:

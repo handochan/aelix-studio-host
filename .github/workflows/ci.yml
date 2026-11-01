@@ -111,7 +111,7 @@ jobs:
           mkdir -p smoke/node-fixture/node/node-v24.11.0-linux-x64
           docker run --rm --network none -v "$PWD/smoke/node-fixture/node/node-v24.11.0-linux-x64:/out" \
             docker.io/library/node:24.11.0-bookworm-slim@sha256:76d0ed0ed93bed4f4376211e9d8fddac4d8b3fbdb54cc45955696001a3c91152 \
-            sh -c 'mkdir -p /out/bin /out/lib; cp -a /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /out/bin/; cp -a /usr/local/lib/node_modules /out/lib/'
+            sh -eu -c 'mkdir -p /out/bin /out/lib; cp -a /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /out/bin/; cp -a /usr/local/lib/node_modules /out/lib/'
       - name: Trace real npm/npx using only the configured loopback registry
         run: python3 -I -B scripts/release/outbound_audit.py --report smoke/mirror-outbound.json -- python3 -I -B scripts/release/mirror_smoke.py --binary target/debug/aelix-studio-host --node-root smoke/node-fixture --report smoke/mirror.json
       - if: always()
