@@ -40,6 +40,10 @@ def main():
             # A response to a request this agent never sends; ignore it.
             continue
         if method == 'initialize':
+            client = params.get('clientInfo') or {}
+            if client.get('name') != 'aelix-studio-host' or not client.get('version'):
+                error(request_id, -32602, 'Unexpected host clientInfo')
+                continue
             result(request_id, {
                 'protocolVersion': 1,
                 'agentCapabilities': {

@@ -1,13 +1,13 @@
 ---
 name: aionui-config
-description: Configure AionUi itself with the bundled aioncore CLI. Use when asked to set up or change assistants, assistant rules, skills, MCP servers, model providers, agents, scheduled tasks, or settings.
+description: "Configure Aelix Studio with aelix-studio-host: assistants, assistant rules, skills, MCP servers, model providers, agents, scheduled tasks, and settings."
 ---
 
-# AionUi Config
+# Aelix Studio Config
 
-Configure AionUi with the bundled agent-facing CLI. Do not discover ports, do
+Configure Aelix Studio with the bundled agent-facing CLI. Do not discover ports, do
 not call raw backend paths, and do not depend on tools outside the bundled
-`aioncore` binary.
+`aelix-studio-host` binary.
 
 ## Rules
 
@@ -43,7 +43,7 @@ Failures print one stable error line to stderr. Treat stderr as authoritative.
 
 ## Capability Discovery
 
-Ask aioncore what this version supports:
+Ask aelix-studio-host what this version supports:
 
 ```bash
 "$AIONUI_HELPER_BIN" config capabilities
@@ -68,7 +68,7 @@ rules or defaults.
 
 ## Assistant Change Timing
 
-AionUi persists assistant configuration immediately, but running conversations
+Aelix Studio persists assistant configuration immediately, but running conversations
 may keep the assistant snapshot created when the conversation started. Use this
 timing model when reporting successful assistant changes:
 

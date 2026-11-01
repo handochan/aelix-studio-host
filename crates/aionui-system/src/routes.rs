@@ -44,6 +44,12 @@ impl From<SystemError> for ApiError {
         match error {
             SystemError::NotFound(reason) => ApiError::NotFound(reason),
             SystemError::BadRequest(reason) => ApiError::BadRequest(reason),
+            SystemError::UpdateCheckDisabled(reason) => ApiError::Coded {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                code: "UPDATE_CHECK_DISABLED",
+                message: reason,
+                details: None,
+            },
             SystemError::Conflict(reason) => ApiError::Conflict(reason),
             SystemError::Internal(reason) => ApiError::Internal(reason),
             SystemError::BadGateway(reason) => ApiError::BadGateway(reason),

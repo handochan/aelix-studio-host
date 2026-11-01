@@ -165,7 +165,7 @@ mod tests {
         let err = BootstrapError::new(
             BootstrapErrorCode::PeerAlreadyRunning,
             "instance_guard.acquire",
-            "another aioncore already owns this data directory",
+            "another aelix-studio-host already owns this data directory",
         );
 
         assert_eq!(err.exit_code(), ExitCode::from(3));

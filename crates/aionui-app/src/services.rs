@@ -139,7 +139,7 @@ impl AppServices {
     }
 
     pub async fn from_config(database: Database, config: &AppConfig) -> anyhow::Result<Self> {
-        let backend_binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aioncore"));
+        let backend_binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aelix-studio-host"));
         Self::from_config_with_backend_binary_path(database, config, backend_binary_path).await
     }
 

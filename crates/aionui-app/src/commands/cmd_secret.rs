@@ -1,4 +1,4 @@
-//! `aioncore secret` subcommand: offline storage-encryption-secret provisioning.
+//! `aelix-studio-host secret` subcommand: offline storage-encryption-secret provisioning.
 //!
 //! Short-lived, like `doctor` and `user`: opens the data-dir SQLite database
 //! directly, performs the operation, and exits. It never starts the HTTP
@@ -137,7 +137,7 @@ fn format_status_lines(status: &SecretStatus) -> Vec<String> {
                 .to_owned(),
         );
         lines.push(format!(
-            "  Persist it now:  echo \"${ENCRYPTION_SECRET_ENV}\" | aioncore secret set --secret-stdin"
+            "  Persist it now:  echo \"${ENCRYPTION_SECRET_ENV}\" | aelix-studio-host secret set --secret-stdin"
         ));
     } else if status.env_db_mismatch() {
         lines.push(String::new());
@@ -149,7 +149,7 @@ fn format_status_lines(status: &SecretStatus) -> Vec<String> {
         );
         lines.push(format!(
             "  Reconcile by unsetting {ENCRYPTION_SECRET_ENV}, or overwrite the stored value:  \
-             echo \"${ENCRYPTION_SECRET_ENV}\" | aioncore secret set --secret-stdin --force"
+             echo \"${ENCRYPTION_SECRET_ENV}\" | aelix-studio-host secret set --secret-stdin --force"
         ));
     }
 

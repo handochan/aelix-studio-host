@@ -6,7 +6,7 @@ publish = false
 exclude = ["data/**"]
 
 [[bin]]
-name = "aioncore"
+name = "aelix-studio-host"
 path = "src/main.rs"
 
 [features]
