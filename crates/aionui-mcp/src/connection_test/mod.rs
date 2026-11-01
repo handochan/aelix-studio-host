@@ -606,15 +606,15 @@ mod tests {
     async fn explicit_npx_connection_probe_reports_disabled_registry() {
         const CHILD: &str = "AELIX_HOST_MCP_POLICY_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut child = CmdBuilder::clean_cli(std::env::current_exe().unwrap());
+            child
                 .args([
                     "--exact",
                     "connection_test::tests::explicit_npx_connection_probe_reports_disabled_registry",
                 ])
                 .env(CHILD, "1")
-                .env_remove(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV)
-                .output()
-                .unwrap();
+                .env_remove(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+            let output = child.output().await.unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
             return;
         }
