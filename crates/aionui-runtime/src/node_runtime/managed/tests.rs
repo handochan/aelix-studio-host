@@ -409,20 +409,44 @@ fn managed_runtime_http_status_error_is_explicit() {
 }
 
 #[test]
-fn managed_runtime_official_source_uses_nodejs_org() {
-    let source = ManagedNodeDownloadSource::official(PlatformSpec {
+fn managed_runtime_source_requires_explicit_mirror() {
+    if !crate::test_support::run_in_env_child(
+        "node_runtime::managed::tests::managed_runtime_source_requires_explicit_mirror",
+        |command| {
+            command.env_remove(crate::outbound_policy::NODE_MIRROR_ENV);
+        },
+    ) {
+        return;
+    }
+    let error = ManagedNodeDownloadSource::configured(platform_spec().unwrap()).unwrap_err();
+    assert!(error.to_string().contains("OUTBOUND_DISABLED"));
+}
+
+#[test]
+fn managed_runtime_source_preserves_mirror_prefix() {
+    if !crate::test_support::run_in_env_child(
+        "node_runtime::managed::tests::managed_runtime_source_preserves_mirror_prefix",
+        |command| {
+            command.env(
+                crate::outbound_policy::NODE_MIRROR_ENV,
+                "https://mirror.example/internal/node",
+            );
+        },
+    ) {
+        return;
+    }
+    let source = ManagedNodeDownloadSource::configured(PlatformSpec {
         folder_suffix: "darwin-arm64",
         archive_ext: "tar.gz",
         runtime_key: "darwin-arm64",
         executable: "bin/node",
-    });
-
-    assert_eq!(source.source, "nodejs.org");
+    })
+    .unwrap();
+    assert_eq!(source.source, "configured-mirror");
     assert_eq!(
         source.url,
-        "https://nodejs.org/dist/v24.11.0/node-v24.11.0-darwin-arm64.tar.gz"
+        "https://mirror.example/internal/node/v24.11.0/node-v24.11.0-darwin-arm64.tar.gz"
     );
-    assert_eq!(source.sha256, None);
 }
 
 #[test]
@@ -766,4 +790,83 @@ fn missing_managed_node_executable_error_message_is_unchanged() {
         ),
         "the diagnostic snapshot must not alter the message classify_error matches on"
     );
+}
+
+#[tokio::test]
+async fn configured_mirror_download_and_redirect_policy() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    if std::env::var_os("AIONUI_RUNTIME_ENV_TEST_CHILD").is_none() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_target = TcpListener::bind("127.0.0.1:0").unwrap();
+        redirect_target.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/internal/node/", listener.local_addr().unwrap());
+        let target = format!("http://{}/must-not-request", redirect_target.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for redirect in [false, true] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with("GET /internal/node/v24.11.0/node-v24.11.0-darwin-arm64.tar.gz HTTP/1.1"));
+                assert!(request.to_ascii_lowercase().contains("user-agent: aelix-studio-host/"));
+                if redirect {
+                    write!(
+                        socket,
+                        "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                } else {
+                    let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                    let mut archive = tar::Builder::new(gzip);
+                    let bytes = b"local mirror fixture";
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(bytes.len() as u64);
+                    header.set_mode(0o755);
+                    header.set_cksum();
+                    archive
+                        .append_data(&mut header, "node-v24.11.0-darwin-arm64/bin/node", &bytes[..])
+                        .unwrap();
+                    let body = archive.into_inner().unwrap().finish().unwrap();
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    socket.write_all(&body).unwrap();
+                }
+            }
+        });
+        assert!(!crate::test_support::run_in_env_child(
+            "node_runtime::managed::tests::configured_mirror_download_and_redirect_policy",
+            |command| {
+                command.env(crate::outbound_policy::NODE_MIRROR_ENV, &base);
+            },
+        ));
+        server.join().unwrap();
+        assert_eq!(redirect_target.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let spec = PlatformSpec {
+        folder_suffix: "darwin-arm64",
+        archive_ext: "tar.gz",
+        runtime_key: "darwin-arm64",
+        executable: "bin/node",
+    };
+    install_archive(temp.path(), spec, None).await.unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join(spec.directory_name()).join("bin/node")).unwrap(),
+        b"local mirror fixture"
+    );
+    let error = install_archive(temp.path(), spec, None).await.unwrap_err();
+    assert!(error.to_string().contains("OUTBOUND_REDIRECT_BLOCKED"));
 }

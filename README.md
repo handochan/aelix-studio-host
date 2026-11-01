@@ -75,13 +75,13 @@ separate, reviewed commits.
 
 ## Releases
 
-| Item         | Value                                                                    |
-| ------------ | ------------------------------------------------------------------------ |
-| Tag          | `host-v<upstream version>-aelix.<n>`, for example `host-v0.2.2-aelix.2`  |
-| Archives     | `aelix-studio-host-<upstream version>-aelix.<n>-<rust target>.tar.gz` (`.zip` for Windows)               |
-| Checksums    | `aelix-studio-host-checksums.txt` (`sha256sum -c` format)                         |
-| Provenance   | `aelix-studio-host-<upstream version>-aelix.<n>-provenance.json`                                         |
-| Targets      | darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64               |
+| Item       | Value                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| Tag        | `host-v<upstream version>-aelix.<n>`, for example `host-v0.2.2-aelix.2`                    |
+| Archives   | `aelix-studio-host-<upstream version>-aelix.<n>-<rust target>.tar.gz` (`.zip` for Windows) |
+| Checksums  | `aelix-studio-host-checksums.txt` (`sha256sum -c` format)                                  |
+| Provenance | `aelix-studio-host-<upstream version>-aelix.<n>-provenance.json`                           |
+| Targets    | darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64                                |
 
 - `<upstream version>` is the Cargo workspace version of the release commit
   (the release gate checks it); `<n>` starts at 1 for each upstream version.
@@ -267,3 +267,71 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
 - Upstream changes are adopted deliberately (stable tags or selected commits)
   on a separate branch with review and the same CI; `.github/workflows/` here
   is ours and upstream workflow changes are not taken.
+
+## Host-managed outbound access
+
+Scope follows [Studio #15](https://github.com/handochan/aelix-studio/issues/15)
+rows 6–8 and 14, decisions 3/4, and the 2026-11-01 Moltbook retirement decision
+in [host #2](https://github.com/handochan/aelix-studio-host/issues/2).
+
+Host defaults do not fetch runtimes, packages, OfficeCLI installers or update
+metadata. A blocked operation returns an explanatory error; it is not treated
+as an offline success. Provider endpoints and explicitly configured custom
+commands/skills remain user choices.
+
+| Surface | Default behavior | Explicit configuration |
+| --- | --- | --- |
+| Host update check (GitHub) | Disabled; `UPDATE_CHECK_DISABLED` | Existing `AELIX_STUDIO_HOST_UPDATE_CHECK=1` and repository setting |
+| Managed Node (`nodejs.org`) | Public fallback removed; cached/bundled Node still works | `AELIX_STUDIO_HOST_NODE_MIRROR=https://mirror.example/node/dist/` |
+| Host-resolved bare `npm` / `npx` (npmjs) | `OUTBOUND_DISABLED` before runtime preparation when no registry is set | `AELIX_STUDIO_HOST_NPM_REGISTRY=https://mirror.example/repository/npm/` |
+| OfficeCLI missing binary / daily update | No installer or version-check HTTP request; restore Studio's bundled binary or put it on PATH | Studio owns installation and updates |
+| Public WebUI tunnel (`cloudflared`) | `aionui-webui-public` removed from builtin bundle/catalog | User-imported custom skills remain supported |
+| Moltbook | `moltbook` removed from builtin bundle/catalog | User-imported custom skills remain supported |
+
+Mirror settings accept HTTP(S) URLs without embedded credentials, query strings
+or fragments. Node appends `v24.11.0/node-v24.11.0-<platform>.<extension>` under
+the configured prefix. Node redirects are rejected; failures never fall back to
+nodejs.org. Existing bundled-resource mode still requires Studio's local files.
+Local runtime validation uses offline npm settings and disables update
+notifications. The npm registry is passed into resolved child environments after environment
+cleaning, with update notifications, audit and funding requests disabled and
+registry-host replacement set to `always`. Serve package metadata, tarballs and
+all transitive dependencies from the internal registry; package install scripts,
+custom commands and agent/provider traffic require deployment-specific policy.
+These settings are source selection, not a general process firewall.
+
+On upgrade, the host removes retired directories only within its materialized
+`builtin-skills` tree and retires catalog rows only when `source=builtin`.
+Stale builtin override trees are filtered from builtin discovery/read/resolution.
+If refresh fails while an old builtin still carries OfficeCLI remote installer
+instructions, startup fails with its bootstrap error rather than serving that
+old guidance. User-owned custom skill directories and catalog rows, including same-name
+imports, remain available.
+
+Linux CI runs `scripts/release/outbound_audit.py` around the functional smoke:
+startup, denied Node/npm/npx launch preparation, retired-builtin absence,
+missing OfficeCLI preview requests, synthetic-agent registration/session/prompt,
+idle and shutdown. `strace`
+follows the complete process tree and counts IPv4/IPv6 TCP and UDP destination
+attempts, including failed calls. Loopback/Unix IPC are allowed; DNS port 53 is
+counted as outbound even on loopback. Unparseable/incomplete traces fail the gate.
+A second audited flow uses actual Node 24.11.0/npm/npx, a loopback registry
+serving a never-published synthetic ACP package, and a prompt/reply session.
+It verifies registry-prefix metadata and tarball requests through the real launch
+path. The pinned Node Docker fixture is prepared before auditing starts; it is
+test setup and is not shipped in the host release.
+A separate positive control deliberately attempts TCP and UDP to TEST-NET-3;
+the audit **must fail with exit 86**. Reports are uploaded with smoke evidence.
+Raw traces suppress buffers and are deleted. This establishes zero attempts for
+the exercised default synthetic lifecycle on Linux, not arbitrary user-configured
+providers, custom skills or every third-party agent.
+
+```sh
+# Linux, with strace installed; no provider credentials required
+python3 -I -B scripts/release/outbound_audit.py --report smoke/outbound.json -- \
+  python3 -I -B scripts/release/smoke.py --binary target/debug/aelix-studio-host --report smoke/report.json
+```
+
+The direct Codex session/title handshake and MCP connection-test client names
+also identify `aelix-studio-host`. Internal subprocess labels, crate/module names,
+cookies and the compatibility interfaces listed above retain their identifiers.

@@ -76,6 +76,11 @@ const CONFIG_RPC_TIMEOUT_SECS: u64 = 10;
 
 /// Client identity reported in the ACP `initialize` handshake (`clientInfo`).
 ///
+/// Always send non-empty name/version: regression protection for upstream #3326.
+/// Mistral Vibe forwards these fields as `client_name` / `client_version` in
+/// entrypoint metadata (verified: mistralai/mistral-vibe v2.4.2,
+/// vibe/acp/acp_agent_loop.py:206-212, `_build_entrypoint_metadata`).
+/// Source: https://github.com/mistralai/mistral-vibe/blob/v2.4.2/vibe/acp/acp_agent_loop.py#L206-L212
 /// Implementation metadata, with a programmatic name and version.
 /// Verified: agent-client-protocol-schema-1.5.0/src/v1/agent.rs (`Implementation`).
 const ACP_CLIENT_NAME: &str = "aelix-studio-host";

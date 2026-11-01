@@ -53,9 +53,9 @@ impl PlatformSpec {
         format!("node-v{MANAGED_NODE_VERSION}-{}", self.folder_suffix)
     }
 
-    fn official_download_url(self) -> String {
+    fn archive_relative_path(self) -> String {
         format!(
-            "https://nodejs.org/dist/v{version}/{name}.{ext}",
+            "v{version}/{name}.{ext}",
             version = MANAGED_NODE_VERSION,
             name = self.directory_name(),
             ext = self.archive_ext
@@ -153,7 +153,6 @@ pub async fn install_and_validate_with_reporter(
     info!(
         version = MANAGED_NODE_VERSION,
         root = %runtime_root.display(),
-        url = %spec.official_download_url(),
         "managed node runtime install started"
     );
     install_archive_with_retry(&runtime_root, spec, reporter).await?;
@@ -604,8 +603,8 @@ async fn install_archive(
     spec: PlatformSpec,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
 ) -> Result<(), NodeRuntimeError> {
+    let download_source = ManagedNodeDownloadSource::configured(spec)?;
     let client = build_http_client()?;
-    let download_source = ManagedNodeDownloadSource::official(spec);
     let url = download_source.url.clone();
     let version_dir = runtime_root.join(spec.directory_name());
     let archive_path = archive_download_path(runtime_root, spec);
@@ -618,14 +617,13 @@ async fn install_archive(
 
     emit_progress(
         reporter,
-        NodeRuntimeProgress::downloading(format!("downloading managed Node runtime from {url}")),
+        NodeRuntimeProgress::downloading("downloading managed Node runtime from configured mirror".to_owned()),
     );
 
     info!(
         version = MANAGED_NODE_VERSION,
         platform = spec.folder_suffix,
         source = download_source.source,
-        url = %url,
         "managed node runtime download source selected"
     );
 
@@ -634,6 +632,11 @@ async fn install_archive(
         .send()
         .await
         .map_err(|error| reqwest_error("download archive", &url, &error))?;
+    if response.status().is_redirection() {
+        return Err(NodeRuntimeError::managed_invalid(
+            "OUTBOUND_REDIRECT_BLOCKED: Node mirror redirects are disabled",
+        ));
+    }
     let response = response
         .error_for_status()
         .map_err(|error| reqwest_error("download archive", &url, &error))?;
@@ -668,6 +671,7 @@ async fn install_archive(
 }
 
 fn build_http_client() -> Result<reqwest::Client, NodeRuntimeError> {
+    // A mirror redirect must not silently escape to a public download server.
     http_client::build_http_client(MANAGED_NODE_CONNECT_TIMEOUT, MANAGED_NODE_DOWNLOAD_TIMEOUT)
         .map_err(NodeRuntimeError::managed_invalid)
 }
@@ -685,12 +689,19 @@ fn verify_archive_checksum(path: &Path, expected_sha256: &str) -> Result<(), Nod
 }
 
 impl ManagedNodeDownloadSource {
-    fn official(spec: PlatformSpec) -> Self {
-        Self {
-            url: spec.official_download_url(),
-            sha256: None,
-            source: "nodejs.org",
+    fn configured(spec: PlatformSpec) -> Result<Self, NodeRuntimeError> {
+        let mut base = crate::outbound_policy::configured_url(crate::outbound_policy::NODE_MIRROR_ENV)?;
+        if !base.path().ends_with('/') {
+            base.set_path(&format!("{}/", base.path()));
         }
+        let url = base
+            .join(&spec.archive_relative_path())
+            .map_err(|_| NodeRuntimeError::managed_invalid("OUTBOUND_CONFIG_INVALID: invalid Node mirror path"))?;
+        Ok(Self {
+            url: url.into(),
+            sha256: None,
+            source: "configured-mirror",
+        })
     }
 }
 
@@ -844,6 +855,14 @@ fn managed_env(root: &Path) -> Result<Vec<(OsString, OsString)>, NodeRuntimeErro
             root.join("blank_global_npmrc").into_os_string(),
         ),
         ("npm_config_prefix".into(), default_npm_prefix(root).into_os_string()),
+        // Local version probes and Node children inherit no implicit public registry.
+        // ensure_runtime_command adds an explicit registry and clears offline mode
+        // only for opted-in npm/npx launches.
+        ("npm_config_offline".into(), "true".into()),
+        ("npm_config_registry".into(), "http://127.0.0.1:9/".into()),
+        ("npm_config_update_notifier".into(), "false".into()),
+        ("npm_config_audit".into(), "false".into()),
+        ("npm_config_fund".into(), "false".into()),
     ])
 }
 

@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 use crate::error::OfficeError;
-use crate::officecli_runtime::{OFFICECLI_LATEST_RELEASE_URL, install_command, resolve_officecli_path};
+use crate::officecli_runtime::resolve_officecli_path;
 use crate::port::{allocate_port, is_port_listening};
 use crate::types::DocType;
 
@@ -17,7 +17,6 @@ const POLL_INTERVAL_MS: u64 = 100;
 const POLL_MAX_ATTEMPTS: u32 = 150;
 const START_PORT_MAX_ATTEMPTS: usize = 3;
 const STOP_DELAY_MS: u64 = 500;
-const VERSION_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ---------------------------------------------------------------------------
 // ProcessSpawner trait — abstraction for child process management
@@ -65,7 +64,6 @@ pub struct OfficecliWatchManager {
     sessions: DashMap<WatchSessionKey, WatchSession>,
     spawner: Arc<dyn ProcessSpawner>,
     broadcaster: Arc<dyn EventBroadcaster>,
-    last_version_check: Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -91,7 +89,6 @@ impl OfficecliWatchManager {
             sessions: DashMap::new(),
             spawner,
             broadcaster,
-            last_version_check: Mutex::new(None),
         }
     }
 
@@ -118,12 +115,15 @@ impl OfficecliWatchManager {
         match &result {
             Ok(port) => {
                 self.broadcast_status_for_user(user_id, doc_type, PreviewState::Ready, None);
-                if doc_type == DocType::Ppt {
-                    self.maybe_check_update(doc_type).await;
-                }
                 Ok(*port)
             }
             Err(e) => {
+                if matches!(e, OfficeError::OfficecliNotFound) {
+                    tracing::warn!(
+                        reason = "bundled_officecli_missing",
+                        "OfficeCLI unavailable; automatic installation is disabled; restore Studio's bundled binary or PATH"
+                    );
+                }
                 self.broadcast_status_for_user(
                     user_id,
                     doc_type,
@@ -189,20 +189,13 @@ impl OfficecliWatchManager {
 
     async fn spawn_officecli_with_install(
         &self,
-        user_id: &str,
+        _user_id: &str,
         resolved: &str,
         port: u16,
         doc_type: DocType,
     ) -> Result<Box<dyn ProcessHandle>, OfficeError> {
-        match self.spawner.spawn_officecli(resolved, port, doc_type).await {
-            Ok(process) => Ok(process),
-            Err(OfficeError::OfficecliNotFound) => {
-                self.broadcast_status_for_user(user_id, doc_type, PreviewState::Installing, None);
-                self.spawner.install_officecli().await?;
-                self.spawner.spawn_officecli(resolved, port, doc_type).await
-            }
-            Err(error) => Err(error),
-        }
+        // Studio supplies OfficeCLI. Never fetch an installer on a preview request.
+        self.spawner.spawn_officecli(resolved, port, doc_type).await
     }
 
     async fn poll_port_ready(&self, port: u16, file_path: &str) -> Result<(), OfficeError> {
@@ -314,24 +307,6 @@ impl OfficecliWatchManager {
         (!entry.aborted && entry.process.is_alive()).then_some(entry.port)
     }
 
-    async fn maybe_check_update(&self, doc_type: DocType) {
-        let mut last = self.last_version_check.lock().await;
-        let should_check = match *last {
-            Some(t) => t.elapsed() >= VERSION_CHECK_INTERVAL,
-            None => true,
-        };
-        if should_check {
-            *last = Some(std::time::Instant::now());
-            drop(last);
-            let spawner = Arc::clone(&self.spawner);
-            tokio::spawn(async move {
-                if let Err(e) = spawner.check_update(doc_type).await {
-                    tracing::warn!("officecli version check failed: {e}");
-                }
-            });
-        }
-    }
-
     fn broadcast_status_for_user(
         &self,
         user_id: &str,
@@ -436,27 +411,10 @@ impl ProcessSpawner for DefaultProcessSpawner {
     }
 
     async fn install_officecli(&self) -> Result<(), OfficeError> {
-        let command = install_command();
-        tracing::info!(
-            platform = std::env::consts::OS,
-            "installing officecli via official iOfficeAI/OfficeCli installer"
-        );
-
-        let mut builder = CmdBuilder::clean_cli(&command.program);
-        builder.args(command.args.iter());
-        let output = builder
-            .output()
-            .await
-            .map_err(|e| OfficeError::InstallFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            tracing::warn!(
-                status = ?output.status.code(),
-                "officecli official installer failed"
-            );
-            return Err(OfficeError::InstallFailed("official OfficeCLI installer failed".into()));
-        }
-        Ok(())
+        Err(OfficeError::InstallFailed(
+            "automatic installation is disabled; restore the OfficeCLI bundled by Studio or add officecli to PATH"
+                .into(),
+        ))
     }
 
     async fn is_officecli_installed(&self) -> bool {
@@ -468,45 +426,9 @@ impl ProcessSpawner for DefaultProcessSpawner {
     }
 
     async fn check_update(&self, _doc_type: DocType) -> Result<(), OfficeError> {
-        let officecli = resolve_officecli_path().ok_or(OfficeError::OfficecliNotFound)?;
-        if !officecli_supports_watch(&officecli).await {
-            return Err(OfficeError::OfficecliNotFound);
-        }
-
-        let mut builder = CmdBuilder::clean_cli(&officecli);
-        builder.arg("--version");
-        let output = builder
-            .output()
-            .await
-            .map_err(|e| OfficeError::StartFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            return Ok(());
-        }
-
-        let local_version = normalize_officecli_version(&String::from_utf8_lossy(&output.stdout));
-        let response = reqwest::Client::new()
-            .get(OFFICECLI_LATEST_RELEASE_URL)
-            .send()
-            .await
-            .map_err(|e| OfficeError::StartFailed(e.to_string()))?;
-        let remote_version = response
-            .url()
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .map(normalize_officecli_version)
-            .unwrap_or_default();
-
-        if !remote_version.is_empty() && remote_version != local_version {
-            tracing::info!(
-                local_version = %local_version,
-                remote_version = %remote_version,
-                "officecli update available, installing via official installer"
-            );
-            self.install_officecli().await?;
-        }
-
-        Ok(())
+        Err(OfficeError::InstallFailed(
+            "automatic OfficeCLI updates are disabled; update Studio's bundled OfficeCLI".into(),
+        ))
     }
 }
 
@@ -536,14 +458,6 @@ fn is_port_in_use_message(message: &str) -> bool {
         || message.contains("os error 10048")
 }
 
-fn normalize_officecli_version(raw: &str) -> String {
-    raw.split_whitespace()
-        .last()
-        .unwrap_or_default()
-        .trim_start_matches('v')
-        .to_owned()
-}
-
 async fn officecli_supports_watch(officecli: &Path) -> bool {
     let mut version = CmdBuilder::clean_cli(officecli);
     version.arg("--version");
@@ -563,7 +477,7 @@ async fn officecli_supports_watch(officecli: &Path) -> bool {
 fn public_preview_error_message(error: &OfficeError) -> String {
     match error {
         OfficeError::InstallFailed(_) => "officecli install failed".to_owned(),
-        OfficeError::OfficecliNotFound => "officecli not found".to_owned(),
+        OfficeError::OfficecliNotFound => error.to_string(),
         _ => error.to_string(),
     }
 }
@@ -976,7 +890,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_install_when_not_found() {
+    async fn missing_officecli_does_not_install() {
         let spawner = Arc::new(MockSpawner::new());
         spawner.installed.store(false, Ordering::SeqCst);
         let broadcaster = Arc::new(RecordingBroadcaster::new());
@@ -986,11 +900,11 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
-        assert!(port > 0);
-        assert_eq!(spawner.install_count.load(Ordering::SeqCst), 1);
-        // First spawn fails (not installed), then install, then second spawn succeeds
-        assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 2);
+        let error = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap_err();
+        assert!(matches!(error, OfficeError::OfficecliNotFound));
+        assert!(error.to_string().contains("automatic installation is disabled"));
+        assert_eq!(spawner.install_count.load(Ordering::SeqCst), 0);
+        assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1014,7 +928,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcasts_installing_on_auto_install() {
+    async fn broadcasts_missing_bundled_officecli_reason() {
         let spawner = Arc::new(MockSpawner::new());
         spawner.installed.store(false, Ordering::SeqCst);
         let broadcaster = Arc::new(RecordingBroadcaster::new());
@@ -1024,13 +938,19 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap_err();
 
         let events = broadcaster.events();
         let states: Vec<&str> = events.iter().filter_map(|e| e.data["state"].as_str()).collect();
         assert!(states.contains(&"starting"));
-        assert!(states.contains(&"installing"));
-        assert!(states.contains(&"ready"));
+        assert!(!states.contains(&"installing"));
+        assert!(states.contains(&"error"));
+        assert!(
+            events.last().unwrap().data["message"]
+                .as_str()
+                .unwrap()
+                .contains("automatic installation is disabled")
+        );
     }
 
     #[tokio::test]
@@ -1070,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ppt_triggers_version_check() {
+    async fn ppt_does_not_trigger_version_check() {
         let spawner = Arc::new(MockSpawner::new());
         let broadcaster = Arc::new(RecordingBroadcaster::new());
         let mgr = make_manager(Arc::clone(&spawner), Arc::clone(&broadcaster));
@@ -1083,7 +1003,7 @@ mod tests {
 
         // Give the spawned task a moment
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(spawner.update_count.load(Ordering::SeqCst), 1);
+        assert_eq!(spawner.update_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

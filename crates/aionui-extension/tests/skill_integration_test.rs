@@ -764,3 +764,67 @@ async fn security_assistant_crud_path_traversal_locale() {
     assert!(read_assistant_skill(&paths, "valid", Some("a/b")).await.is_err());
     assert!(write_assistant_skill(&paths, "valid", "x", Some("a\\b")).await.is_err());
 }
+
+#[tokio::test]
+async fn retired_builtins_leave_catalog_and_resolution_but_custom_survives() {
+    let tmp = TempDir::new().unwrap();
+    let paths = make_paths(tmp.path());
+    let db = init_database_memory().await.unwrap();
+    let repo = SqliteSkillRepository::new(db.pool().clone());
+    for name in ["moltbook", "aionui-webui-public"] {
+        // Simulate an old materialized tree, including an override that is not rewritten.
+        create_skill(&paths.builtin_skills_dir, name, "old builtin");
+        let builtin_path = paths.builtin_skills_dir.join(name);
+        repo.upsert_global(UpsertSkillParams {
+            name,
+            description: Some("old builtin"),
+            path: builtin_path.to_str().unwrap(),
+            source: "builtin",
+            enabled: true,
+        })
+        .await
+        .unwrap();
+        aionui_extension::sync_builtin_skill_catalog_into_repo(&paths, &repo)
+            .await
+            .unwrap();
+        assert!(repo.list().await.unwrap().iter().all(|row| row.name != name));
+        assert!(
+            read_builtin_skill(&paths, &format!("{name}/SKILL.md"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            list_available_skills(&paths)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.name != name)
+        );
+        create_skill(&paths.user_skills_dir, name, "custom preserved");
+        let custom_path = paths.user_skills_dir.join(name);
+        repo.upsert(UpsertSkillParams {
+            name,
+            description: Some("custom preserved"),
+            path: custom_path.to_str().unwrap(),
+            source: "user",
+            enabled: true,
+        })
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            aionui_extension::sync_builtin_skill_catalog_into_repo(&paths, &repo)
+                .await
+                .unwrap();
+        }
+        let custom = repo.find_by_name(name).await.unwrap().unwrap();
+        assert_eq!(custom.source, "user");
+        assert!(custom.enabled && custom.deleted_at.is_none());
+        let resolved =
+            materialize_skills_for_agent_with_repo_for_user(&paths, &repo, DEFAULT_USER_ID, "conv", &[name.to_owned()])
+                .await
+                .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].source_path, custom_path);
+    }
+}

@@ -184,6 +184,12 @@ pub async fn read_builtin_rule(paths: &SkillPaths, file_name: &str) -> Result<St
 /// Rejects `..`-style traversal.
 pub async fn read_builtin_skill(paths: &SkillPaths, file_name: &str) -> Result<String, ExtensionError> {
     validate_builtin_skill_path(file_name)?;
+    if Path::new(file_name)
+        .components()
+        .any(|part| crate::retired_builtins::is_retired(&part.as_os_str().to_string_lossy()))
+    {
+        return Ok(String::new());
+    }
     let file_path = paths.builtin_skills_dir.join(file_name);
     read_file_or_empty(&file_path).await
 }
@@ -358,7 +364,7 @@ async fn list_builtin_skills_from_disk(dir: &Path) -> Vec<SkillListItem> {
     // Top-level opt-in skills (siblings of auto-inject/).
     if let Ok(top) = scan_skill_dirs(dir).await {
         for s in top {
-            if s.name == BUILTIN_AUTO_SKILLS_SUBDIR {
+            if s.name == BUILTIN_AUTO_SKILLS_SUBDIR || crate::retired_builtins::is_retired(&s.name) {
                 continue;
             }
             // Use the on-disk directory name (basename of scanned path)
@@ -390,6 +396,9 @@ async fn list_builtin_skills_from_disk(dir: &Path) -> Vec<SkillListItem> {
     let auto_dir = dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
     if let Ok(auto) = scan_skill_dirs(&auto_dir).await {
         for s in auto {
+            if crate::retired_builtins::is_retired(&s.name) {
+                continue;
+            }
             let dir_name = Path::new(&s.path)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -1248,6 +1257,9 @@ pub async fn delete_skill_with_repo_for_user(
 /// a top-level opt-in skill or under `auto-inject/`. Consults the
 /// on-disk tree at `paths.builtin_skills_dir`.
 fn builtin_skill_exists(paths: &SkillPaths, skill_name: &str) -> bool {
+    if crate::retired_builtins::is_retired(skill_name) {
+        return false;
+    }
     paths.builtin_skills_dir.join(skill_name).is_dir()
         || paths
             .builtin_skills_dir
@@ -1397,11 +1409,11 @@ pub fn extract_skill_body(content: &str) -> String {
 /// no matching directory exists in any known source.
 async fn resolve_skill_source_path(paths: &SkillPaths, name: &str) -> Result<Option<PathBuf>, ExtensionError> {
     let top = paths.builtin_skills_dir.join(name);
-    if top.is_dir() {
+    if !crate::retired_builtins::is_retired(name) && top.is_dir() {
         return Ok(Some(top));
     }
     let auto = paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR).join(name);
-    if auto.is_dir() {
+    if !crate::retired_builtins::is_retired(name) && auto.is_dir() {
         return Ok(Some(auto));
     }
     let user = paths.user_skills_dir.join(name);
@@ -1421,7 +1433,7 @@ async fn resolve_skill_source_path_with_repo_for_user(
 ) -> Result<Option<PathBuf>, ExtensionError> {
     if let Some(row) = repo.find_by_name_any_for_user(user_id, name).await? {
         let path = PathBuf::from(&row.path);
-        if path.is_dir() {
+        if !(row.source == "builtin" && crate::retired_builtins::is_retired(name)) && path.is_dir() {
             return Ok(Some(path));
         }
         warn!(
@@ -1435,11 +1447,11 @@ async fn resolve_skill_source_path_with_repo_for_user(
         }
     }
     let top = paths.builtin_skills_dir.join(name);
-    if top.is_dir() {
+    if !crate::retired_builtins::is_retired(name) && top.is_dir() {
         return Ok(Some(top));
     }
     let auto = paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR).join(name);
-    if auto.is_dir() {
+    if !crate::retired_builtins::is_retired(name) && auto.is_dir() {
         return Ok(Some(auto));
     }
     // Per-job cron skill dirs are intentionally NOT probed as a fallback:
@@ -1635,6 +1647,9 @@ pub async fn sync_skill_catalog_into_repo_for_user(
 }
 
 async fn sync_builtin_skills_into_repo(paths: &SkillPaths, repo: &dyn ISkillRepository) -> Result<(), ExtensionError> {
+    for name in crate::retired_builtins::RETIRED_BUILTINS {
+        repo.retire_builtin_by_name(name).await?;
+    }
     if let Ok(skills) = scan_skill_dirs(&paths.builtin_skills_dir).await {
         for skill in skills {
             if skill.name == BUILTIN_AUTO_SKILLS_SUBDIR {
@@ -1663,6 +1678,9 @@ async fn sync_global_skill_into_repo(
     skill: &ScannedSkill,
     source: &str,
 ) -> Result<(), ExtensionError> {
+    if source == "builtin" && crate::retired_builtins::is_retired(&skill.name) {
+        return Ok(());
+    }
     repo.upsert_global(UpsertSkillParams {
         name: &skill.name,
         description: Some(&skill.description),

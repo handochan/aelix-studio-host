@@ -89,7 +89,7 @@ async fn run_exchange(io: &dyn AgentIo, req: &TitleRequest) -> Option<String> {
         &json!({
             "id": 1,
             "method": "initialize",
-            "params": { "clientInfo": { "name": "aionui-title", "version": "1" } },
+            "params": { "clientInfo": { "name": "aelix-studio-host", "version": "1" } },
         }),
     )
     .await?;

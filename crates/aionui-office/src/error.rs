@@ -1,6 +1,8 @@
 #[derive(Debug, thiserror::Error)]
 pub enum OfficeError {
-    #[error("officecli not found")]
+    #[error(
+        "officecli not found; automatic installation is disabled. Restore the OfficeCLI bundled by Studio or add officecli to PATH"
+    )]
     OfficecliNotFound,
 
     #[error("officecli install failed: {0}")]
@@ -34,7 +36,11 @@ mod tests {
 
     #[test]
     fn display_messages() {
-        assert_eq!(OfficeError::OfficecliNotFound.to_string(), "officecli not found");
+        assert!(
+            OfficeError::OfficecliNotFound
+                .to_string()
+                .contains("automatic installation is disabled")
+        );
         assert_eq!(
             OfficeError::InstallFailed("installer error".into()).to_string(),
             "officecli install failed: installer error"

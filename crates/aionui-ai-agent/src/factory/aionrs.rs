@@ -964,21 +964,37 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct BundledRuntimeModeGuard;
+    struct BundledRuntimeModeGuard {
+        registry: Option<std::ffi::OsString>,
+    }
 
     #[cfg(unix)]
     impl BundledRuntimeModeGuard {
         fn install(root: &Path) -> Self {
-            unsafe { std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", root) };
+            let registry = std::env::var_os(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+            unsafe {
+                std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", root);
+                std::env::set_var(
+                    aionui_runtime::outbound_policy::NPM_REGISTRY_ENV,
+                    "http://127.0.0.1:9/internal/npm/",
+                );
+            }
             set_managed_resources_mode(ManagedResourcesMode::Bundled);
-            Self
+            Self { registry }
         }
     }
 
     #[cfg(unix)]
     impl Drop for BundledRuntimeModeGuard {
         fn drop(&mut self) {
-            unsafe { std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES") };
+            unsafe {
+                std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES");
+                if let Some(value) = &self.registry {
+                    std::env::set_var(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV, value);
+                } else {
+                    std::env::remove_var(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+                }
+            }
             set_managed_resources_mode(ManagedResourcesMode::Download);
         }
     }
@@ -1133,6 +1149,15 @@ mod tests {
             .await
             .expect("convert");
         let command = config.command.as_deref().expect("resolved command");
+        assert_eq!(
+            config
+                .env
+                .as_ref()
+                .unwrap()
+                .get("npm_config_registry")
+                .map(String::as_str),
+            Some("http://127.0.0.1:9/internal/npm/")
+        );
         assert_ne!(command, "npx");
         assert!(command.ends_with("/npx"), "unexpected stdio command path: {command}");
         assert_eq!(

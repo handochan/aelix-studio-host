@@ -73,6 +73,11 @@ pub async fn materialize_if_needed(
 ) -> Result<bool, ExtensionError> {
     let target = data_dir.join(crate::constants::BUILTIN_SKILLS_DIR_NAME);
 
+    // Retire old copies even when the marker matches or a refresh falls back.
+    // This lock also serializes retirement with another host refreshing the tree.
+    let _guard = MaterializeLockGuard::acquire(data_dir).await?;
+    crate::retired_builtins::remove_materialized(&target).await?;
+
     if version_file_matches(&target, binary_version).await {
         info!(
             target = %target.display(),
@@ -87,19 +92,16 @@ pub async fn materialize_if_needed(
         version = binary_version,
         "materializing embedded builtin skills"
     );
-    let _guard = MaterializeLockGuard::acquire(data_dir).await?;
-    if version_file_matches(&target, binary_version).await {
-        info!(
-            target = %target.display(),
-            version = binary_version,
-            "builtin skills up to date after materialize lock; skipping rewrite"
-        );
-        return Ok(false);
-    }
-
     match materialize_embedded_builtin_skills_unlocked(data_dir, corpus, binary_version).await {
         Ok(()) => {}
         Err(e) if existing_builtin_skills_looks_usable(&target).await => {
+            if crate::retired_builtins::has_legacy_installer_instructions(&target).await? {
+                error!(
+                    reason = "legacy_officecli_installer",
+                    "builtin refresh failed; refusing old remote installer instructions"
+                );
+                return Err(e);
+            }
             warn!(
                 target = %target.display(),
                 version = binary_version,

@@ -24,7 +24,7 @@ use crate::types::DocType;
 impl From<OfficeError> for ApiError {
     fn from(err: OfficeError) -> Self {
         match err {
-            OfficeError::OfficecliNotFound => ApiError::BadRequest("officecli not found".into()),
+            OfficeError::OfficecliNotFound => ApiError::BadRequest(OfficeError::OfficecliNotFound.to_string()),
             OfficeError::InstallFailed(_) => ApiError::Internal("officecli install failed".into()),
             OfficeError::StartFailed(msg) => ApiError::Internal(format!("preview start failed: {msg}")),
             OfficeError::PortTimeout(path) => {

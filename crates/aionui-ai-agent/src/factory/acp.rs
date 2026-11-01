@@ -846,21 +846,37 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct BundledRuntimeModeGuard;
+    struct BundledRuntimeModeGuard {
+        registry: Option<std::ffi::OsString>,
+    }
 
     #[cfg(unix)]
     impl BundledRuntimeModeGuard {
         fn install(root: &Path) -> Self {
-            unsafe { std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", root) };
+            let registry = std::env::var_os(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+            unsafe {
+                std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", root);
+                std::env::set_var(
+                    aionui_runtime::outbound_policy::NPM_REGISTRY_ENV,
+                    "http://127.0.0.1:9/internal/npm/",
+                );
+            }
             set_managed_resources_mode(ManagedResourcesMode::Bundled);
-            Self
+            Self { registry }
         }
     }
 
     #[cfg(unix)]
     impl Drop for BundledRuntimeModeGuard {
         fn drop(&mut self) {
-            unsafe { std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES") };
+            unsafe {
+                std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES");
+                if let Some(value) = &self.registry {
+                    std::env::set_var(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV, value);
+                } else {
+                    std::env::remove_var(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+                }
+            }
             set_managed_resources_mode(ManagedResourcesMode::Download);
         }
     }
@@ -888,6 +904,10 @@ mod tests {
                 assert_ne!(command, "npx");
                 assert!(command.ends_with("/npx"), "unexpected stdio command path: {command}");
                 assert_eq!(s.args, vec!["-y".to_owned(), "@upstash/context7-mcp".to_owned()]);
+                assert!(
+                    s.env.iter().any(|entry| entry.name == "npm_config_registry"
+                        && entry.value == "http://127.0.0.1:9/internal/npm/")
+                );
             }
             _ => panic!("expected Stdio"),
         }
@@ -958,6 +978,11 @@ mod tests {
         assert!(command.ends_with("/npx"), "unexpected stdio command path: {command}");
         assert_eq!(spec.args, vec!["-y".to_owned(), "@scope/test-agent".to_owned()]);
         assert!(spec.env.iter().any(|entry| entry.name == "K" && entry.value == "V"));
+        assert!(
+            spec.env
+                .iter()
+                .any(|entry| entry.name == "npm_config_registry" && entry.value == "http://127.0.0.1:9/internal/npm/")
+        );
         assert_eq!(spec.cwd.as_deref(), Some("/tmp/workspace"));
 
         meta.name = "Pi".into();

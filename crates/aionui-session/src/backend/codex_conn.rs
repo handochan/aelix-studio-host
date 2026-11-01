@@ -471,7 +471,7 @@ const ELICIT_PREFIX: &str = "elicit:";
 /// `experimentalApi` is silently ignored), serialized camelCase.
 fn initialize_params() -> HandshakeParams {
     HandshakeParams(json!({
-        "clientInfo": { "name": "aionui-session", "version": "0.1.0" },
+        "clientInfo": { "name": "aelix-studio-host", "version": "0.1.0" },
         "capabilities": { "experimentalApi": true, "requestAttestation": false }
     }))
 }
@@ -7873,7 +7873,7 @@ mod tests {
             frame["params"].get("experimentalApi").is_none(),
             "experimentalApi must NOT be top-level (codex ignores it there)"
         );
-        assert_eq!(frame["params"]["clientInfo"]["name"], "aionui-session");
+        assert_eq!(frame["params"]["clientInfo"]["name"], "aelix-studio-host");
     }
 
     /// Exact wire shape, per codex-cli 0.146.0's own generated schema

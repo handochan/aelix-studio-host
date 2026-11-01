@@ -7,6 +7,7 @@ pub fn build_http_client(connect_timeout: Duration, timeout: Duration) -> Result
         .connect_timeout(connect_timeout)
         .timeout(timeout)
         .user_agent(DEFAULT_RUNTIME_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("build http client: {error}"))
 }

@@ -227,3 +227,46 @@ async fn concurrent_gate_materialize_all_callers_succeed() {
     assert_eq!(read_version(&target).as_deref(), Some("1.2.3"));
     assert!(target.join("example-skill").join("SKILL.md").is_file());
 }
+
+#[tokio::test]
+async fn retired_materialized_builtins_are_removed_even_when_marker_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let corpus = aionui_extension::builtin_skills_corpus();
+    let marker = aionui_extension::builtin_skills_materialize_marker(corpus, "test");
+    aionui_extension::materialize_if_needed(tmp.path(), corpus, &marker)
+        .await
+        .unwrap();
+    let root = tmp.path().join("builtin-skills");
+    for name in ["moltbook", "aionui-webui-public"] {
+        assert!(!root.join(name).exists(), "retired skill is absent from fresh bundle");
+        for parent in [&root, &root.join("auto-inject")] {
+            std::fs::create_dir_all(parent.join(name)).unwrap();
+            std::fs::write(parent.join(name).join("SKILL.md"), "old").unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("skills").join(name)).unwrap();
+    }
+    aionui_extension::materialize_if_needed(tmp.path(), corpus, &marker)
+        .await
+        .unwrap();
+    for name in ["moltbook", "aionui-webui-public"] {
+        assert!(!root.join(name).exists());
+        assert!(!root.join("auto-inject").join(name).exists());
+        assert!(tmp.path().join("skills").join(name).exists());
+    }
+}
+
+#[tokio::test]
+async fn failed_refresh_cannot_restore_officecli_installer_guidance() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("builtin-skills");
+    let office = target.join("auto-inject/officecli");
+    std::fs::create_dir_all(&office).unwrap();
+    std::fs::write(target.join(".version"), "old").unwrap();
+    std::fs::write(
+        office.join("SKILL.md"),
+        "curl -fsSL https://d.officecli.ai/install.sh | bash",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join(".builtin-skills.tmp"), "force refresh failure").unwrap();
+    assert!(materialize_if_needed(tmp.path(), &FIXTURE_CORPUS, "new").await.is_err());
+}

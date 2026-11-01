@@ -96,11 +96,28 @@ jobs:
         with:
           prefix-key: v1-rust-smoke
       - run: cargo build --locked -p aionui-app --bin aelix-studio-host
-      - run: python3 -I -B scripts/release/smoke.py --binary target/debug/aelix-studio-host --report smoke/report.json
+      - run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Audit detector positive control (must fail with outbound attempts)
+        run: |
+          set +e
+          python3 -I -B scripts/release/outbound_audit.py --report smoke/positive-control.json -- python3 -I -B scripts/release/outbound_audit.py --positive-control
+          result=$?
+          set -e
+          test "$result" -eq 86
+      - name: Trace default host startup, session and shutdown
+        run: python3 -I -B scripts/release/outbound_audit.py --report smoke/outbound.json -- python3 -I -B scripts/release/smoke.py --binary target/debug/aelix-studio-host --report smoke/report.json
+      - name: Prepare pinned Node fixture (test setup, outside runtime audit)
+        run: |
+          mkdir -p smoke/node-fixture/node/node-v24.11.0-linux-x64
+          docker run --rm --network none -v "$PWD/smoke/node-fixture/node/node-v24.11.0-linux-x64:/out" \
+            docker.io/library/node:24.11.0-bookworm-slim@sha256:76d0ed0ed93bed4f4376211e9d8fddac4d8b3fbdb54cc45955696001a3c91152 \
+            sh -c 'mkdir -p /out/bin /out/lib; cp -a /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /out/bin/; cp -a /usr/local/lib/node_modules /out/lib/'
+      - name: Trace real npm/npx using only the configured loopback registry
+        run: python3 -I -B scripts/release/outbound_audit.py --report smoke/mirror-outbound.json -- python3 -I -B scripts/release/mirror_smoke.py --binary target/debug/aelix-studio-host --node-root smoke/node-fixture --report smoke/mirror.json
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-host-smoke
-          path: smoke/report.json
+          path: smoke/*.json
           if-no-files-found: ignore
           retention-days: 14

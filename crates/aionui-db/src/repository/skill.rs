@@ -33,6 +33,9 @@ pub trait ISkillRepository: Send + Sync {
         self.upsert(params).await
     }
 
+    /// Retires only builtin rows with this name; custom rows remain unchanged.
+    async fn retire_builtin_by_name(&self, name: &str) -> Result<(), DbError>;
+
     /// Soft-deletes an active skill by name.
     async fn delete_by_name(&self, name: &str) -> Result<SkillRow, DbError>;
 

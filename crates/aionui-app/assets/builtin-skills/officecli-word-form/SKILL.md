@@ -25,29 +25,7 @@ description: "Use this skill to create fillable Word forms (.docx) with real Con
 
 ## BEFORE YOU START (CRITICAL)
 
-**If `officecli` is not installed:**
-
-`macOS / Linux`
-
-```bash
-if ! command -v officecli >/dev/null 2>&1; then
-    curl -fsSL https://d.officecli.ai/install.sh | bash
-fi
-```
-
-`Windows (PowerShell)`
-
-```powershell
-if (-not (Get-Command officecli -ErrorAction SilentlyContinue)) {
-    irm https://d.officecli.ai/install.ps1 | iex
-}
-```
-
-Verify: `officecli --version`
-
-If `officecli` is still not found after first install, open a new terminal and run the verify command again.
-
-If the install command above fails (e.g. blocked by security policy, no network access, or insufficient permissions), install manually — download the binary for your platform from https://github.com/iOfficeAI/OfficeCLI/releases — then re-run the verify command.
+Studio supplies OfficeCLI. Verify with `officecli --version`. If missing, stop and report that automatic installation is disabled; restore Studio's bundled OfficeCLI or add its binary to PATH. Do not download or run an installer.
 
 ## Help-First Rule
 

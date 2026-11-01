@@ -101,8 +101,17 @@ pub async fn ensure_runtime_command_with_reporter(
             .map(ResolvedCommand::plain)
             .ok_or_else(|| NodeRuntimeError::system_invalid(format!("command '{command}' not found in PATH"))),
         RuntimeCommandProbe::NodeTool { tool, .. } => {
+            // Gate registry tools before Node preparation so missing mirror settings
+            // cannot trigger a runtime download as a side effect.
+            let registry_env = if matches!(tool, NodeTool::Npm | NodeTool::Npx) {
+                crate::outbound_policy::npm_env()?
+            } else {
+                Vec::new()
+            };
             let runtime = ensure_node_runtime_with_reporter(reporter).await?;
-            Ok(tool_command(tool, &runtime))
+            let mut command = tool_command(tool, &runtime);
+            command.env.extend(registry_env);
+            Ok(command)
         }
     }
 }

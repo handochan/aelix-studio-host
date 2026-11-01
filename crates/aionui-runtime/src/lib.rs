@@ -9,6 +9,7 @@ pub mod managed_resources;
 pub mod managed_resources_contract;
 pub use managed_resources_contract::current_runtime_key;
 pub mod node_runtime;
+pub mod outbound_policy;
 mod registry_npx_lock;
 mod resolver;
 mod shell_env;
