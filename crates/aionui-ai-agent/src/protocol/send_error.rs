@@ -1172,6 +1172,25 @@ mod tests {
         assert_eq!(after.stream_error().retryable, Some(false));
     }
 
+    #[test]
+    fn known_error_reply_keeps_its_classification_when_connection_also_closes() {
+        for error in [
+            AcpError::AuthRequired,
+            AcpError::OtherProtocolError {
+                code: -32099,
+                message: "explicit protocol rejection".into(),
+                data: None,
+            },
+            AcpError::SessionNotFound {
+                session_id: "missing".into(),
+            },
+        ] {
+            let before = AgentSendError::from_acp_error_ref(&error).into_stream_error();
+            let after = AgentSendError::from(error.after_prompt_dispatch(true)).into_stream_error();
+            assert_eq!(after, before);
+        }
+    }
+
     fn assert_classification(
         detail: &str,
         code: AgentErrorCode,

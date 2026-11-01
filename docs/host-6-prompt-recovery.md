@@ -32,8 +32,8 @@ The public stream/message error is `USER_AGENT_PROMPT_OUTCOME_UNKNOWN`, with
 `retryable: false`, an explanation that the model or tools may already have
 run, and no suggested retry action. The recovery policy rejects this code even
 if another producer incorrectly marks it retryable. An explicit user resend
-is a new turn; no deduplication key is added. Ordinary ACP error replies retain
-their current classifications.
+is a new turn; no deduplication key is added. Explicit non-internal ACP error
+replies retain their current classifications even if the connection also closes.
 
 `protocol/error.rs` and `protocol/send_error.rs` overlap with #4. This change
 does not implement its `-33001`, `-33002`, or `-32000` display work. The API
@@ -92,6 +92,6 @@ alone and together with its native process group. Restoring only the prompt
 protocol file to the base produced two model requests and one adapter restart
 with the same probe. The fixed file was then restored.
 
-Affected-crate tests: 2,204 passed, 12 existing ignored; affected clippy with
+Affected-crate tests: 2,205 passed, 12 existing ignored; affected clippy with
 `-D warnings` passed. The regular host smoke also passed (13 checks). Full
 workspace gate and exact-head CI results belong in the PR/Issue handoff.

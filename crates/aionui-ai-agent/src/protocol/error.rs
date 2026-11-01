@@ -279,7 +279,9 @@ impl AcpError {
     /// Apply only after prompt dispatch. Do not infer delivery from the absence
     /// of streamed output, or classify ordinary agent error replies as EOF.
     pub(crate) fn after_prompt_dispatch(self, transport_closed: bool) -> Self {
-        if transport_closed || matches!(self, Self::Disconnected { .. } | Self::NotConnected) {
+        if matches!(self, Self::Disconnected { .. } | Self::NotConnected)
+            || (transport_closed && matches!(self, Self::AgentInternal { .. }))
+        {
             Self::PromptOutcomeUnknown
         } else {
             self
