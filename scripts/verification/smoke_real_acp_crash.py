@@ -1,4 +1,6 @@
-"""Host crash probe using a checked-out real ACP adapter and native runtime.
+"""Manual-only host crash probe; this script is not run in CI.
+
+Uses a checked-out real ACP adapter and native runtime.
 
 Adapted from the Issue #6 handoff crash_probe.py (itself based on aelix-acp
 scripts/smoke_host.py). Model requests use a synthetic loopback endpoint.
@@ -82,7 +84,7 @@ def tap(log, argv):
 
 
 class Model:
-    """OpenAI-compatible streaming fixture with scripted delegation and failure."""
+    """Streaming fixture that holds the crash request until explicitly released."""
 
     def __init__(self):
         self.requests = []
@@ -105,21 +107,10 @@ class Model:
             if last.get("role") == "user" and "CRASH_HOLD" in content:
                 self.entered.set()
                 await self.release.wait()
-            if last.get("role") == "user" and "FAIL_NOW" in content:
-                body = b'data: {"error":{"message":"SYNTHETIC_TURN_FAILURE","type":"server_error"}}\n\n'
-            else:
-                if last.get("role") == "user" and "DELEGATE_NOW" in content:
-                    delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": f"call_agent_{len(self.requests)}", "type": "function",
-                             "function": {"name": "agent", "arguments": json.dumps({"profile": "reviewer", "task": "CHILD_TASK reply"})}}]}
-                    stop = "tool_calls"
-                elif last.get("role") == "user" and "CHILD_TASK" in content:
-                    await asyncio.sleep(1.5)  # Long enough for live progress frames.
-                    delta, stop = {"role": "assistant", "content": "CHILD_OK"}, "stop"
-                else:
-                    delta, stop = {"role": "assistant", "content": "SMOKE_OK"}, "stop"
-                body = ("".join("data: " + json.dumps({"id": "f", "object": "chat.completion.chunk", "created": 0,
-                        "model": request.get("model", "one"), "choices": [{"index": 0, "delta": d, "finish_reason": f}]}) + "\n\n"
-                        for d, f in ((delta, None), ({}, stop))) + "data: [DONE]\n\n").encode()
+            delta, stop = {"role": "assistant", "content": "SMOKE_OK"}, "stop"
+            body = ("".join("data: " + json.dumps({"id": "f", "object": "chat.completion.chunk", "created": 0,
+                    "model": request.get("model", "one"), "choices": [{"index": 0, "delta": d, "finish_reason": f}]}) + "\n\n"
+                    for d, f in ((delta, None), ({}, stop))) + "data: [DONE]\n\n").encode()
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: "
                          + str(len(body)).encode() + b"\r\n\r\n" + body)
             await writer.drain()
@@ -191,10 +182,11 @@ def frames(log):
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
 
-async def scenario(args, source, label):
+async def scenario(args):
+    label = "candidate"
     with tempfile.TemporaryDirectory(prefix="acp-host-smoke-", dir="/tmp" if os.name != "nt" else None) as directory:
         root = Path(directory).resolve()
-        for name in ("home", "agent/agents", "workspace", "host"):
+        for name in ("home", "agent", "workspace", "host"):
             (root / name).mkdir(parents=True)
         model = Model()
         port = await model.start()
@@ -203,7 +195,6 @@ async def scenario(args, source, label):
             "models": [{"id": "one", "name": "one", "reasoning": False, "input": ["text"], "contextWindow": 32768, "maxTokens": 1024}]}}}))
         # Native retry off: a provider failure reaches ACP after one model request.
         (root / "agent/settings.json").write_text(json.dumps({"defaultProvider": "fixture", "defaultModel": "one", "retry": {"enabled": False}}))
-        (root / "agent/agents/reviewer.md").write_text("---\nname: reviewer\ndescription: Review\ntools: [read]\n---\nReview.\n")
         env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP") if key in os.environ}
         env.update(HOME=str(root / "home"), USERPROFILE=str(root / "home"), AELIX_CODING_AGENT_DIR=str(root / "agent"),
                    AELIX_SETTINGS_PATH=str(root / "agent/settings.json"), AELIX_AUTH_PATH=str(root / "agent/auth.json"),
@@ -211,20 +202,18 @@ async def scenario(args, source, label):
                    AIONUI_EXTENSION_STATES_FILE=str(root / "extension-states.json"))
         log = root / "wire.jsonl"
         launcher = root / "acp-launch.py"
-        launcher.write_text(f"import os, sys\nopen({str(root / 'acp.pid')!r}, 'a').write(str(os.getpid()) + '\\n')\nsys.path.insert(0, {str(source)!r})\nfrom aelix_acp.server import main\nmain()\n")
+        launcher.write_text(f"import os, sys\nopen({str(root / 'acp.pid')!r}, 'a').write(str(os.getpid()) + '\\n')\nsys.path.insert(0, {str(args.acp_source)!r})\nfrom aelix_acp.server import main\nmain()\n")
         adapter = [str(launcher), "--aelix", str(args.aelix), "--provider", "fixture", "--model", "one",
                    "--permission-mode", "yolo", "--enable-agents", "--state-dir", str(root / "acp")]
-        if label == "control":
-            adapter.remove("--permission-mode")
-            adapter.remove("yolo")
         argv = [str(Path(__file__).resolve()), "tap", str(log), "--", args.python, *adapter]
         host = Host(args.host, root, env)
-        checks, observed = [], {}
+        observed = {}
         await host.start()
         try:
-            await host.api("/api/agents/custom", "POST", {"name": f"ACP20 {label}", "command": args.python, "args": argv,
+            agent_name = "Host crash probe"
+            await host.api("/api/agents/custom", "POST", {"name": agent_name, "command": args.python, "args": argv,
                                                            "env": [], "icon": "A"})
-            assistant = next(a for a in await host.api("/api/assistants") if a["name"] == f"ACP20 {label}")
+            assistant = next(a for a in await host.api("/api/assistants") if a["name"] == agent_name)
 
             async def conversation(name):
                 created = await host.api("/api/conversations", "POST", {"name": name, "assistant": {"id": assistant["id"]},
@@ -285,9 +274,7 @@ async def scenario(args, source, label):
 async def run(args):
     report = {"host": {"path": str(args.host), "sha256": hashlib.sha256(args.host.read_bytes()).hexdigest()},
               "native": str(args.aelix), "acpSource": str(args.acp_source), "model": "synthetic loopback",
-              "renderer": "not run", "scenarios": [await scenario(args, args.acp_source, "candidate")]}
-    if args.control_acp_source:
-        report["scenarios"].append(await scenario(args, args.control_acp_source, "control"))
+              "renderer": "not run", "scenarios": [await scenario(args)]}
     return report
 
 
@@ -302,7 +289,6 @@ def main():
     parser.add_argument("--acp-source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-model-requests", type=int, default=1)
-    parser.add_argument("--control-acp-source", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--kill-native", action="store_true")
     args = parser.parse_args()

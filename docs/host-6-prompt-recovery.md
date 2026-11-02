@@ -84,8 +84,8 @@ rendering, installer acceptance, or release readiness.
 
 ## Recorded verification
 
-[`host-6-evidence.json`](host-6-evidence.json) binds the tested implementation
-files and binaries by SHA-256. On Linux arm64 Docker, the five synthetic
+[Historical verification for reviewed head `ebedbd1`](https://github.com/handochan/aelix-studio-host/issues/6#issuecomment-6581821347)
+is retained in Issue #6. On Linux arm64 Docker, the five synthetic
 scenarios passed. Real ACP `16d6555` and native `e19ab55` source snapshots
 produced one model request and no adapter restart after killing ACP, both
 alone and together with its native process group. Restoring only the prompt
