@@ -12,11 +12,12 @@ targets = [
 ]
 
 [advisories]
-# Baseline: advisories already present in the upstream v0.2.2 Cargo.lock when
-# this policy was introduced (cargo-deny 0.20.2, 2026-10-31). They are listed
-# so CI fails on any NEW advisory; they are not accepted risks. Remove an
-# entry when the dependency update lands (cargo-deny warns once an entry no
-# longer matches). README.md "Dependency checks" tracks the follow-up.
+# Baseline: advisories that match the Cargo.lock inherited unchanged from
+# upstream v0.2.2, including ones published after this policy was introduced
+# (cargo-deny 0.20.2, 2026-10-31). They are listed so CI fails on any NEW
+# advisory; they are not accepted risks. Remove an entry when the dependency
+# update lands (cargo-deny warns once an entry no longer matches). README.md
+# "Dependency checks" tracks the follow-up.
 ignore = [
     { id = "RUSTSEC-2024-0449", reason = "v0.2.2 baseline: unsafe-libyaml unmaintained" },
     { id = "RUSTSEC-2026-0190", reason = "v0.2.2 baseline: anyhow 1.0.102 unsound downcast_mut" },
@@ -37,6 +38,7 @@ ignore = [
     { id = "RUSTSEC-2026-0403", reason = "v0.2.2 baseline: zstd-safe 7.2.4" },
     { id = "RUSTSEC-2026-0410", reason = "v0.2.2 baseline: zstd-sys 2.0.16" },
     { id = "RUSTSEC-2026-0418", reason = "v0.2.2 baseline: libz-sys 1.1.28 build script" },
+    { id = "RUSTSEC-2026-0429", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
 ]
 
 [licenses]
