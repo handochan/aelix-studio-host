@@ -30,6 +30,10 @@ pub enum AgentErrorCode {
     UserAgentDisconnected,
     /// Connection lost after prompt dispatch; execution cannot be ruled out.
     UserAgentPromptOutcomeUnknown,
+    UserAgentSessionLocked,
+    UserAgentTurnFailedAfterDispatch,
+    UserAgentBusy,
+    UserAgentOperationRefused,
     UserAgentAuthRequired,
     UserAgentSessionNotFound,
     UserAgentNoPreviousSession,
@@ -105,6 +109,12 @@ impl AgentErrorResolution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStreamErrorData {
     pub message: String,
+    /// Original ACP application error code and structured error.data.
+    /// Kept separate from the host's locale code; field names inside data are opaque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<AgentErrorCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +140,8 @@ impl AgentStreamErrorData {
     pub fn legacy(message: impl Into<String>, code: Option<AgentErrorCode>) -> Self {
         Self {
             message: message.into(),
+            protocol_code: None,
+            data: None,
             code,
             ownership: None,
             detail: None,
@@ -151,6 +163,8 @@ impl AgentStreamErrorData {
     ) -> Self {
         Self {
             message: message.into(),
+            protocol_code: None,
+            data: None,
             code: Some(code),
             ownership: Some(ownership),
             detail,
@@ -250,6 +264,8 @@ mod tests {
     fn workspace_path_field_serializes_and_deserializes() {
         let payload = AgentStreamErrorData {
             message: "workspace path rejected".into(),
+            protocol_code: None,
+            data: None,
             code: Some(AgentErrorCode::WorkspacePathRuntimeUnavailable),
             ownership: Some(AgentErrorOwnership::Aionui),
             detail: Some("workspace detail".into()),

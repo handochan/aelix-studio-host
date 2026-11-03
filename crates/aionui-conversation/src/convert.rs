@@ -218,8 +218,12 @@ fn truncate_large_strings(value: &mut serde_json::Value, max_chars: usize, trunc
             }
         }
         serde_json::Value::Object(map) => {
-            for entry in map.values_mut() {
-                truncate_large_strings(entry, max_chars, truncated);
+            for (key, entry) in map.iter_mut() {
+                // ACP metadata is an opaque contract, including child state.
+                // History previews must show the same values as live frames.
+                if key != "_meta" {
+                    truncate_large_strings(entry, max_chars, truncated);
+                }
             }
         }
         _ => {}

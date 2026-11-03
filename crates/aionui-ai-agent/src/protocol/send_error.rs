@@ -77,6 +77,8 @@ impl AgentSendError {
             AgentError::WorkspacePathRuntimeUnavailable(path) => Self {
                 stream_error: AgentStreamErrorData {
                     message: "Current Agent failed to run in this workspace path".into(),
+                    protocol_code: None,
+                    data: None,
                     code: Some(AgentErrorCode::WorkspacePathRuntimeUnavailable),
                     ownership: Some(AgentErrorOwnership::Aionui),
                     detail: Some(bound_error_detail(&detail)),
@@ -221,6 +223,17 @@ impl AgentSendError {
 
     pub fn ownership(&self) -> Option<AgentErrorOwnership> {
         self.stream_error.ownership
+    }
+
+    /// Stable HTTP/locale code for the structured ACP application errors.
+    pub fn protocol_error_code(&self) -> Option<&'static str> {
+        match self.code()? {
+            AgentErrorCode::UserAgentSessionLocked => Some("USER_AGENT_SESSION_LOCKED"),
+            AgentErrorCode::UserAgentTurnFailedAfterDispatch => Some("USER_AGENT_TURN_FAILED_AFTER_DISPATCH"),
+            AgentErrorCode::UserAgentBusy => Some("USER_AGENT_BUSY"),
+            AgentErrorCode::UserAgentOperationRefused => Some("USER_AGENT_OPERATION_REFUSED"),
+            _ => None,
+        }
     }
 
     pub(crate) fn from_acp_error_ref(err: &AcpError) -> Self {
@@ -407,6 +420,43 @@ impl From<AgentError> for AgentSendError {
 }
 
 fn classify_acp_error(err: &AcpError) -> AgentSendError {
+    if let AcpError::OtherProtocolError { code, data, .. } = err {
+        // Verified: aelix-acp@16d6555/docs/studio-integration.md, error table.
+        // Do not infer retryability from error prose or data.retryable.
+        let classified = match code {
+            -33001 => Some((
+                AgentErrorCode::UserAgentSessionLocked,
+                "The Agent session is open in another process",
+            )),
+            -33002 => Some((
+                AgentErrorCode::UserAgentTurnFailedAfterDispatch,
+                "The turn failed after the Agent accepted it",
+            )),
+            -32000 => Some((
+                AgentErrorCode::UserAgentBusy,
+                "The Agent is busy or has reached its session limit",
+            )),
+            -32004 => Some((
+                AgentErrorCode::UserAgentOperationRefused,
+                "The Agent cannot perform this operation",
+            )),
+            _ => None,
+        };
+        if let Some((public_code, message)) = classified {
+            let mut error = AgentSendError::new(
+                message,
+                public_code,
+                AgentErrorOwnership::UserAgent,
+                None,
+                false,
+                false,
+                None,
+            );
+            error.stream_error.protocol_code = Some(*code);
+            error.stream_error.data = data.clone();
+            return error;
+        }
+    }
     match err {
         AcpError::AgentInternal { message, code, data } => {
             let default_detail = acp_agent_internal_public_detail(*code);
