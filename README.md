@@ -249,7 +249,8 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
 - **Advisories:** dependency updates resolve 19 of the 20 inherited RustSec
   advisories, including all four zip notices, in
   [#7](https://github.com/handochan/aelix-studio-host/issues/7). There are no
-  unresolved advisory baseline entries. New advisories fail CI.
+  unresolved advisory baseline entries. Calamine 0.38 also addresses
+  RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail CI.
 - **User-approved advisory exception (2026-11-03):** RUSTSEC-2024-0449 is an
   unmaintained notice for `unsafe-libyaml`, with no patched version. It remains
   through both the host's `serde_yaml` and upstream aionrs' `aion-memory`;
