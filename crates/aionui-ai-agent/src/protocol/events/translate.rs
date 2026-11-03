@@ -380,3 +380,28 @@ fn map_tool_call_locations(locations: &[SdkToolCallLocation]) -> Option<Vec<AcpT
             .collect()
     })
 }
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sdk_tool_metadata_survives_translation_including_late_statusless_updates() {
+        // Synthetic frames exercise the canonical schema, not a CLI capture.
+        for update in [
+            json!({"sessionUpdate":"tool_call","toolCallId":"parent","title":"agent","status":"in_progress"}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"parent","status":"completed"}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"parent"}),
+        ] {
+            let meta = json!({"aelix/subagents":{"version":1,"children":[{"id":"child","currentTool":"read","elapsedMs":42,"state":"done"}]}});
+            let mut update = update;
+            update["_meta"] = meta.clone();
+            let notification: SessionNotification =
+                serde_json::from_value(json!({"sessionId":"s","update":update})).unwrap();
+            let events = session_notification_to_events(&notification);
+            assert_eq!(events.len(), 1);
+            assert_eq!(serde_json::to_value(&events[0]).unwrap()["data"]["_meta"], meta);
+        }
+    }
+}

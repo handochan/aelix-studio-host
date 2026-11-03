@@ -92,7 +92,7 @@ impl CloseReason {
 /// callers, but must not be rendered directly to public HTTP or WebSocket
 /// output. The `stderr` fields may contain sensitive data; `Display`
 /// intentionally omits them.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 #[allow(dead_code)] // Variants constructed as error paths mature; kept for complete ACP error model.
 pub enum AcpError {
@@ -153,6 +153,14 @@ pub enum AcpError {
     /// set. Keep it structured so UI can show a protocol error instead of an
     /// unknown upstream failure.
     OtherProtocolError {
+        code: i32,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
+
+    /// Application contract from the negotiated Aelix adapter. Other agents'
+    /// errors retain the generic protocol mapping and data exposure policy.
+    ApplicationError {
         code: i32,
         message: String,
         data: Option<serde_json::Value>,
@@ -253,7 +261,8 @@ impl std::fmt::Display for AcpError {
                 }
                 Ok(())
             }
-            AcpError::OtherProtocolError { code, message, data } => {
+            AcpError::OtherProtocolError { code, message, data }
+            | AcpError::ApplicationError { code, message, data } => {
                 write!(f, "Agent protocol error (code {code}): {message}")?;
                 if let Some(data) = data {
                     let compact = serde_json::to_string(data).unwrap_or_else(|_| "<unserializable data>".to_owned());
@@ -313,6 +322,22 @@ impl AcpError {
     /// See ELECTRON-1HQ.
     /// `context` carries the session ID or method name for diagnostics.
     pub fn from_sdk(err: SdkError, context: &str) -> Self {
+        Self::from_sdk_for_agent(err, context, None)
+    }
+
+    pub(crate) fn from_sdk_for_agent(err: SdkError, context: &str, agent_name: Option<&str>) -> Self {
+        let code = i32::from(err.code);
+        // agent-client-protocol-schema-1.5.0/src/v1/error.rs reserves -32000 for AuthRequired.
+        // Only the identified Aelix adapter uses it for busy/limit instead:
+        // aelix-acp@16d6555/src/aelix_acp/server.py (initialize and dispatch).
+        // Preserve standard authentication behavior for every other agent.
+        if agent_name == Some("aelix-acp") && matches!(code, -33001 | -33002 | -32000 | -32004) {
+            return AcpError::ApplicationError {
+                code,
+                message: err.message,
+                data: err.data,
+            };
+        }
         match err.code {
             ErrorCode::AuthRequired => AcpError::AuthRequired,
             ErrorCode::ParseError => AcpError::ProtocolParseError { message: err.message },
@@ -948,5 +973,51 @@ mod tests {
             !display.contains('\n'),
             "data must be appended on a single line, not pretty-printed; got {display}"
         );
+    }
+}
+
+#[cfg(test)]
+mod application_error_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn aelix_busy_is_distinct_from_standard_acp_auth_required() {
+        // Verified: schema-1.5.0/src/v1/error.rs and aelix-acp@16d6555/server.py.
+        for agent in [None, Some("another-agent")] {
+            assert!(matches!(
+                AcpError::from_sdk_for_agent(
+                    SdkError::new(-32000, "Authentication required"),
+                    "session/prompt",
+                    agent
+                ),
+                AcpError::AuthRequired
+            ));
+        }
+        let data = json!({"fixture":true});
+        let busy = AcpError::from_sdk_for_agent(
+            SdkError::new(-32000, "busy").data(data.clone()),
+            "session/load",
+            Some("aelix-acp"),
+        );
+        assert!(matches!(busy, AcpError::ApplicationError {code:-32000,data:Some(ref value),..} if value == &data));
+        assert!(!busy.is_retryable());
+    }
+
+    #[test]
+    fn structured_application_errors_win_over_session_not_found_heuristics_and_transport_loss() {
+        for code in [-33001, -33002, -32004] {
+            let data = json!({"profile":"Session not found: authored-profile","retryable":false});
+            let error = AcpError::from_sdk_for_agent(
+                SdkError::new(code, "refused").data(data.clone()),
+                "session/load",
+                Some("aelix-acp"),
+            )
+            .after_prompt_dispatch(true);
+            assert!(
+                matches!(error,AcpError::ApplicationError {code:actual,data:Some(ref value),..} if actual == code && value == &data)
+            );
+            assert!(!error.is_retryable());
+        }
     }
 }

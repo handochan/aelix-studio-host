@@ -183,7 +183,16 @@ pub fn row_to_message_response_compact(row: MessageRow) -> Result<MessageRespons
     }
 
     let mut truncated = false;
+    // The ACP envelope's metadata is opaque. Nested tool input/output objects
+    // named _meta are still ordinary preview content and may be compacted.
+    let metadata = response
+        .content
+        .as_object_mut()
+        .and_then(|object| object.remove("_meta"));
     truncate_large_strings(&mut response.content, TOOL_CONTENT_PREVIEW_CHARS, &mut truncated);
+    if let Some(metadata) = metadata {
+        response.content["_meta"] = metadata;
+    }
     if truncated && let Some(obj) = response.content.as_object_mut() {
         obj.insert(
             "_compact".to_string(),

@@ -135,7 +135,7 @@ impl ConversationError {
                 AgentError::workspace_path_runtime_unavailable(path.clone())
             }
             Self::OpenClawGatewayUnreachable { detail } => AgentError::bad_gateway(detail.clone()),
-            Self::Acp(err) => AgentError::bad_gateway(err.to_string()),
+            Self::Acp(err) => AgentError::Acp(err.clone()),
         }
     }
 

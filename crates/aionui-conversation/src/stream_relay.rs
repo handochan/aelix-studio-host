@@ -864,6 +864,13 @@ impl StreamRelay {
         // force every object key down the tree to snake_case so the
         // wire contract stays uniform.
         normalize_keys_to_snake_case(&mut event_data);
+        if let AgentStreamEvent::Error(error) = event
+            && let Some(data) = &error.data
+        {
+            // ACP error.data is opaque, just like _meta. Keep lockedBy and
+            // other adapter-defined keys identical across WS, HTTP and DB.
+            event_data["data"]["data"] = data.clone();
+        }
 
         let payload = json!({
             "conversation_id": self.conversation_id,
@@ -912,7 +919,12 @@ impl StreamRelay {
 
             self.send_system_responses(&processed.system_responses);
             outcome.system_responses = processed.system_responses;
-        } else if let AgentStreamEvent::Error(data) = event {
+        }
+        if let AgentStreamEvent::Error(data) = event
+            && (text.is_empty() || data.protocol_code.is_some())
+        {
+            // A partial response does not carry the structured failure. Keep
+            // the code/data available after reload as well as on the live wire.
             self.adapter.persist_error_tip(data).await;
         }
 
@@ -1871,6 +1883,8 @@ mod tests {
         .with_defer_clean_terminal_errors(true);
 
         tx.send(AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,
@@ -1926,6 +1940,8 @@ mod tests {
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,
@@ -1981,6 +1997,8 @@ mod tests {
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "codex rejected the turn request: thread not found: 0199-dead".into(),
             code: Some(AgentErrorCode::UserAgentSessionNotFound),
             ownership: None,
@@ -2036,6 +2054,8 @@ mod tests {
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,

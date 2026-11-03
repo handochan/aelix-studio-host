@@ -106,7 +106,19 @@ impl From<ConversationError> for ApiError {
                     "port": 18789
                 })),
             ),
-            ConversationError::Acp(_) => ApiError::BadGateway("Agent protocol error".into()),
+            ConversationError::Acp(error) => {
+                let error = aionui_ai_agent::AgentSendError::from(error);
+                if let Some(code) = error.protocol_error_code() {
+                    ApiError::coded(
+                        StatusCode::BAD_GATEWAY,
+                        code,
+                        error.stream_error().message.clone(),
+                        Some(serde_json::to_value(error.stream_error()).expect("agent error is JSON serializable")),
+                    )
+                } else {
+                    ApiError::BadGateway("Agent protocol error".into())
+                }
+            }
         }
     }
 }

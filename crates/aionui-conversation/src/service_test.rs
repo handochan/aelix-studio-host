@@ -6636,6 +6636,8 @@ async fn send_message_auto_replays_clean_retryable_acp_error_once() {
     let first = Arc::new(ScriptedAgent::new(
         &conv.id,
         vec![vec![AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,
@@ -6700,6 +6702,8 @@ async fn auto_replay_rebuild_keeps_existing_acp_session_id_in_build_options() {
     let first = Arc::new(ScriptedAgent::new(
         &conv.id,
         vec![vec![AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,
@@ -6751,6 +6755,8 @@ async fn send_message_does_not_auto_replay_after_visible_output() {
                 content: "partial".into(),
             }),
             AgentStreamEvent::Error(ErrorEventData {
+                protocol_code: None,
+                data: None,
                 message: "temporary provider failure".into(),
                 code: Some(AgentErrorCode::UnknownUpstreamError),
                 ownership: None,
@@ -6807,6 +6813,8 @@ async fn send_message_does_not_auto_replay_after_tool_side_effect() {
                 parent_call_id: None,
             }),
             AgentStreamEvent::Error(ErrorEventData {
+                protocol_code: None,
+                data: None,
                 message: "temporary provider failure".into(),
                 code: Some(AgentErrorCode::UnknownUpstreamError),
                 ownership: None,
@@ -6845,6 +6853,8 @@ async fn send_message_does_not_auto_replay_model_not_found() {
     let first = Arc::new(ScriptedAgent::new(
         &conv.id,
         vec![vec![AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "model not found".into(),
             code: Some(AgentErrorCode::UserLlmProviderModelNotFound),
             ownership: None,
@@ -6889,6 +6899,8 @@ async fn send_message_auto_replay_stops_after_second_retryable_failure() {
     let first = Arc::new(ScriptedAgent::new(
         &conv.id,
         vec![vec![AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure one".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,
@@ -6902,6 +6914,8 @@ async fn send_message_auto_replay_stops_after_second_retryable_failure() {
     let second = Arc::new(ScriptedAgent::new(
         &conv.id,
         vec![vec![AgentStreamEvent::Error(ErrorEventData {
+            protocol_code: None,
+            data: None,
             message: "temporary provider failure two".into(),
             code: Some(AgentErrorCode::UnknownUpstreamError),
             ownership: None,
