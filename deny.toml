@@ -12,33 +12,11 @@ targets = [
 ]
 
 [advisories]
-# Baseline: advisories that match the Cargo.lock inherited unchanged from
-# upstream v0.2.2, including ones published after this policy was introduced
-# (cargo-deny 0.20.2, 2026-10-31). They are listed so CI fails on any NEW
-# advisory; they are not accepted risks. Remove an entry when the dependency
-# update lands (cargo-deny warns once an entry no longer matches). README.md
-# "Dependency checks" tracks the follow-up.
+# User-approved exception, distinct from an unresolved advisory baseline.
+# The other 19 inherited advisories were resolved in host #7. Any future
+# unresolved baseline entries must be documented separately from this exception.
 ignore = [
-    { id = "RUSTSEC-2024-0449", reason = "v0.2.2 baseline: unsafe-libyaml unmaintained" },
-    { id = "RUSTSEC-2026-0190", reason = "v0.2.2 baseline: anyhow 1.0.102 unsound downcast_mut" },
-    { id = "RUSTSEC-2026-0285", reason = "v0.2.2 baseline: rustls 0.23.40" },
-    { id = "RUSTSEC-2026-0346", reason = "v0.2.2 baseline: rustls 0.23.40" },
-    { id = "RUSTSEC-2026-0348", reason = "v0.2.2 baseline: rustls 0.23.40" },
-    { id = "RUSTSEC-2026-0349", reason = "v0.2.2 baseline: rustls 0.23.40" },
-    { id = "RUSTSEC-2026-0367", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
-    { id = "RUSTSEC-2026-0368", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
-    { id = "RUSTSEC-2026-0369", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
-    { id = "RUSTSEC-2026-0381", reason = "v0.2.2 baseline: webpki-roots 1.0.7" },
-    { id = "RUSTSEC-2026-0382", reason = "v0.2.2 baseline: rustls-webpki 0.103.13" },
-    { id = "RUSTSEC-2026-0385", reason = "v0.2.2 baseline: ctutils 0.4.2" },
-    { id = "RUSTSEC-2026-0386", reason = "v0.2.2 baseline: tokio 1.52.3 unsound AsyncFd constructors" },
-    { id = "RUSTSEC-2026-0387", reason = "v0.2.2 baseline: crypto-bigint 0.4.9 and 0.5.5" },
-    { id = "RUSTSEC-2026-0391", reason = "v0.2.2 baseline: zstd 0.13.3" },
-    { id = "RUSTSEC-2026-0398", reason = "v0.2.2 baseline: zstd-safe 7.2.4" },
-    { id = "RUSTSEC-2026-0403", reason = "v0.2.2 baseline: zstd-safe 7.2.4" },
-    { id = "RUSTSEC-2026-0410", reason = "v0.2.2 baseline: zstd-sys 2.0.16" },
-    { id = "RUSTSEC-2026-0418", reason = "v0.2.2 baseline: libz-sys 1.1.28 build script" },
-    { id = "RUSTSEC-2026-0429", reason = "v0.2.2 baseline: zip 2.4.2 and 8.6.0" },
+    { id = "RUSTSEC-2024-0449", reason = "User decision 2026-11-03: unmaintained notice with no patched version; upstream aionrs aion-memory also requires unsafe-libyaml. Removal: handochan/aelix-studio-host#18 (Later)." },
 ]
 
 [licenses]
@@ -65,6 +43,13 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
+
+# zip 9 retains BZip2 support through this Rust implementation. Its distributed
+# LICENSE uses bzip2-1.0.6; limit the additional permission to the reviewed crate.
+[[licenses.exceptions]]
+name = "libbz2-rs-sys"
+version = "=0.2.6"
+allow = ["bzip2-1.0.6"]
 
 [bans]
 multiple-versions = "allow"

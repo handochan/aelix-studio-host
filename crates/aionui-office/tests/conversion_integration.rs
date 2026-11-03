@@ -4,6 +4,86 @@ use rust_xlsxwriter::{Format, Workbook};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/calamine")
+        .join(name)
+}
+
+async fn assert_fixture_conversion(extension: &str) {
+    let path = fixture(&format!("issues.{extension}"));
+    let workbook = calamine::open_workbook_auto(&path).unwrap();
+    assert!(match extension {
+        "xls" => matches!(workbook, calamine::Sheets::Xls(_)),
+        "xlsb" => matches!(workbook, calamine::Sheets::Xlsb(_)),
+        "xlsx" => matches!(workbook, calamine::Sheets::Xlsx(_)),
+        _ => unreachable!(),
+    });
+    let response = ConversionService::new(None)
+        .convert(path.to_str().unwrap(), ConversionTarget::ExcelJson)
+        .await
+        .unwrap();
+    assert_eq!(response.to, "excel-json");
+    assert!(response.result.success, "{extension}: {:?}", response.result.error);
+    assert!(response.result.error.is_none());
+    let data = response.result.data.unwrap();
+    let sheet = data["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|sheet| sheet["name"] == "issue2")
+        .unwrap();
+    // Expected cells are published in calamine's tests/test.rs for these fixtures.
+    assert_eq!(sheet["data"], serde_json::json!([[1.0, "a"], [2.0, "b"], [3.0, "c"]]));
+}
+
+#[tokio::test]
+async fn excel_to_json_reads_xls_fixture() {
+    assert_fixture_conversion("xls").await;
+}
+
+#[tokio::test]
+async fn excel_to_json_reads_xlsb_fixture() {
+    assert_fixture_conversion("xlsb").await;
+}
+
+#[tokio::test]
+async fn excel_to_json_reads_xlsx_fixture() {
+    assert_fixture_conversion("xlsx").await;
+}
+
+#[test]
+fn xls_short_cfb_directory_chunk_does_not_panic() {
+    use calamine::Reader;
+
+    let workbook = calamine::open_workbook_auto(fixture("cfb_dir_short_chunk_panic.xls")).unwrap();
+    assert!(matches!(workbook, calamine::Sheets::Xls(_)));
+    assert_eq!(workbook.sheet_names(), ["Sheet1"]);
+}
+
+#[tokio::test]
+async fn excel_to_json_rejects_cyclic_cfb_difat() {
+    let path = fixture("cfb_difat_oom.xls");
+    assert!(matches!(
+        calamine::open_workbook_auto(&path),
+        Err(calamine::Error::Xls(calamine::XlsError::Cfb(_)))
+    ));
+    let response = ConversionService::new(None)
+        .convert(path.to_str().unwrap(), ConversionTarget::ExcelJson)
+        .await
+        .unwrap();
+    assert_eq!(response.to, "excel-json");
+    assert!(!response.result.success);
+    assert!(response.result.data.is_none());
+    assert!(
+        response
+            .result
+            .error
+            .unwrap()
+            .starts_with("conversion error: failed to open workbook:")
+    );
+}
+
 fn create_simple_xlsx(dir: &TempDir) -> PathBuf {
     let path = dir.path().join("test.xlsx");
     let mut wb = Workbook::new();

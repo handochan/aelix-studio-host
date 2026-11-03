@@ -2,6 +2,53 @@ use super::*;
 use std::cell::Cell;
 use std::io::{Error as IoError, ErrorKind};
 
+#[test]
+fn zip_extraction_keeps_files_inside_runtime_root() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("node.zip");
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+    for (name, content) in [("../outside.txt", "escape"), ("node/bin/node", "runtime")] {
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(content.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap();
+    let root = tmp.path().join("runtime");
+
+    extract_zip(&archive, &root).unwrap();
+
+    assert_eq!(std::fs::read_to_string(root.join("node/bin/node")).unwrap(), "runtime");
+    assert!(!tmp.path().join("outside.txt").exists());
+}
+
+#[test]
+fn zip_symlink_entry_is_materialized_as_regular_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("node.zip");
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, "unchanged").unwrap();
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+    writer
+        .add_symlink(
+            "node/link",
+            "../../outside.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let root = tmp.path().join("runtime");
+
+    extract_zip(&archive, &root).unwrap();
+
+    let link = root.join("node/link");
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_file());
+    assert_eq!(std::fs::read_to_string(link).unwrap(), "../../outside.txt");
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "unchanged");
+}
+
 fn write_file(path: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create parent");

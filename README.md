@@ -243,14 +243,20 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
   marked `publish = false` is skipped, including third-party ones: our
   workspace crates (see [License](#license)) and, today, only aionrs'
   code-less hakari `workspace-hack` crate. `[sources]` limits git dependencies
-  to aionrs.
-- **Advisories:** the upstream v0.2.2 `Cargo.lock` matches 20 RustSec
-  advisories (rustls, rustls-webpki, webpki-roots, zip, zstd, tokio,
-  crypto-bigint and others; RUSTSEC-2026-0429 for zip was published after the
-  baseline was introduced). They are listed in `deny.toml` as a baseline so
-  that any new advisory fails CI. They are known, unresolved issues, not
-  accepted risks. The owner decided they must be resolved before the Beta
-  release ([#7](https://github.com/handochan/aelix-studio-host/issues/7)).
+  to aionrs. The BZip2 implementation used by zip 9 has a scoped license
+  allowance for `libbz2-rs-sys =0.2.6` (`bzip2-1.0.6`); its distributed
+  license text was checked separately from the general allow list.
+- **Advisories:** dependency updates resolve 19 of the 20 inherited RustSec
+  advisories, including all four zip notices, in
+  [#7](https://github.com/handochan/aelix-studio-host/issues/7). There are no
+  unresolved advisory baseline entries. Calamine 0.38 also addresses
+  RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail CI.
+- **User-approved advisory exception (2026-11-03):** RUSTSEC-2024-0449 is an
+  unmaintained notice for `unsafe-libyaml`, with no patched version. It remains
+  through both the host's `serde_yaml` and upstream aionrs' `aion-memory`;
+  changing only the host parser cannot remove it. The owner approved this one
+  exception separately from the unresolved baseline. Removal is tracked in
+  [Later #18](https://github.com/handochan/aelix-studio-host/issues/18).
 
 ## Tags and upstream remotes
 

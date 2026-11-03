@@ -144,7 +144,7 @@ include_dir = "0.7"
 notify = "8"
 walkdir = "2"
 ignore = "0.4"
-zip = "2"
+zip = "9"
 git2 = { version = "0.21.0", default-features = false }
 # Source-control discard sends untracked files to the platform trash instead of
 # unlinking them (mac/win/linux, x64 + arm64).
@@ -154,7 +154,6 @@ rust-embed = "8"
 
 # Runtime embedding
 fs2 = "0.4"
-zstd = "0.13"
 
 # Cron
 cron = "0.15"
@@ -173,8 +172,8 @@ which = "7"
 arboard = { version = "3", default-features = false }
 
 # Office
-calamine = "0.36"
-rust_xlsxwriter = "0.82"
+calamine = "0.38"
+rust_xlsxwriter = "0.100"
 sha1 = "0.10"
 sha2 = "0.10"
 
