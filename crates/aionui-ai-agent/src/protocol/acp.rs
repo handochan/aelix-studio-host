@@ -333,7 +333,18 @@ impl AcpProtocol {
     /// Blocks until the agent returns a `PromptResponse` (turn completed).
     /// Streaming events arrive via the `event_tx` broadcast channel.
     pub async fn prompt(&self, req: PromptRequest) -> Result<PromptResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_prompt).await
+        // A failure observed before handing the prompt to the SDK retains the
+        // existing retry policy. After handoff there is no delivery receipt:
+        // connection loss cannot prove that the agent did not execute it.
+        self.ensure_connected()?;
+        let method = AGENT_METHOD_NAMES.session_prompt;
+        log_client_request(method, &json_str(&req));
+        let rsp = self.connection.send_request(req).block_task().await;
+        log_agent_response(method, &json_or_err(&rsp));
+        rsp.map_err(|err| {
+            let transport_closed = agent_client_protocol::is_incoming_transport_closed(&err) || !self.is_connected();
+            AcpError::from_sdk(err, method).after_prompt_dispatch(transport_closed)
+        })
     }
 
     /// Cancel the current prompt in a session (fire-and-forget notification).
@@ -632,8 +643,21 @@ async fn run_sdk_background(
     // writes). Only the two recognised shapes are absorbed; every other line,
     // including genuinely malformed input, is forwarded unchanged.
     let dialect_event_tx = event_tx.clone();
+    let incoming_alive = Arc::clone(&alive);
+    let eof_alive = Arc::clone(&alive);
     let incoming = FramedRead::new(stdout, LinesCodec::new())
         .map_err(std::io::Error::other)
+        .inspect(move |line| {
+            if line.is_err() {
+                incoming_alive.store(false, Ordering::Release);
+            }
+        })
+        .chain(futures_util::stream::poll_fn(move |_| {
+            // Mark EOF before the SDK fails pending replies. This also makes
+            // subsequent pre-dispatch connectivity checks reject immediately.
+            eof_alive.store(false, Ordering::Release);
+            std::task::Poll::Ready(None)
+        }))
         .filter_map(move |line: std::io::Result<String>| {
             let dialect_event_tx = dialect_event_tx.clone();
             async move {
@@ -658,7 +682,11 @@ async fn run_sdk_background(
     // Pin the sink item type to `String` (LinesCodec encodes any `AsRef<str>`,
     // so the item type would otherwise be ambiguous) — `Lines` requires a
     // `Sink<String>`.
-    let outgoing = SinkExt::<String>::sink_map_err(FramedWrite::new(stdin, LinesCodec::new()), std::io::Error::other);
+    let outgoing_alive = Arc::clone(&alive);
+    let outgoing = SinkExt::<String>::sink_map_err(FramedWrite::new(stdin, LinesCodec::new()), move |err| {
+        outgoing_alive.store(false, Ordering::Release);
+        std::io::Error::other(err)
+    });
     let transport = Lines::new(outgoing, incoming);
 
     // `init_tx` / `ready_tx` are consumed inside the main_fn closure; wrap

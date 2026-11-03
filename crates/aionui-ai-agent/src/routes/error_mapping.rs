@@ -36,7 +36,7 @@ fn acp_error_to_api_error(err: AcpError) -> ApiError {
         AcpError::InvalidParams { .. } => ApiError::BadRequest(acp_error_public_message(&err)),
         AcpError::AgentInternal { .. } => ApiError::BadGateway(acp_error_public_message(&err)),
         AcpError::OtherProtocolError { .. } => ApiError::BadGateway(acp_error_public_message(&err)),
-        AcpError::NotConnected => ApiError::BadGateway(acp_error_public_message(&err)),
+        AcpError::NotConnected | AcpError::PromptOutcomeUnknown => ApiError::BadGateway(acp_error_public_message(&err)),
         AcpError::InitTimeout { .. } => ApiError::BadGateway(acp_error_public_message(&err)),
         // Short config/mode/model RPC timeout: connection is alive, the agent
         // just did not answer in time. Surface as a retryable Timeout so the
@@ -60,6 +60,7 @@ fn acp_error_public_message(err: &AcpError) -> String {
         AcpError::AgentInternal { code, .. } => format!("Agent internal error (code {code})"),
         AcpError::OtherProtocolError { code, .. } => format!("Agent protocol error (code {code})"),
         AcpError::NotConnected => "ACP protocol is not connected.".to_owned(),
+        AcpError::PromptOutcomeUnknown => "The prompt was sent, but its outcome is unknown.".to_owned(),
         AcpError::InitTimeout { .. } => "Agent initialization timed out.".to_owned(),
         AcpError::RequestTimeout { .. } => "Agent did not respond to the request in time.".to_owned(),
     }
@@ -117,6 +118,7 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
             ),
             (AcpError::NotConnected, StatusCode::BAD_GATEWAY),
+            (AcpError::PromptOutcomeUnknown, StatusCode::BAD_GATEWAY),
             (AcpError::InitTimeout { timeout_secs: 30 }, StatusCode::BAD_GATEWAY),
         ];
 

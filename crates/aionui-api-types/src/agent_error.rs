@@ -28,6 +28,8 @@ pub enum AgentErrorCode {
     #[serde(rename = "USER_AGENT_OPENCLAW_GATEWAY_UNREACHABLE")]
     UserAgentOpenClawGatewayUnreachable,
     UserAgentDisconnected,
+    /// Connection lost after prompt dispatch; execution cannot be ruled out.
+    UserAgentPromptOutcomeUnknown,
     UserAgentAuthRequired,
     UserAgentSessionNotFound,
     UserAgentNoPreviousSession,
