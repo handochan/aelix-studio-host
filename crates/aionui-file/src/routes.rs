@@ -36,6 +36,12 @@ use crate::types::{
 impl From<FileError> for ApiError {
     fn from(error: FileError) -> Self {
         match error {
+            FileError::RemoteImageDisabled => ApiError::coded(
+                axum::http::StatusCode::FORBIDDEN,
+                "REMOTE_IMAGE_DISABLED",
+                FileError::RemoteImageDisabled.to_string(),
+                None::<serde_json::Value>,
+            ),
             FileError::BadRequest(message) => ApiError::BadRequest(message),
             FileError::Forbidden(message) => ApiError::Forbidden(message),
             FileError::PathOutsideSandbox {
@@ -686,7 +692,7 @@ async fn fetch_remote_image(
     body: Result<Json<FetchRemoteImageRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<String>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let data_url = state.file_service.fetch_remote_image(&req.url).await;
+    let data_url = state.file_service.fetch_remote_image(&req.url).await?;
     Ok(Json(ApiResponse::ok(data_url)))
 }
 

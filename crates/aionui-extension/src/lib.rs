@@ -18,6 +18,7 @@ pub mod permission;
 pub mod registry;
 mod registry_helpers;
 pub mod resolvers;
+mod retired_builtins;
 pub mod routes;
 pub mod skill_routes;
 pub mod skill_service;

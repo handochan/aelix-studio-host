@@ -82,13 +82,13 @@ separate, reviewed commits.
 
 ## Releases
 
-| Item         | Value                                                                    |
-| ------------ | ------------------------------------------------------------------------ |
-| Tag          | `host-v<upstream version>-aelix.<n>`, for example `host-v0.2.2-aelix.2`  |
-| Archives     | `aelix-studio-host-<upstream version>-aelix.<n>-<rust target>.tar.gz` (`.zip` for Windows)               |
-| Checksums    | `aelix-studio-host-checksums.txt` (`sha256sum -c` format)                         |
-| Provenance   | `aelix-studio-host-<upstream version>-aelix.<n>-provenance.json`                                         |
-| Targets      | darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64               |
+| Item       | Value                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| Tag        | `host-v<upstream version>-aelix.<n>`, for example `host-v0.2.2-aelix.2`                    |
+| Archives   | `aelix-studio-host-<upstream version>-aelix.<n>-<rust target>.tar.gz` (`.zip` for Windows) |
+| Checksums  | `aelix-studio-host-checksums.txt` (`sha256sum -c` format)                                  |
+| Provenance | `aelix-studio-host-<upstream version>-aelix.<n>-provenance.json`                           |
+| Targets    | darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64                                |
 
 - `<upstream version>` is the Cargo workspace version of the release commit
   (the release gate checks it); `<n>` starts at 1 for each upstream version.
@@ -275,3 +275,116 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
 - Upstream changes are adopted deliberately (stable tags or selected commits)
   on a separate branch with review and the same CI; `.github/workflows/` here
   is ours and upstream workflow changes are not taken.
+
+## Host-managed outbound access
+
+This follows [Studio #15](https://github.com/handochan/aelix-studio/issues/15)
+and the 2026-11-01/02 decisions in [host #2](https://github.com/handochan/aelix-studio-host/issues/2).
+Implicit host downloads and remote-image fetching are off by default. Provider
+endpoints and explicitly configured custom agents, MCP servers and custom skills
+remain user choices. In particular, a user's npm/npx command is allowed: npm's
+normal public-registry default applies unless a host mirror is configured.
+
+| Surface | Default behavior | Explicit configuration |
+| --- | --- | --- |
+| Host update check | `UPDATE_CHECK_DISABLED` | `AELIX_STUDIO_HOST_UPDATE_CHECK=1` plus repository |
+| Managed Node download | No public fallback; local cache/bundle still usable | `AELIX_STUDIO_HOST_NODE_MIRROR=https://mirror.example/node/dist/` |
+| Host-predefined npx registry agents / implicit npm | `OUTBOUND_DISABLED` without a host mirror | `AELIX_STUDIO_HOST_NPM_REGISTRY=https://mirror.example/repository/npm/` |
+| User-configured npm/npx (custom agent or MCP) | Allowed, normal npm configuration/public default | The same optional npm mirror; applies to explicit paths and Node npx-cli.js wrappers too |
+| Remote images (`/api/fs/fetch-remote-image`) | HTTP 403, `REMOTE_IMAGE_DISABLED` with reason; no request | `AELIX_STUDIO_HOST_REMOTE_IMAGES=1` preserves existing image host validation |
+| OfficeCLI missing binary / daily update | No installer/update HTTP; restore Studio's binary or PATH | Studio owns installation and updates |
+| Public WebUI tunnel / Moltbook | Removed from builtin bundle/catalog | Custom imports are unaffected |
+
+No predefined pnpx/bunx/uvx launch sites were found in the checked host registry.
+Implicit uses of these launchers are rejected because they have no host mirror
+contract. Known Node npx-cli.js wrappers follow the npm policy. This controls
+host launch preparation, not arbitrary code run by a configured agent/skill.
+MCP preparation failures are saved as conversation tips and emit an
+owner/conversation-scoped warning in the existing
+`message.stream` tips channel, with a reason; they do not terminate a turn or
+silently disappear. Connection-test history is not overwritten by a session
+attachment failure. Capability-incompatible transports remain silent selection
+filters.
+
+### Settings Studio must forward
+
+These are host-process environment settings, read at launch. Set them in the
+build/resource-preparation environment **and** the host launch environment where
+applicable; setting them only in the renderer does not configure the host.
+
+| Setting | Build / resource preparation | Host execution |
+| --- | --- | --- |
+| `AELIX_STUDIO_HOST_NODE_MIRROR` | Required when host prepares/downloads managed Node; use the official archive bytes under the mirror prefix | Required only if a local cache/bundle is unavailable and downloading is intended |
+| `AELIX_STUDIO_HOST_NPM_REGISTRY` | Forward if preparation intentionally invokes npm/npx | Enables host-predefined registry agents; overrides the registry for user npm/npx when set |
+| `AELIX_STUDIO_HOST_REMOTE_IMAGES` | No build download required | Omit/other values disable fetching; exactly `1` opts in. Restart the host after changing it |
+
+Mirror URLs must be HTTP(S), without embedded credentials, query or fragment.
+Node appends `v24.11.0/node-v24.11.0-<platform>.<extension>`; redirects are
+rejected and errors never fall back to nodejs.org. All downloaded Node archives,
+including mirror responses, **must** match the five pinned values from the
+[official Node 24.11.0 SHASUMS256](https://nodejs.org/dist/v24.11.0/SHASUMS256.txt)
+before extraction. The verbatim source manifest is checked in beside the
+runtime implementation. Repacking an archive changes its hash and is rejected.
+Studio must also verify these same archive hashes before supplying an expanded
+Node bundle. Expanded local directories retain the existing layout/version
+validation; an archive hash is not misrepresented as a directory hash.
+
+For npm/npx, registry selection and offline/background-request settings are
+injected after environment cleaning. With no host mirror, explicit user commands
+retain normal npm configuration; with a mirror, serve metadata, tarballs and
+transitive dependencies there. npm update notifications/audit/fund are disabled.
+A configured package or its install scripts can still make their own requests;
+these settings are source selection, not a general process firewall.
+Studio integration/installed-app acceptance remains in [Studio #28](https://github.com/handochan/aelix-studio/issues/28).
+
+### Builtin upgrade and internet-dependent skills
+
+Retirement affects only host-owned builtin directories and `source=builtin`
+catalog rows. User custom skills, including same-name imports, are preserved.
+If an upgrade cannot delete/refresh the old tree (locked file, permissions or
+rename failure), the host starts with a filtered fallback and warns. Retired
+skills and old OfficeCLI-family skills are hidden from discovery, catalog,
+read and session-use paths. Unsafe OfficeCLI installer instructions are never
+returned from builtin paths, even if physical cleanup failed. A later successful
+refresh restores safe current builtin skills.
+
+`aionui-webui-setup` documents same-network/VPN access only. The unchanged
+`morph-ppt-3d`, `mermaid`, `openclaw-setup` and `ui-ux-pro-max` skills include
+internet-dependent instructions/resources and run on user request; importing
+or invoking them is not an offline/zero-egress acceptance claim.
+
+### Outbound-attempt verification
+
+Linux CI wraps the default functional smoke with `outbound_audit.py`: startup,
+blocked predefined registry-agent checks, remote-image rejection, retired
+builtin absence, OfficeCLI missing-binary requests, synthetic ACP session,
+prompt/reply, idle and shutdown. A second audited flow uses real Node/npm/npx
+against a loopback registry (bare and absolute-path npx). Fixtures are prepared
+before auditing; no fixture is shipped in the host release.
+
+`strace -ff` follows the complete process tree and records attempted IPv4/IPv6
+connect/send calls, including failed calls. Loopback/Unix IPC are allowed; DNS
+port 53 counts as outbound even on loopback. Incomplete/unparseable evidence
+fails closed (87). If nonempty `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` is
+present (case-insensitive), or `npm_config_proxy`/`npm_config_https_proxy` is
+set, the auditor refuses execution with 87. It also checks launch-time project,
+user and global `.npmrc` files, including explicit npm config paths and config
+redirects; nonempty proxy entries or unreadable configuration fail closed.
+Values and credentials are never included in its report. `NO_PROXY` is not an
+exemption. This preflight does not discover command-line config overrides or
+files/configurations created or selected later by a child in another directory;
+those cases are outside the accepted fixture, and tracing a proxy endpoint alone
+does not establish its ultimate destination.
+Parent and child-process TCP/UDP positive controls must each be detected and
+fail the audit with 86. JSON reports are uploaded; raw buffer-suppressed traces
+are deleted. This measures the exercised Linux defaults/local-mirror fixture,
+not arbitrary configured providers, third-party agents, proxies or internet skills.
+
+```sh
+python3 -I -B scripts/release/outbound_audit.py --report smoke/outbound.json -- \
+  python3 -I -B scripts/release/smoke.py --binary target/debug/aelix-studio-host --report smoke/report.json
+```
+
+The direct Codex session/title handshake and MCP connection-test client names
+also identify `aelix-studio-host`. Internal subprocess labels, crate/module names,
+cookies and the compatibility interfaces listed above retain their identifiers.

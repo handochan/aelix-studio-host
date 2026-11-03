@@ -292,6 +292,20 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn embedded_catalog_excludes_retired_outbound_presets() {
+        let registry = BuiltinAssistantRegistry::load_embedded();
+        assert!(!registry.has("moltbook"));
+        assert!(registry.rule_bytes("moltbook", "en-US").is_none());
+        let butler = registry.get("aionui-assistant").unwrap();
+        assert!(!butler.enabled_skills.iter().any(|name| name == "aionui-webui-public"));
+        for locale in ["en-US", "zh-CN", "ru-RU"] {
+            let rules = String::from_utf8(registry.rule_bytes("aionui-assistant", locale).unwrap()).unwrap();
+            assert!(!rules.contains("aionui-webui-public"));
+            assert!(!rules.contains("cloudflared"));
+        }
+    }
+
+    #[test]
     fn load_embedded_has_expected_builtins() {
         let reg = BuiltinAssistantRegistry::load_embedded();
         assert!(!reg.is_empty(), "embedded registry should contain the shipped presets");

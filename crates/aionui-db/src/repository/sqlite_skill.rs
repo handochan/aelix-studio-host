@@ -160,6 +160,20 @@ impl ISkillRepository for SqliteSkillRepository {
             .ok_or_else(|| DbError::NotFound(format!("global skill '{}' was not found after upsert", params.name)))
     }
 
+    async fn retire_builtin_by_name(&self, name: &str) -> Result<(), DbError> {
+        let now = aionui_common::now_ms();
+        sqlx::query(
+            "UPDATE skills SET enabled = 0, deleted_at = ?, updated_at = ? \
+             WHERE source = 'builtin' AND name = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn delete_by_name(&self, name: &str) -> Result<SkillRow, DbError> {
         self.delete_by_name_for_user(DEFAULT_USER_ID, name).await
     }

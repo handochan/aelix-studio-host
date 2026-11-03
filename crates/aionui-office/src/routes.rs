@@ -24,7 +24,7 @@ use crate::types::DocType;
 impl From<OfficeError> for ApiError {
     fn from(err: OfficeError) -> Self {
         match err {
-            OfficeError::OfficecliNotFound => ApiError::BadRequest("officecli not found".into()),
+            OfficeError::OfficecliNotFound => ApiError::BadRequest(OfficeError::OfficecliNotFound.to_string()),
             OfficeError::InstallFailed(_) => ApiError::Internal("officecli install failed".into()),
             OfficeError::StartFailed(msg) => ApiError::Internal(format!("preview start failed: {msg}")),
             OfficeError::PortTimeout(path) => {
@@ -376,6 +376,7 @@ fn file_error_to_api_error(error: FileError) -> ApiError {
             None::<serde_json::Value>,
         ),
         // Not reachable from office path-validation; the mapping must be total.
+        FileError::RemoteImageDisabled => ApiError::Forbidden(FileError::RemoteImageDisabled.to_string()),
         FileError::TargetNotFound => ApiError::coded(
             axum::http::StatusCode::NOT_FOUND,
             "FILE_NOT_FOUND",

@@ -1,6 +1,6 @@
 ---
 name: aionui-webui-setup
-description: 'AionUi WebUI configuration expert: Helps users configure AionUi WebUI mode for remote access through the settings interface. Supports LAN connection, Tailscale VPN, and server deployment. Use when users need to set up AionUi WebUI, configure remote access, troubleshoot WebUI issues, or deploy AionUi on servers.'
+description: 'AionUi WebUI configuration expert: Helps users configure AionUi WebUI mode for remote access through the settings interface. Supports LAN connection, Tailscale VPN, and private server access over LAN/VPN. Use when users need to set up AionUi WebUI, configure remote access, troubleshoot WebUI issues, or access AionUi on a private LAN/VPN server.'
 ---
 
 # AionUi WebUI 配置专家
@@ -9,11 +9,11 @@ description: 'AionUi WebUI configuration expert: Helps users configure AionUi We
 
 ## 核心能力
 
-- **三种远程连接方式**：局域网连接、Tailscale VPN、服务器部署
+- **三种远程连接方式**：局域网连接、Tailscale VPN、私有服务器（仅局域网或 VPN）
 - **设置界面引导**：引导用户通过 AionUi 设置界面完成配置
 - **跨平台支持**：Windows、macOS、Linux、Android
 - **故障排查**：端口、防火墙、服务启动问题
-- **安全配置**：密码管理、防火墙规则、HTTPS 建议
+- **安全配置**：密码管理、局域网/VPN 防火墙规则
 
 ## 重要原则
 
@@ -25,7 +25,7 @@ description: 'AionUi WebUI configuration expert: Helps users configure AionUi We
 
 1. **局域网访问**：同一 WiFi 的设备访问 → 引导到设置界面启用 WebUI 和远程访问
 2. **跨网络访问**：办公室访问家庭、手机使用流量 → 引导使用 Tailscale
-3. **服务器部署**：多用户、24/7 运行 → 引导服务器部署方案
+3. **服务器部署**：同一网络或 VPN 内的单用户访问 → 引导私有网络配置
 4. **故障排查**：无法访问、服务无法启动 → 参考故障排查部分
 
 ## 三种远程连接方式对比
@@ -34,7 +34,7 @@ description: 'AionUi WebUI configuration expert: Helps users configure AionUi We
 | -------------- | -------------------- | ----------- | ------------- |
 | **局域网连接** | 同一 WiFi/LAN 的设备 | ⭐ 简单     | 临时访问      |
 | **Tailscale**  | 跨网络访问           | ⭐ 非常简单 | ⭐⭐⭐ 最推荐 |
-| **服务器部署** | 多用户、24/7         | ⭐⭐ 中等   | 生产环境      |
+| **服务器部署** | 局域网/VPN 单用户访问 | ⭐⭐ 中等   | 私有网络      |
 
 ## 工作流程建议
 
@@ -124,6 +124,5 @@ description: 'AionUi WebUI configuration expert: Helps users configure AionUi We
 
 ## 参考资源
 
-- [AionUi Wiki - Remote Internet Access Guide](https://github.com/iOfficeAI/AionUi/wiki/Remote-Internet-Access-Guide)
 - [AionUi Wiki - WebUI Configuration Guide](https://github.com/iOfficeAI/AionUi/wiki/WebUI-Configuration-Guide)
 - [Tailscale 官方文档](https://tailscale.com/kb/)

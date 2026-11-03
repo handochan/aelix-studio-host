@@ -167,11 +167,11 @@ async fn wp3_stop_terminates_session() {
 }
 
 // ---------------------------------------------------------------------------
-// WP-4: Auto-install when officecli not found
+// WP-4: Missing bundled OfficeCLI is reported without installing
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn wp4_auto_install_on_not_found() {
+async fn wp4_missing_officecli_never_installs() {
     let spawner = Arc::new(TestSpawner::new(false));
     let broadcaster = Arc::new(TestBroadcaster::new());
     let mgr = OfficecliWatchManager::new(spawner.clone(), broadcaster.clone());
@@ -179,14 +179,15 @@ async fn wp4_auto_install_on_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "doc.docx");
 
-    let port = mgr.start(&path, DocType::Word).await.unwrap();
-    assert!(port > 0);
-    assert_eq!(spawner.install_count.load(Ordering::SeqCst), 1);
+    let error = mgr.start(&path, DocType::Word).await.unwrap_err();
+    assert!(matches!(error, OfficeError::OfficecliNotFound));
+    assert!(error.to_string().contains("automatic installation is disabled"));
+    assert_eq!(spawner.install_count.load(Ordering::SeqCst), 0);
 
     let states = broadcaster.event_states();
     assert!(states.contains(&"starting".to_string()));
-    assert!(states.contains(&"installing".to_string()));
-    assert!(states.contains(&"ready".to_string()));
+    assert!(!states.contains(&"installing".to_string()));
+    assert!(states.contains(&"error".to_string()));
 }
 
 // ---------------------------------------------------------------------------

@@ -227,3 +227,90 @@ async fn concurrent_gate_materialize_all_callers_succeed() {
     assert_eq!(read_version(&target).as_deref(), Some("1.2.3"));
     assert!(target.join("example-skill").join("SKILL.md").is_file());
 }
+
+#[tokio::test]
+async fn retired_materialized_builtins_are_removed_even_when_marker_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let corpus = aionui_extension::builtin_skills_corpus();
+    let marker = aionui_extension::builtin_skills_materialize_marker(corpus, "test");
+    aionui_extension::materialize_if_needed(tmp.path(), corpus, &marker)
+        .await
+        .unwrap();
+    let root = tmp.path().join("builtin-skills");
+    for name in ["moltbook", "aionui-webui-public"] {
+        assert!(!root.join(name).exists(), "retired skill is absent from fresh bundle");
+        for parent in [&root, &root.join("auto-inject")] {
+            std::fs::create_dir_all(parent.join(name)).unwrap();
+            std::fs::write(parent.join(name).join("SKILL.md"), "old").unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("skills").join(name)).unwrap();
+    }
+    aionui_extension::materialize_if_needed(tmp.path(), corpus, &marker)
+        .await
+        .unwrap();
+    for name in ["moltbook", "aionui-webui-public"] {
+        assert!(!root.join(name).exists());
+        assert!(!root.join("auto-inject").join(name).exists());
+        assert!(tmp.path().join("skills").join(name).exists());
+    }
+}
+
+#[tokio::test]
+async fn failed_refresh_cannot_restore_officecli_installer_guidance() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("builtin-skills");
+    let office = target.join("auto-inject/officecli");
+    std::fs::create_dir_all(&office).unwrap();
+    std::fs::write(target.join(".version"), "old").unwrap();
+    std::fs::write(
+        office.join("SKILL.md"),
+        "curl -fsSL https://d.officecli.ai/install.sh | bash",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join(".builtin-skills.tmp"), "force refresh failure").unwrap();
+    assert!(!materialize_if_needed(tmp.path(), &FIXTURE_CORPUS, "new").await.unwrap());
+    let paths = aionui_extension::resolve_skill_paths(tmp.path(), tmp.path());
+    assert!(
+        aionui_extension::read_builtin_skill(&paths, "auto-inject/officecli/SKILL.md")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        aionui_extension::list_available_skills(&paths)
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.name != "officecli")
+    );
+    assert!(
+        aionui_extension::materialize_skills_for_agent(&paths, "conv", &["officecli".into()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn locked_retired_directory_does_not_prevent_startup_or_expose_old_skills() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("builtin-skills");
+    let retired = root.join("moltbook");
+    std::fs::create_dir_all(&retired).unwrap();
+    std::fs::write(retired.join("SKILL.md"), "---\nname: moltbook\n---\nretired").unwrap();
+    std::fs::write(root.join(".version"), "old").unwrap();
+    std::fs::write(tmp.path().join(".builtin-skills.tmp"), "force rename failure").unwrap();
+    std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = materialize_if_needed(tmp.path(), &FIXTURE_CORPUS, "new").await;
+    std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_ok());
+    let paths = aionui_extension::resolve_skill_paths(tmp.path(), tmp.path());
+    assert!(
+        aionui_extension::read_builtin_skill(&paths, "moltbook/SKILL.md")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

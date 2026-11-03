@@ -3,7 +3,8 @@
 The binary runs in local mode on an ephemeral loopback port with an isolated
 HOME, data directory and workspace. A synthetic ACP agent (smoke_agent.py)
 is registered through the ordinary custom-agent path, so the smoke covers
-startup, the listening event, update_check_disabled_by_default (including its
+startup, the listening event, default Node/npm/npx blocking, retired builtin
+absence, update_check_disabled_by_default (including its
 stable error code), custom-agent probe, ACP client identity, assistant listing,
 conversation creation, runtime warm-up, the legacy launch-only model
 selector, rejection of an unavailable model, one prompt/reply turn with
@@ -12,7 +13,8 @@ desktop parent-exit path on Windows).
 
 Uses only the Python standard library and a loopback synthetic agent, without
 real provider credentials. This functional smoke does not audit outbound
-connection attempts; that is separate acceptance work.
+connection attempts by itself. Linux CI wraps this entire process tree with
+outbound_audit.py, including a separate detector positive control.
 """
 
 import argparse
@@ -82,8 +84,9 @@ def wait_until(predicate, timeout, message):
 
 
 class Host:
-    def __init__(self, binary, root):
+    def __init__(self, binary, root, env_overrides=None, extra_args=()):
         self.binary, self.root = binary, root
+        self.env_overrides, self.extra_args = env_overrides or {}, extra_args
         self.log_path = root / 'host.log'
         self.process = self.parent = None
         self.port = None
@@ -94,16 +97,17 @@ class Host:
         for directory in (home, workspace, self.root / 'extensions'):
             directory.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
-        env.pop('AELIX_STUDIO_HOST_UPDATE_CHECK', None)
+        for setting in ('AELIX_STUDIO_HOST_UPDATE_CHECK', 'AELIX_STUDIO_HOST_NODE_MIRROR', 'AELIX_STUDIO_HOST_NPM_REGISTRY', 'AELIX_STUDIO_HOST_REMOTE_IMAGES'):
+            env.pop(setting, None)
         env.update(
             HOME=str(home),
             USERPROFILE=str(home),
-            AIONUI_DISABLE_AUTO_UPDATE='1',
             AIONUI_EXTENSIONS_PATH=str(self.root / 'extensions'),
             AIONUI_EXTENSION_STATES_FILE=str(self.root / 'extension-states.json'),
         )
+        env.update(self.env_overrides)
         argv = [str(self.binary), '--local', '--port', '0', '--data-dir', str(self.root / 'data'),
-                '--managed-resources-mode', 'bundled', '--log-level', 'info']
+                '--log-level', 'info', *self.extra_args]
         if os.name == 'nt':
             # Windows has no SIGTERM. Use the desktop's parent-exit path with a
             # stand-in parent; on Windows the host waits on any process handle.
@@ -201,11 +205,41 @@ def run(binary, python, keep, report):
         assert disabled.get('code') == 'UPDATE_CHECK_DISABLED', disabled
         assert disabled.get('error') == 'Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them', disabled
         checks.append('update_check_disabled_by_default')
+        # Explicit custom commands may use npm; managed Node downloads remain opt-in.
+        code, image_denial = http(host.port, '/api/fs/fetch-remote-image', 'POST', {
+            'url': 'https://raw.githubusercontent.com/owner/repo/main/image.png',
+        })
+        assert code == 403 and image_denial.get('code') == 'REMOTE_IMAGE_DISABLED', image_denial
+        assert 'AELIX_STUDIO_HOST_REMOTE_IMAGES=1' in image_denial.get('error', ''), image_denial
+        checks.append('remote_images_disabled_by_default')
+        _, agents = host.api('/api/agents/management')
+        builtins = [item for item in agents if item.get('agent_source') == 'builtin'
+                    and item.get('backend') not in ('claude', 'codex', 'antigravity')
+                    and item.get('command') == 'npx']
+        assert builtins, 'Smoke must exercise a host-predefined registry agent'
+        for builtin in builtins:
+            _, denied_builtin = host.api('/api/agents/' + builtin['id'] + '/health-check', 'POST')
+            assert denied_builtin.get('last_check_error_code') == 'outbound_disabled', denied_builtin
+            assert 'AELIX_STUDIO_HOST_NPM_REGISTRY' in denied_builtin.get('last_check_error_message', ''), denied_builtin
+        checks.append('implicit_runtime_policy_enabled')
+        _, skills = host.api('/api/skills')
+        assert not {'moltbook', 'aionui-webui-public'} & {item['name'] for item in skills}, skills
+        checks.append('retired_builtins_absent')
+        for kind, suffix in [('word', 'docx'), ('ppt', 'pptx')]:
+            document = root / 'workspace' / ('missing-bundled-officecli.' + suffix)
+            document.write_bytes(b'fixture')
+            _, preview = host.api('/api/' + kind + '-preview/start', 'POST', {
+                'file_path': str(document), 'workspace': str(root / 'workspace'),
+            })
+            assert preview.get('error') == 'OFFICECLI_NOT_FOUND', preview
+            assert preview.get('url') == '', preview
+        checks.append('officecli_missing_does_not_install')
         host.api('/api/agents/custom', 'POST', {
             'name': AGENT_NAME, 'command': python, 'args': ['-I', '-B', str(HERE / 'smoke_agent.py')], 'env': [],
         })
         checks.append('custom_agent_registration')
         _, assistants = host.api('/api/assistants')
+        assert all(item['id'] != 'moltbook' for item in assistants), assistants
         assistant = next(item for item in assistants if item['name'] == AGENT_NAME)
         checks.append('custom_agent_assistant')
         _, conversation = host.api('/api/conversations', 'POST', {
@@ -245,6 +279,20 @@ def run(binary, python, keep, report):
         report['exitCode'] = host.stop()
         assert report['exitCode'] == 0, 'Host did not shut down cleanly'
         checks.append('graceful_shutdown')
+        # Prove that the documented launch setting enables the existing handler.
+        # A disallowed host exercises opt-in without an external request.
+        opted_in = Host(binary, root / 'image-opt-in', env_overrides={'AELIX_STUDIO_HOST_REMOTE_IMAGES': '1'})
+        try:
+            opted_in.start()
+            _, image = opted_in.api('/api/fs/fetch-remote-image', 'POST', {'url': 'https://disallowed.example/image.png'})
+            assert image.startswith('data:image/svg+xml'), image
+            assert opted_in.stop() == 0
+        finally:
+            if opted_in.process is not None and opted_in.process.poll() is None:
+                opted_in.kill()
+            if getattr(opted_in, 'log', None) is not None and not opted_in.log.closed:
+                opted_in.log.close()
+        checks.append('remote_images_opt_in_setting')
         report['status'] = 'passed'
     except BaseException as failure:
         report['error'] = repr(failure)

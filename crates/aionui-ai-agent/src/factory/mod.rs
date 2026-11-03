@@ -9,7 +9,7 @@ mod context;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aionui_db::{IMcpServerRepository, IProviderRepository};
+use aionui_db::{IConversationRepository, IMcpServerRepository, IProviderRepository};
 use aionui_realtime::EventBroadcaster;
 use futures_util::FutureExt;
 
@@ -41,6 +41,8 @@ pub struct AgentFactoryDeps {
     /// inject enabled servers into `session/new` (ELECTRON-1JG fix).
     /// `None` for tests/composition paths that do not need MCP injection.
     pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
+    /// Persists MCP preparation warnings even without an open conversation view.
+    pub conversation_repo: Option<Arc<dyn IConversationRepository>>,
     /// Subprocess spawner for the clean-slate session model. claude/codex always
     /// run through `SessionAgentTask` (direct-CLI) instead of the ACP manager, so
     /// the spawner is unconditionally wired — there is no fallback to the ACP path.

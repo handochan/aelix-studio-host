@@ -1518,6 +1518,8 @@ pub struct SessionBuildInputs<'a> {
     /// User-configured MCP server repository (feature ELECTRON-1JG). `None` on
     /// paths that never inject MCP (tests) ⇒ no injection.
     pub mcp_server_repo: Option<&'a Arc<dyn IMcpServerRepository>>,
+    /// History store for MCP warnings produced before the session stream exists.
+    pub conversation_repo: Option<&'a dyn aionui_db::IConversationRepository>,
     /// The conversation runtime context env (`AIONUI_USER_ID` /
     /// `AIONUI_CONVERSATION_ID` / `AIONUI_HELPER_BIN` / `AIONUI_BASE_URL` /
     /// `AIONUI_RUNTIME_TOKEN`, filled by `apply_conversation_runtime_context`).
@@ -1742,6 +1744,7 @@ pub async fn build_antigravity_instance(
         session_snapshot,
         backend_session_id,
         mcp_server_repo,
+        conversation_repo,
         runtime_env,
         broadcaster,
         catalog_writeback,
@@ -1761,6 +1764,7 @@ pub async fn build_antigravity_instance(
         Some(repo) => {
             crate::mcp_resolve::resolve_session_mcp_servers(
                 repo.as_ref(),
+                conversation_repo,
                 &user_id,
                 config.mcp_server_ids.as_deref(),
                 &conversation_id,
@@ -1870,6 +1874,7 @@ pub async fn build_session_instance(
         session_snapshot,
         backend_session_id,
         mcp_server_repo,
+        conversation_repo,
         runtime_env,
         broadcaster,
         catalog_writeback,
@@ -1893,6 +1898,7 @@ pub async fn build_session_instance(
         Some(repo) => {
             crate::mcp_resolve::resolve_session_mcp_servers(
                 repo.as_ref(),
+                conversation_repo,
                 &user_id,
                 config.mcp_server_ids.as_deref(),
                 &conversation_id,
@@ -5018,6 +5024,7 @@ mod build_mapping_tests {
                 session_snapshot: None,
                 backend_session_id: None,
                 mcp_server_repo: Some(&repo),
+                conversation_repo: None,
                 runtime_env: &[],
                 broadcaster,
                 catalog_writeback: None,

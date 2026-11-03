@@ -261,14 +261,32 @@ async fn run_probe(
             .iter()
             .map(|entry| (entry.name.clone(), entry.value.clone()))
             .collect();
-        match explicit_probe_args(meta) {
+        let launch_policy = if meta.agent_source == AgentSource::Builtin {
+            aionui_runtime::outbound_policy::ensure_implicit_package_command_allowed(command, &meta.args)
+                .map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        };
+        match launch_policy.and_then(|_| explicit_probe_args(meta)) {
             Err(error) => (
                 AgentSnapshotCheckStatus::Offline,
-                Some("package_lock_invalid".to_owned()),
+                Some(
+                    if error.contains("OUTBOUND_DISABLED") {
+                        "outbound_disabled"
+                    } else {
+                        "package_lock_invalid"
+                    }
+                    .to_owned(),
+                ),
                 Some(error),
             ),
             Ok(args) => {
-                match custom_agent_probe::try_connect_custom_agent_with_catalog(command, &args, &env, None).await {
+                let probe = if meta.agent_source == AgentSource::Builtin {
+                    custom_agent_probe::try_connect_builtin_agent_with_catalog(command, &args, &env, None).await
+                } else {
+                    custom_agent_probe::try_connect_custom_agent_with_catalog(command, &args, &env, None).await
+                };
+                match probe {
                     // The probe opened a real session to reach this verdict, so its
                     // `session/new` already carried whatever modes / models / config
                     // options the agent advertises. Persist them through the same

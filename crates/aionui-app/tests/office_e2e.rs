@@ -75,7 +75,7 @@ fn build_test_office_state(
             Err(OfficeError::OfficecliNotFound)
         }
         async fn install_officecli(&self) -> Result<(), OfficeError> {
-            Err(OfficeError::InstallFailed("not available in test".into()))
+            panic!("host must never install OfficeCLI; Studio supplies the binary")
         }
         async fn is_officecli_installed(&self) -> bool {
             false
@@ -166,7 +166,9 @@ async fn wp4_word_preview_officecli_not_available() {
     assert_eq!(json["success"], true);
     let url = json["data"]["url"].as_str().unwrap();
     assert!(url.is_empty(), "url should be empty when officecli unavailable");
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    // Missing bundled OfficeCLI is reported directly; no installer is attempted.
+    assert_eq!(json["data"]["error"], "OFFICECLI_NOT_FOUND");
+    assert_eq!(json["data"]["url"], "");
 }
 
 #[tokio::test]
@@ -189,7 +191,9 @@ async fn wp5_word_preview_with_workspace_accepts_non_sandbox_path() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    // Missing bundled OfficeCLI is reported directly; no installer is attempted.
+    assert_eq!(json["data"]["error"], "OFFICECLI_NOT_FOUND");
+    assert_eq!(json["data"]["url"], "");
 }
 
 #[tokio::test]
@@ -233,7 +237,9 @@ async fn ep1_excel_preview_with_workspace_accepts_non_sandbox_path() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    // Missing bundled OfficeCLI is reported directly; no installer is attempted.
+    assert_eq!(json["data"]["error"], "OFFICECLI_NOT_FOUND");
+    assert_eq!(json["data"]["url"], "");
 }
 
 #[tokio::test]
@@ -256,7 +262,9 @@ async fn pp1_ppt_preview_with_workspace_accepts_non_sandbox_path() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["error"], "OFFICECLI_INSTALL_FAILED");
+    // Missing bundled OfficeCLI is reported directly; no installer is attempted.
+    assert_eq!(json["data"]["error"], "OFFICECLI_NOT_FOUND");
+    assert_eq!(json["data"]["url"], "");
 }
 
 // ── SO-1: Star Office detect route removed ───────────────────────────

@@ -59,6 +59,8 @@ const PLACEHOLDER_SVG: &str = concat!(
 
 /// A concrete implementation of [`crate::traits::IFileService`].
 pub struct FileService {
+    remote_images_enabled: bool,
+    remote_image_client: Option<reqwest::Client>,
     broadcaster: Arc<dyn EventBroadcaster>,
     /// Allowed root directories for path safety validation.
     allowed_roots: Vec<std::path::PathBuf>,
@@ -69,10 +71,23 @@ pub struct FileService {
 impl FileService {
     pub fn new(broadcaster: Arc<dyn EventBroadcaster>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
         Self {
+            remote_image_client: None,
+            remote_images_enabled: std::env::var("AELIX_STUDIO_HOST_REMOTE_IMAGES").as_deref() == Ok("1"),
             broadcaster,
             allowed_roots,
             workspace_files_cache: DashMap::new(),
         }
+    }
+
+    /// Explicit composition/testing override of the remote-image feature gate.
+    pub fn with_remote_images_enabled(mut self, enabled: bool) -> Self {
+        self.remote_images_enabled = enabled;
+        self
+    }
+
+    pub fn with_remote_image_client(mut self, client: reqwest::Client) -> Self {
+        self.remote_image_client = Some(client);
+        self
     }
 
     /// Invalidate the workspace files cache for a given root.
@@ -975,38 +990,45 @@ impl crate::traits::IFileService for FileService {
             .map_err(|e| FileError::Internal(format!("image base64 task failed: {e}")))?
     }
 
-    async fn fetch_remote_image(&self, url: &str) -> String {
+    async fn fetch_remote_image(&self, url: &str) -> Result<String, FileError> {
+        if !self.remote_images_enabled {
+            tracing::info!(reason = "not_enabled", "remote image fetching blocked");
+            return Err(FileError::RemoteImageDisabled);
+        }
         let parsed = match validate_remote_image_url(url) {
             Ok(u) => u,
             Err(e) => {
                 warn!("remote image rejected: {e}");
-                return placeholder_svg_data_url();
+                return Ok(placeholder_svg_data_url());
             }
         };
 
-        let client = match reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-            .timeout(REMOTE_IMAGE_TIMEOUT)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("failed to build HTTP client: {e}");
-                return placeholder_svg_data_url();
+        let client = if let Some(client) = self.remote_image_client.clone() {
+            client
+        } else {
+            match reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+                .timeout(REMOTE_IMAGE_TIMEOUT)
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("failed to build HTTP client: {e}");
+                    return Ok(placeholder_svg_data_url());
+                }
             }
         };
-
         let response = match client.get(parsed.clone()).send().await {
             Ok(r) => r,
             Err(e) => {
                 warn!("remote image fetch failed for '{}': {e}", url);
-                return placeholder_svg_data_url();
+                return Ok(placeholder_svg_data_url());
             }
         };
 
         if !response.status().is_success() {
             warn!("remote image fetch returned status {} for '{}'", response.status(), url);
-            return placeholder_svg_data_url();
+            return Ok(placeholder_svg_data_url());
         }
 
         // Early reject if Content-Length exceeds limit
@@ -1014,7 +1036,7 @@ impl crate::traits::IFileService for FileService {
             && len > MAX_REMOTE_IMAGE_SIZE as u64
         {
             warn!("remote image too large ({} bytes) for '{}'", len, url);
-            return placeholder_svg_data_url();
+            return Ok(placeholder_svg_data_url());
         }
 
         // Determine MIME from Content-Type header, fall back to URL extension
@@ -1036,17 +1058,17 @@ impl crate::traits::IFileService for FileService {
             Ok(b) => b,
             Err(e) => {
                 warn!("failed to read remote image body for '{}': {e}", url);
-                return placeholder_svg_data_url();
+                return Ok(placeholder_svg_data_url());
             }
         };
 
         if bytes.len() > MAX_REMOTE_IMAGE_SIZE {
             warn!("remote image body too large ({} bytes) for '{}'", bytes.len(), url);
-            return placeholder_svg_data_url();
+            return Ok(placeholder_svg_data_url());
         }
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        format!("data:{mime};base64,{encoded}")
+        Ok(format!("data:{mime};base64,{encoded}"))
     }
 }
 

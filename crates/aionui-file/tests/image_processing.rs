@@ -22,7 +22,7 @@ impl EventBroadcaster for NoopBroadcaster {
 }
 
 fn make_service(root: &std::path::Path) -> FileService {
-    FileService::new(Arc::new(NoopBroadcaster), vec![root.to_path_buf()])
+    FileService::new(Arc::new(NoopBroadcaster), vec![root.to_path_buf()]).with_remote_images_enabled(true)
 }
 
 // -----------------------------------------------------------------------
@@ -152,7 +152,7 @@ async fn fetch_remote_image_disallowed_host_returns_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("https://evil.com/image.png").await;
+    let result = svc.fetch_remote_image("https://evil.com/image.png").await.unwrap();
 
     assert!(
         result.starts_with("data:image/svg+xml;base64,"),
@@ -166,7 +166,7 @@ async fn fetch_remote_image_ftp_protocol_returns_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("ftp://github.com/image.png").await;
+    let result = svc.fetch_remote_image("ftp://github.com/image.png").await.unwrap();
 
     assert!(result.starts_with("data:image/svg+xml;base64,"));
 }
@@ -176,7 +176,7 @@ async fn fetch_remote_image_invalid_url_returns_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("not-a-url").await;
+    let result = svc.fetch_remote_image("not-a-url").await.unwrap();
 
     assert!(result.starts_with("data:image/svg+xml;base64,"));
 }
@@ -186,7 +186,7 @@ async fn fetch_remote_image_file_protocol_returns_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("file:///etc/passwd").await;
+    let result = svc.fetch_remote_image("file:///etc/passwd").await.unwrap();
 
     assert!(result.starts_with("data:image/svg+xml;base64,"));
 }
@@ -196,7 +196,7 @@ async fn fetch_remote_image_empty_url_returns_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("").await;
+    let result = svc.fetch_remote_image("").await.unwrap();
 
     assert!(result.starts_with("data:image/svg+xml;base64,"));
 }
@@ -206,7 +206,7 @@ async fn fetch_remote_image_placeholder_contains_valid_svg() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("not-valid").await;
+    let result = svc.fetch_remote_image("not-valid").await.unwrap();
 
     // Verify the placeholder decodes to a valid SVG
     let encoded_part = result.strip_prefix("data:image/svg+xml;base64,").unwrap();
@@ -221,7 +221,56 @@ async fn fetch_remote_image_data_protocol_returns_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let svc = make_service(dir.path());
 
-    let result = svc.fetch_remote_image("data:text/html,<script>alert(1)</script>").await;
+    let result = svc
+        .fetch_remote_image("data:text/html,<script>alert(1)</script>")
+        .await
+        .unwrap();
 
     assert!(result.starts_with("data:image/svg+xml;base64,"));
+}
+
+#[tokio::test]
+async fn disabled_remote_image_returns_specific_reason_without_fetching() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = make_service(dir.path()).with_remote_images_enabled(false);
+    let error = svc
+        .fetch_remote_image("https://raw.githubusercontent.com/owner/repo/main/image.png")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, aionui_file::FileError::RemoteImageDisabled));
+    assert!(error.to_string().contains("AELIX_STUDIO_HOST_REMOTE_IMAGES=1"));
+}
+
+#[tokio::test]
+async fn opted_in_remote_image_fetches_via_controlled_http_fixture() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        let count = stream.read(&mut buffer).await.unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..count]).starts_with("GET http://github.com/fixture.png HTTP/1.1"));
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\nPNG",
+            )
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::http(format!("http://{address}")).unwrap())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let service = make_service(dir.path()).with_remote_image_client(client);
+    assert_eq!(
+        service
+            .fetch_remote_image("http://github.com/fixture.png")
+            .await
+            .unwrap(),
+        "data:image/png;base64,UE5H"
+    );
+    server.await.unwrap();
 }

@@ -225,6 +225,8 @@ pub use team_tools::{
 };
 pub use websocket::WebSocketMessage;
 
+pub use mcp::{McpUnavailableNotice, McpUnavailableTip};
+
 #[cfg(test)]
 mod public_contract_tests {
     use super::{AgentErrorResolution, AgentErrorResolutionKind, AgentErrorResolutionTarget};

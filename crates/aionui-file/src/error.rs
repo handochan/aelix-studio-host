@@ -1,6 +1,9 @@
 /// File crate application errors.
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
+    #[error("Remote image fetching is disabled; set AELIX_STUDIO_HOST_REMOTE_IMAGES=1 to enable it")]
+    RemoteImageDisabled,
+
     #[error("{0}")]
     BadRequest(String),
 

@@ -27,12 +27,7 @@ When the pptx base rules cover it, the text here says `→ see pptx v2 §X`. Rea
 
 ## Setup
 
-If `officecli` is missing:
-
-- **macOS / Linux**: `curl -fsSL https://d.officecli.ai/install.sh | bash`
-- **Windows (PowerShell)**: `irm https://d.officecli.ai/install.ps1 | iex`
-
-Verify with `officecli --version` (open a new terminal if PATH hasn't picked up). If install fails, download a binary from https://github.com/iOfficeAI/OfficeCLI/releases.
+Studio supplies OfficeCLI. Verify with `officecli --version`. If missing, stop and report that automatic installation is disabled; restore Studio's bundled OfficeCLI or add its binary to PATH. Do not download or run an installer.
 
 ## ⚠️ Help-First Rule
 

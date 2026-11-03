@@ -14,7 +14,7 @@ use aionui_common::ProviderWithModel;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_realtime::EventBroadcaster;
-use aionui_runtime::ensure_runtime_command_with_reporter;
+
 use serde_json::{Map, Value};
 use tracing::{debug, info, warn};
 
@@ -23,6 +23,7 @@ use crate::error::AgentError;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
 use crate::manager::aionrs::{AionrsAgentManager, sanitize_session_messages};
+use crate::mcp_resolve::McpResolveError;
 use crate::runtime_status::conversation_runtime_reporter;
 use crate::session_context::AionrsSessionBuildContext;
 use crate::types::{AionrsCompatOverrides, AionrsResolvedConfig};
@@ -95,6 +96,7 @@ pub(super) async fn build(
     if let Some(repo) = deps.mcp_server_repo.as_ref() {
         for (name, config) in load_user_mcp_servers(
             repo.as_ref(),
+            deps.conversation_repo.as_deref(),
             overrides.mcp_server_ids.as_deref(),
             &ctx.user_id,
             &ctx.conversation_id,
@@ -107,6 +109,7 @@ pub(super) async fn build(
     }
     merge_session_snapshot_mcp_servers(
         &mut extra_mcp_servers,
+        deps.conversation_repo.as_deref(),
         &overrides.session_mcp_servers,
         &ctx.user_id,
         &ctx.conversation_id,
@@ -552,6 +555,7 @@ pub(crate) fn resolve_bedrock_config(json: Option<&str>) -> Option<aion_config::
 
 async fn load_user_mcp_servers(
     repo: &dyn IMcpServerRepository,
+    conversation_repo: Option<&dyn aionui_db::IConversationRepository>,
     selected_ids: Option<&[String]>,
     user_id: &str,
     conversation_id: &str,
@@ -563,10 +567,10 @@ async fn load_user_mcp_servers(
     };
     let rows = match rows_result {
         Ok(r) => r,
-        Err(err) => {
+        Err(_err) => {
             warn!(
                 conversation_id,
-                error = %err,
+                reason = "MCP_SERVER_UNAVAILABLE",
                 "user_mcp: list() failed; skipping injection"
             );
             return HashMap::new();
@@ -590,11 +594,21 @@ async fn load_user_mcp_servers(
                 servers.insert(row.name.clone(), config);
             }
             Err(err) => {
+                crate::mcp_resolve::report_mcp_unavailable(
+                    broadcaster.as_ref(),
+                    conversation_repo,
+                    user_id,
+                    conversation_id,
+                    &row.id,
+                    &row.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     conversation_id,
                     server_id = %row.id,
                     server_name = %row.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "user_mcp: failed to convert row; skipping"
                 );
             }
@@ -609,16 +623,16 @@ async fn row_to_mcp_server_config(
     user_id: &str,
     conversation_id: &str,
     broadcaster: Arc<dyn EventBroadcaster>,
-) -> Result<McpServerConfig, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(&row.transport_config).map_err(|e| format!("invalid transport_config JSON: {e}"))?;
+) -> Result<McpServerConfig, McpResolveError> {
+    let value: serde_json::Value = serde_json::from_str(&row.transport_config)
+        .map_err(|e| McpResolveError::InvalidConfiguration(format!("invalid transport_config JSON: {e}")))?;
 
     match row.transport_type.as_str() {
         "stdio" => {
             let command = value
                 .get("command")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "stdio: missing command".to_owned())?;
+                .ok_or_else(|| McpResolveError::InvalidConfiguration("stdio: missing command".to_owned()))?;
             let args: Vec<String> = value
                 .get("args")
                 .and_then(|v| v.as_array())
@@ -651,7 +665,7 @@ async fn row_to_mcp_server_config(
             let url = value
                 .get("url")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "http: missing url".to_owned())?;
+                .ok_or_else(|| McpResolveError::InvalidConfiguration("http: missing url".to_owned()))?;
             let headers = value
                 .get("headers")
                 .and_then(|v| v.as_object())
@@ -677,7 +691,7 @@ async fn row_to_mcp_server_config(
             let url = value
                 .get("url")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "sse: missing url".to_owned())?;
+                .ok_or_else(|| McpResolveError::InvalidConfiguration("sse: missing url".to_owned()))?;
             let headers = value
                 .get("headers")
                 .and_then(|v| v.as_object())
@@ -699,7 +713,9 @@ async fn row_to_mcp_server_config(
                 startup_timeout_ms: None,
             })
         }
-        other => Err(format!("unsupported transport_type: {other}")),
+        other => Err(McpResolveError::InvalidConfiguration(format!(
+            "unsupported transport_type: {other}"
+        ))),
     }
 }
 
@@ -708,11 +724,13 @@ async fn session_server_to_mcp_server_config(
     user_id: &str,
     conversation_id: &str,
     broadcaster: Arc<dyn EventBroadcaster>,
-) -> Result<McpServerConfig, String> {
+) -> Result<McpServerConfig, McpResolveError> {
     match &server.transport {
         SessionMcpTransport::Stdio { command, args, env } => {
             if command.is_empty() {
-                return Err("stdio: missing command".to_owned());
+                return Err(McpResolveError::InvalidConfiguration(
+                    "stdio: missing command".to_owned(),
+                ));
             }
             let entries: Vec<(String, String)> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             let (command, args, env) =
@@ -730,7 +748,7 @@ async fn session_server_to_mcp_server_config(
         }
         SessionMcpTransport::Http { url, headers } => {
             if url.is_empty() {
-                return Err("http: missing url".to_owned());
+                return Err(McpResolveError::InvalidConfiguration("http: missing url".to_owned()));
             }
             Ok(McpServerConfig {
                 transport: TransportType::StreamableHttp,
@@ -745,7 +763,7 @@ async fn session_server_to_mcp_server_config(
         }
         SessionMcpTransport::Sse { url, headers } => {
             if url.is_empty() {
-                return Err("sse: missing url".to_owned());
+                return Err(McpResolveError::InvalidConfiguration("sse: missing url".to_owned()));
             }
             Ok(McpServerConfig {
                 transport: TransportType::Sse,
@@ -760,7 +778,9 @@ async fn session_server_to_mcp_server_config(
         }
         SessionMcpTransport::StreamableHttp { url, headers } => {
             if url.is_empty() {
-                return Err("streamable_http: missing url".to_owned());
+                return Err(McpResolveError::InvalidConfiguration(
+                    "streamable_http: missing url".to_owned(),
+                ));
             }
             Ok(McpServerConfig {
                 transport: TransportType::StreamableHttp,
@@ -778,6 +798,7 @@ async fn session_server_to_mcp_server_config(
 
 async fn merge_session_snapshot_mcp_servers(
     extra_mcp_servers: &mut HashMap<String, McpServerConfig>,
+    conversation_repo: Option<&dyn aionui_db::IConversationRepository>,
     session_mcp_servers: &[SessionMcpServer],
     user_id: &str,
     conversation_id: &str,
@@ -806,11 +827,21 @@ async fn merge_session_snapshot_mcp_servers(
                 }
             }
             Err(err) => {
+                crate::mcp_resolve::report_mcp_unavailable(
+                    broadcaster.as_ref(),
+                    conversation_repo,
+                    user_id,
+                    conversation_id,
+                    &server.id,
+                    &server.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     conversation_id = %conversation_id,
                     server_id = %server.id,
                     server_name = %server.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "session_mcp: failed to convert session snapshot; skipping"
                 );
             }
@@ -825,11 +856,11 @@ async fn ensure_stdio_launch(
     user_id: &str,
     conversation_id: &str,
     broadcaster: Arc<dyn aionui_realtime::EventBroadcaster>,
-) -> Result<(String, Vec<String>, HashMap<String, String>), String> {
+) -> Result<(String, Vec<String>, HashMap<String, String>), McpResolveError> {
     let reporter = conversation_runtime_reporter(broadcaster, user_id.to_owned(), conversation_id.to_owned());
-    let resolved = ensure_runtime_command_with_reporter(command, Some(reporter.as_ref()))
+    let resolved = aionui_runtime::ensure_user_runtime_command_with_args(command, args, Some(reporter.as_ref()))
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(McpResolveError::Runtime)?;
 
     let mut final_args: Vec<String> = resolved
         .args_prefix
@@ -964,21 +995,37 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct BundledRuntimeModeGuard;
+    struct BundledRuntimeModeGuard {
+        registry: Option<std::ffi::OsString>,
+    }
 
     #[cfg(unix)]
     impl BundledRuntimeModeGuard {
         fn install(root: &Path) -> Self {
-            unsafe { std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", root) };
+            let registry = std::env::var_os(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+            unsafe {
+                std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", root);
+                std::env::set_var(
+                    aionui_runtime::outbound_policy::NPM_REGISTRY_ENV,
+                    "http://127.0.0.1:9/internal/npm/",
+                );
+            }
             set_managed_resources_mode(ManagedResourcesMode::Bundled);
-            Self
+            Self { registry }
         }
     }
 
     #[cfg(unix)]
     impl Drop for BundledRuntimeModeGuard {
         fn drop(&mut self) {
-            unsafe { std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES") };
+            unsafe {
+                std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES");
+                if let Some(value) = &self.registry {
+                    std::env::set_var(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV, value);
+                } else {
+                    std::env::remove_var(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
+                }
+            }
             set_managed_resources_mode(ManagedResourcesMode::Download);
         }
     }
@@ -1102,6 +1149,7 @@ mod tests {
 
         let extra_mcp_servers = load_user_mcp_servers(
             &repo,
+            None,
             Some(&selected),
             TEST_USER_ID,
             "conv-frozen-mcp",
@@ -1133,6 +1181,15 @@ mod tests {
             .await
             .expect("convert");
         let command = config.command.as_deref().expect("resolved command");
+        assert_eq!(
+            config
+                .env
+                .as_ref()
+                .unwrap()
+                .get("npm_config_registry")
+                .map(String::as_str),
+            Some("http://127.0.0.1:9/internal/npm/")
+        );
         assert_ne!(command, "npx");
         assert!(command.ends_with("/npx"), "unexpected stdio command path: {command}");
         assert_eq!(
@@ -1967,6 +2024,7 @@ mod tests {
 
         merge_session_snapshot_mcp_servers(
             &mut extra_mcp_servers,
+            None,
             &snapshot,
             TEST_USER_ID,
             "conv-1",
@@ -2018,7 +2076,7 @@ mod tests {
         };
         let mut assembled = resolve_mcp_servers(&overrides);
         for (name, config) in
-            load_user_mcp_servers(&repo, None, TEST_USER_ID, "conv-assembly", test_broadcaster()).await
+            load_user_mcp_servers(&repo, None, None, TEST_USER_ID, "conv-assembly", test_broadcaster()).await
         {
             assembled.entry(name).or_insert(config);
         }
@@ -2048,6 +2106,7 @@ mod tests {
         ];
         merge_session_snapshot_mcp_servers(
             &mut assembled,
+            None,
             &session_snapshot,
             TEST_USER_ID,
             "conv-assembly",
@@ -2103,6 +2162,7 @@ mod tests {
 
         merge_session_snapshot_mcp_servers(
             &mut servers,
+            None,
             &snapshot,
             "user-override",
             "conv-override",
