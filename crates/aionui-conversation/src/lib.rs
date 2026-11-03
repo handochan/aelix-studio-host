@@ -48,3 +48,6 @@ pub use state::ConversationRouterState;
 #[cfg(test)]
 #[path = "service_test.rs"]
 mod service_test;
+
+#[cfg(test)]
+mod acp_contract_tests;

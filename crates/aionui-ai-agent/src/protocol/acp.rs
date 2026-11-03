@@ -260,6 +260,15 @@ impl AcpProtocol {
         self.initialize_response.read().unwrap().clone()
     }
 
+    fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
+        let response = self.initialize_response.read().unwrap();
+        let agent_name = response
+            .as_ref()
+            .and_then(|r| r.agent_info.as_ref())
+            .map(|info| info.name.as_str());
+        AcpError::from_sdk_for_agent(error, method, agent_name)
+    }
+
     /// Client-hosted terminals of this connection (for UI queries / kill).
     pub fn terminal_registry(&self) -> Arc<crate::terminal::TerminalRegistry> {
         Arc::clone(&self.terminal_registry)
@@ -343,7 +352,7 @@ impl AcpProtocol {
         log_agent_response(method, &json_or_err(&rsp));
         rsp.map_err(|err| {
             let transport_closed = agent_client_protocol::is_incoming_transport_closed(&err) || !self.is_connected();
-            AcpError::from_sdk(err, method).after_prompt_dispatch(transport_closed)
+            self.map_sdk_error(err, method).after_prompt_dispatch(transport_closed)
         })
     }
 
@@ -382,7 +391,7 @@ impl AcpProtocol {
             LEGACY_SESSION_SET_MODEL_METHOD,
             build_legacy_set_model_params(session_id, model_id),
         )
-        .map_err(|e| AcpError::from_sdk(e, LEGACY_SESSION_SET_MODEL_METHOD))?;
+        .map_err(|e| self.map_sdk_error(e, LEGACY_SESSION_SET_MODEL_METHOD))?;
         self.send_config_request(
             req,
             LEGACY_SESSION_SET_MODEL_METHOD,
@@ -491,7 +500,7 @@ impl AcpProtocol {
             rsp
         })
         .await?;
-        sdk_result.map_err(|e| AcpError::from_sdk(e, method))
+        sdk_result.map_err(|e| self.map_sdk_error(e, method))
     }
 
     /// Await `fut` on a detached task, bounded by `duration`, mapping elapsed
@@ -534,7 +543,7 @@ impl AcpProtocol {
         log_client_request(method, &json_str(&req));
         let rsp = self.connection.send_request(req).block_task().await;
         log_agent_response(method, &json_or_err(&rsp));
-        rsp.map_err(|e| AcpError::from_sdk(e, method))
+        rsp.map_err(|e| self.map_sdk_error(e, method))
     }
 
     /// Like [`Self::send_request`], but receives the response untyped so keys
@@ -551,10 +560,10 @@ impl AcpProtocol {
     {
         self.ensure_connected()?;
         log_client_request(method, &json_str(&req));
-        let untyped = UntypedMessage::new(method, &req).map_err(|e| AcpError::from_sdk(e, method))?;
+        let untyped = UntypedMessage::new(method, &req).map_err(|e| self.map_sdk_error(e, method))?;
         let raw = self.connection.send_request(untyped).block_task().await;
         log_agent_response(method, &json_or_err(&raw));
-        let raw = raw.map_err(|e| AcpError::from_sdk(e, method))?;
+        let raw = raw.map_err(|e| self.map_sdk_error(e, method))?;
         let legacy_models = raw.get("models").cloned();
         let response: Req::Response = serde_json::from_value(raw).map_err(|e| AcpError::AgentInternal {
             message: format!("failed to parse {method} response: {e}"),
