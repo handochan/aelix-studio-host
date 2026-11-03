@@ -5458,7 +5458,7 @@ impl ConversationService {
                         id: row.id,
                         name: row.name,
                         status: ConversationMcpStatusKind::Failed,
-                        reason: Some(err),
+                        reason: Some(err.to_string()),
                     }),
                 }
             } else {

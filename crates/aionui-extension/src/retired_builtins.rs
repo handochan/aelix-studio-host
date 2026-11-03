@@ -51,6 +51,18 @@ pub(crate) fn forbidden_text(text: &str) -> bool {
         || text.contains("remote-internet-access-guide")
         || text.contains("curl ifconfig.me")
         || text.contains("<公网ip>")
+        || [
+            "多用户、24/7",
+            "需要多用户访问或 24/7 运行",
+            "需要 24/7 运行",
+            "部署在云服务器上",
+            "云服务器（linux/macos）",
+            "检查云服务器安全组规则",
+            "生产环境建议配置 https",
+            "使用 nginx 等反向代理",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase))
 }
 
 async fn safe_tree(path: &Path) -> Result<bool, std::io::Error> {
@@ -99,4 +111,30 @@ pub(crate) async fn available(root: &Path, name: &str, path: &Path) -> bool {
         );
     }
     !blocked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_webui_deployment_guidance_is_hidden_but_current_private_guidance_is_safe() {
+        for old in [
+            "服务器部署：多用户、24/7 运行",
+            "需要多用户访问或 24/7 运行",
+            "部署在云服务器上",
+            "云服务器（Linux/macOS）",
+            "检查云服务器安全组规则",
+            "生产环境建议配置 HTTPS",
+            "使用 Nginx 等反向代理",
+        ] {
+            assert!(forbidden_text(old), "stale guidance must be hidden: {old}");
+        }
+        assert!(!forbidden_text(include_str!(
+            "../../aionui-app/assets/builtin-skills/aionui-webui-setup/SKILL.md"
+        )));
+        assert!(!forbidden_text(include_str!(
+            "../../aionui-app/assets/builtin-skills/aionui-webui-setup/references/aionui-webui.md"
+        )));
+    }
 }

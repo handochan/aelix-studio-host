@@ -299,10 +299,12 @@ No predefined pnpx/bunx/uvx launch sites were found in the checked host registry
 Implicit uses of these launchers are rejected because they have no host mirror
 contract. Known Node npx-cli.js wrappers follow the npm policy. This controls
 host launch preparation, not arbitrary code run by a configured agent/skill.
-MCP launch failures emit an owner/conversation-scoped warning in the existing
+MCP preparation failures are saved as conversation tips and emit an
+owner/conversation-scoped warning in the existing
 `message.stream` tips channel, with a reason; they do not terminate a turn or
 silently disappear. Connection-test history is not overwritten by a session
-attachment failure.
+attachment failure. Capability-incompatible transports remain silent selection
+filters.
 
 ### Settings Studio must forward
 
@@ -364,8 +366,15 @@ before auditing; no fixture is shipped in the host release.
 connect/send calls, including failed calls. Loopback/Unix IPC are allowed; DNS
 port 53 counts as outbound even on loopback. Incomplete/unparseable evidence
 fails closed (87). If nonempty `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` is
-present (case-insensitive), the auditor refuses execution with 87 rather than
-claiming zero attempts through a proxy. `NO_PROXY` is not an exemption.
+present (case-insensitive), or `npm_config_proxy`/`npm_config_https_proxy` is
+set, the auditor refuses execution with 87. It also checks launch-time project,
+user and global `.npmrc` files, including explicit npm config paths and config
+redirects; nonempty proxy entries or unreadable configuration fail closed.
+Values and credentials are never included in its report. `NO_PROXY` is not an
+exemption. This preflight does not discover command-line config overrides or
+files/configurations created or selected later by a child in another directory;
+those cases are outside the accepted fixture, and tracing a proxy endpoint alone
+does not establish its ultimate destination.
 Parent and child-process TCP/UDP positive controls must each be detected and
 fail the audit with 86. JSON reports are uploaded; raw buffer-suppressed traces
 are deleted. This measures the exercised Linux defaults/local-mirror fixture,

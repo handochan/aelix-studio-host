@@ -153,6 +153,7 @@ pub(super) async fn build(
             session_snapshot: build_context.session_snapshot.as_ref(),
             backend_session_id: build_context.session_id.clone(),
             mcp_server_repo: deps.mcp_server_repo.as_ref(),
+            conversation_repo: deps.conversation_repo.as_deref(),
             runtime_env: &runtime_env,
             broadcaster: deps.broadcaster.clone(),
             // Keyed by the resolved catalog row so discovered models/modes

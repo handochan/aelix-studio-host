@@ -49,12 +49,50 @@ sendmsg(4, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(
         self.assertEqual(result['unparsedRecords'], 2)
 
     def test_proxy_environment_refuses_without_running_command(self):
-        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'npm_config_proxy', 'npm_config_https_proxy', 'NPM_CONFIG_HTTPS_PROXY'):
             with self.subTest(key=key), tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {key:'http://secret-sentinel@127.0.0.1:1'}, clear=True):
                 report = Path(root) / 'report.json'
                 self.assertEqual(audit.audit(['must-not-execute'], report), 87)
                 self.assertEqual(json.loads(report.read_text())['reason'], 'proxy_environment')
                 self.assertNotIn('secret-sentinel', report.read_text())
+
+    def test_npmrc_proxy_refuses_without_running_command_or_exposing_values(self):
+        for key in ('proxy', 'https-proxy', 'https_proxy'):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as root:
+                config = Path(root) / '.npmrc'
+                config.write_text(f'{key}=http://secret-sentinel@127.0.0.1:1\n')
+                report = Path(root) / 'report.json'
+                with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(audit, 'npm_config_paths', return_value=[config]), mock.patch.object(audit.subprocess, 'run') as run:
+                    self.assertEqual(audit.audit(['must-not-execute'], report), 87)
+                    run.assert_not_called()
+                self.assertEqual(json.loads(report.read_text())['reason'], 'npm_proxy_configuration')
+                self.assertNotIn('secret-sentinel', report.read_text())
+
+    def test_npmrc_sources_and_redirected_user_global_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            project = root / 'project'; project.mkdir()
+            user = root / 'user.npmrc'; global_config = root / 'global.npmrc'
+            (project / '.npmrc').write_text(f'userconfig={user}\n')
+            user.write_text(f'globalconfig={global_config}\n')
+            global_config.write_text('https-proxy=http://127.0.0.1:1\n')
+            with mock.patch.dict(os.environ, {'HOME':str(root), 'NPM_CONFIG_USERCONFIG':str(user), 'npm_config_globalconfig':str(global_config)}, clear=True), mock.patch.object(audit.Path, 'cwd', return_value=project):
+                paths = audit.npm_config_paths()
+                self.assertIn(project / '.npmrc', paths)
+                self.assertIn(root / '.npmrc', paths)
+                self.assertIn(user, paths)
+                self.assertIn(global_config, paths)
+            self.assertTrue(audit.npm_proxy_configured([project / '.npmrc']))
+            global_config.write_text('# proxy=http://example.invalid\n; https-proxy=ignored\nproxy=\n')
+            self.assertFalse(audit.npm_proxy_configured([project / '.npmrc']))
+
+    def test_unreadable_npmrc_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            report = Path(root) / 'report.json'
+            with mock.patch.dict(os.environ, {'HOME':root}, clear=True), mock.patch.object(audit, 'npm_proxy_configured', side_effect=PermissionError), mock.patch.object(audit.subprocess, 'run') as run:
+                self.assertEqual(audit.audit(['must-not-execute'], report), 87)
+                run.assert_not_called()
+            self.assertEqual(json.loads(report.read_text())['reason'], 'npm_configuration_unreadable')
 
     @unittest.skipUnless(sys.platform == 'linux' and shutil.which('strace'), 'Linux strace required')
     def test_real_positive_control_fails_audit(self):

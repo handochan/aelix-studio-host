@@ -15,11 +15,36 @@
 use std::sync::Arc;
 
 use aionui_api_types::{SessionMcpServer, SessionMcpTransport, TEAM_MCP_SERVER_NAME};
-use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
+use aionui_db::{IConversationRepository, IMcpServerRepository};
 use aionui_realtime::EventBroadcaster;
 
 use tracing::{info, warn};
+
+/// Classification is carried from the failing operation, never inferred from text.
+#[derive(Debug, thiserror::Error)]
+pub enum McpResolveError {
+    #[error("MCP configuration storage unavailable")]
+    ConfigurationUnavailable,
+    #[error("{0}")]
+    InvalidConfiguration(String),
+    #[error(transparent)]
+    Runtime(#[from] aionui_runtime::NodeRuntimeError),
+}
+
+impl McpResolveError {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::ConfigurationUnavailable => "MCP settings could not be loaded; check the host configuration storage.",
+            Self::InvalidConfiguration(_) => {
+                "The stored MCP configuration is invalid; correct its transport configuration."
+            }
+            Self::Runtime(_) => {
+                "The configured MCP command or runtime is unavailable; check its configuration, local runtime and host mirror settings."
+            }
+        }
+    }
+}
 
 /// Resolve a conversation's user-configured MCP servers into neutral
 /// [`SessionMcpServer`]s. `selected_ids = Some` → that frozen snapshot defines the
@@ -29,11 +54,12 @@ use tracing::{info, warn};
 /// bundled-node absolute path) so the spec that reaches `open_session` is final —
 /// the Wave 0c contract that `McpTransport::Stdio.command` is pre-resolved.
 ///
-/// Best-effort: a repo error, a capability-unsupported transport, or a malformed
+/// Best-effort: a repo error, runtime preparation failure, or a malformed
 /// `transport_config` row is warn-logged and skipped, never fatal. `broadcaster`
 /// emits a user-scoped, non-terminal conversation advisory on resolution failure.
 pub async fn resolve_session_mcp_servers(
     repo: &dyn IMcpServerRepository,
+    conversation_repo: Option<&dyn IConversationRepository>,
     user_id: &str,
     selected_ids: Option<&[String]>,
     conversation_id: &str,
@@ -48,11 +74,12 @@ pub async fn resolve_session_mcp_servers(
         Err(err) => {
             report_mcp_unavailable(
                 broadcaster.as_ref(),
+                conversation_repo,
                 user_id,
                 conversation_id,
                 "",
                 "Configured MCP servers",
-                "configuration_unavailable",
+                &McpResolveError::ConfigurationUnavailable,
             )
             .await;
             warn!(conversation_id, error = %err, "mcp_resolve: list() failed; skipping injection");
@@ -74,7 +101,16 @@ pub async fn resolve_session_mcp_servers(
         match row_to_session_mcp_server(&row).await {
             Ok(server) => servers.push(server),
             Err(err) => {
-                report_mcp_unavailable(broadcaster.as_ref(), user_id, conversation_id, &row.id, &row.name, &err).await;
+                report_mcp_unavailable(
+                    broadcaster.as_ref(),
+                    conversation_repo,
+                    user_id,
+                    conversation_id,
+                    &row.id,
+                    &row.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     conversation_id,
                     server_id = %row.id,
@@ -100,29 +136,14 @@ pub async fn resolve_session_mcp_servers(
 /// ending a turn. Never overwrite connection-test state or echo commands/tokens.
 pub(crate) async fn report_mcp_unavailable(
     bus: &dyn EventBroadcaster,
+    conversation_repo: Option<&dyn IConversationRepository>,
     user_id: &str,
     conversation_id: &str,
     server_id: &str,
     server_name: &str,
-    error: &str,
+    error: &McpResolveError,
 ) {
-    let reason = if error.contains("checksum mismatch") {
-        "Node archive checksum verification failed; restore trusted Node resources or correct the mirror."
-    } else if error.contains("transport_config") {
-        "The stored MCP configuration is invalid; correct its transport configuration."
-    } else if error.contains("configuration_unavailable") {
-        "MCP settings could not be loaded; check the host configuration storage."
-    } else if error.contains("OUTBOUND_CONFIG_INVALID") {
-        "The host mirror configuration is invalid; check the host mirror settings."
-    } else if error.contains("AELIX_STUDIO_HOST_NODE_MIRROR") {
-        "Node is unavailable; provide local/bundled Node or configure AELIX_STUDIO_HOST_NODE_MIRROR."
-    } else if error.contains("OUTBOUND_DISABLED") {
-        "Implicit package execution is disabled; configure the host registry mirror."
-    } else if error.contains("unsupported") {
-        "The agent does not support this MCP transport."
-    } else {
-        "The configured MCP command or transport is unavailable; check its configuration and local runtime."
-    };
+    let reason = error.reason();
     warn!(conversation_id, server_id, reason, "MCP server could not be attached");
     let notice = aionui_api_types::McpUnavailableNotice {
         user_id: user_id.into(),
@@ -138,6 +159,24 @@ pub(crate) async fn report_mcp_unavailable(
             params: serde_json::json!({"server_id":server_id}),
         },
     };
+    // Persist before publishing: background/team runs may have no subscriber.
+    if let Some(repo) = conversation_repo {
+        let row = aionui_db::models::MessageRow {
+            id: notice.msg_id.clone(),
+            conversation_id: conversation_id.into(),
+            msg_id: None,
+            r#type: "tips".into(),
+            content: serde_json::to_string(&notice.data).expect("tip serialization"),
+            position: Some("left".into()),
+            status: Some("finish".into()),
+            hidden: false,
+            created_at: aionui_common::now_ms(),
+            backend_turn_id: None,
+        };
+        if let Err(error) = repo.insert_message(user_id, &row).await {
+            warn!(conversation_id, server_id, error = %error, "Failed to store MCP warning tip");
+        }
+    }
     bus.broadcast(aionui_api_types::WebSocketMessage::new(
         "message.stream",
         serde_json::to_value(notice).expect("notice serialization"),
@@ -146,22 +185,22 @@ pub(crate) async fn report_mcp_unavailable(
 
 /// Parse one `McpServerRow` into a neutral `SessionMcpServer`, resolving the stdio
 /// launch command. Mirrors `factory::acp::row_to_sdk_mcp_server` but emits the
-/// neutral type. Returns an error string when `transport_config` is malformed.
+/// neutral type. Returns a typed preparation error when `transport_config` is malformed.
 ///
 /// This is the SINGLE shared row→neutral conversion: `aionui-conversation` (team
 /// snapshot refresh) and the session stack reuse it so the stdio command is
 /// always normalized exactly once, the same way the direct claude/codex path
 /// consumes it.
-pub async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpServer, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(&row.transport_config).map_err(|e| format!("invalid transport_config JSON: {e}"))?;
+pub async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpServer, McpResolveError> {
+    let value: serde_json::Value = serde_json::from_str(&row.transport_config)
+        .map_err(|e| McpResolveError::InvalidConfiguration(format!("invalid transport_config JSON: {e}")))?;
 
     let transport = match row.transport_type.as_str() {
         "stdio" => {
             let command = value
                 .get("command")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "stdio: missing command".to_owned())?;
+                .ok_or_else(|| McpResolveError::InvalidConfiguration("stdio: missing command".to_owned()))?;
             let args: Vec<String> = value
                 .get("args")
                 .and_then(|v| v.as_array())
@@ -182,7 +221,7 @@ pub async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpS
             // `ensure_stdio_launch`. The resolved form is what the agent spawns.
             let resolved = aionui_runtime::ensure_user_runtime_command_with_args(command, &args, None)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(McpResolveError::Runtime)?;
             let mut final_args: Vec<String> = resolved
                 .args_prefix
                 .iter()
@@ -202,7 +241,7 @@ pub async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpS
             let url = value
                 .get("url")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "http: missing url".to_owned())?
+                .ok_or_else(|| McpResolveError::InvalidConfiguration("http: missing url".to_owned()))?
                 .to_owned();
             SessionMcpTransport::StreamableHttp {
                 url,
@@ -213,14 +252,18 @@ pub async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpS
             let url = value
                 .get("url")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| "sse: missing url".to_owned())?
+                .ok_or_else(|| McpResolveError::InvalidConfiguration("sse: missing url".to_owned()))?
                 .to_owned();
             SessionMcpTransport::Sse {
                 url,
                 headers: parse_headers(value.get("headers")),
             }
         }
-        other => return Err(format!("unknown transport type: {other}")),
+        other => {
+            return Err(McpResolveError::InvalidConfiguration(format!(
+                "unknown transport type: {other}"
+            )));
+        }
     };
 
     Ok(SessionMcpServer {
@@ -349,7 +392,7 @@ mod tests {
             rows: vec![make_row("docs", true), make_row(TEAM_MCP_SERVER_NAME, true)],
             fail: false,
         };
-        let servers = resolve_session_mcp_servers(&repo, TEST_USER_ID, None, "conv-1", test_broadcaster()).await;
+        let servers = resolve_session_mcp_servers(&repo, None, TEST_USER_ID, None, "conv-1", test_broadcaster()).await;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "docs");
     }
@@ -380,7 +423,7 @@ mod tests {
             ],
             fail: false,
         };
-        let servers = resolve_session_mcp_servers(&repo, TEST_USER_ID, None, "conv-1", test_broadcaster()).await;
+        let servers = resolve_session_mcp_servers(&repo, None, TEST_USER_ID, None, "conv-1", test_broadcaster()).await;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "docs");
     }
@@ -410,7 +453,7 @@ mod tests {
         let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(16));
         let mut events = bus.subscribe();
         assert!(
-            resolve_session_mcp_servers(&repo, &owner, None, "conv-visible", bus.clone())
+            resolve_session_mcp_servers(&repo, None, &owner, None, "conv-visible", bus.clone())
                 .await
                 .is_empty()
         );
@@ -437,10 +480,92 @@ mod tests {
             "connected"
         );
         assert!(
-            resolve_session_mcp_servers(&repo, &other, None, "other-conv", bus)
+            resolve_session_mcp_servers(&repo, None, &other, None, "other-conv", bus)
                 .await
                 .is_empty()
         );
         assert!(events.try_recv().is_err());
+    }
+    #[test]
+    fn warning_reason_uses_error_kind_instead_of_error_text() {
+        let runtime = McpResolveError::Runtime(aionui_runtime::NodeRuntimeError::system_invalid(
+            "unsupported transport_config checksum mismatch secret-sentinel",
+        ));
+        assert!(runtime.reason().contains("configured MCP command"));
+        assert!(!runtime.reason().contains("secret-sentinel"));
+        let config = McpResolveError::InvalidConfiguration("unsupported runtime".into());
+        assert!(config.reason().contains("stored MCP configuration is invalid"));
+    }
+
+    #[tokio::test]
+    async fn warning_survives_history_reload_without_a_live_subscriber() {
+        use aionui_db::{
+            IUserRepository, MessagePageDirection, MessagePageParams, SqliteConversationRepository,
+            SqliteMcpServerRepository, SqliteUserRepository, models::ConversationRow,
+        };
+        let db = aionui_db::init_database_memory().await.unwrap();
+        let users = SqliteUserRepository::new(db.pool().clone());
+        let owner = users.create_user("history-owner", "hash").await.unwrap().id;
+        let other = users.create_user("history-other", "hash").await.unwrap().id;
+        let mcp = SqliteMcpServerRepository::new(db.pool().clone());
+        let server = mcp.create(aionui_db::CreateMcpServerParams {
+            user_id: &owner, name: "missing-tool", description: None, enabled: true,
+            transport_type: "stdio",
+            transport_config: r#"{"command":"/missing/unsupported-secret-sentinel","env":{"TOKEN":"secret-sentinel"}}"#,
+            tools: None, original_json: None, builtin: false,
+        }).await.unwrap();
+        let conversations = SqliteConversationRepository::new(db.pool().clone());
+        for source in ["team", "api"] {
+            let id = format!("conv-background-{source}");
+            conversations
+                .create(&ConversationRow {
+                    id: id.clone(),
+                    user_id: owner.clone(),
+                    name: "Background warning".into(),
+                    r#type: "acp".into(),
+                    extra: "{}".into(),
+                    model: None,
+                    status: Some("running".into()),
+                    source: Some(source.into()),
+                    channel_chat_id: None,
+                    pinned: false,
+                    pinned_at: None,
+                    created_at: 1,
+                    updated_at: 1,
+                    project_id: None,
+                    folder_id: None,
+                    name_source: None,
+                })
+                .await
+                .unwrap();
+            // No subscription: the only way to observe this notice is to reload history.
+            let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(16));
+            assert!(
+                resolve_session_mcp_servers(&mcp, Some(&conversations), &owner, None, &id, bus)
+                    .await
+                    .is_empty()
+            );
+            let reopened = SqliteConversationRepository::new(db.pool().clone());
+            let query = MessagePageParams {
+                limit: 100,
+                direction: MessagePageDirection::InitialLatest,
+            };
+            let messages = reopened.list_messages_page(&owner, &id, &query).await.unwrap();
+            assert_eq!(messages.items.len(), 1);
+            let row = &messages.items[0];
+            assert_eq!(row.r#type, "tips");
+            assert_eq!(row.status.as_deref(), Some("finish"));
+            assert!(!row.hidden);
+            let content: serde_json::Value = serde_json::from_str(&row.content).unwrap();
+            assert_eq!(content["code"], "MCP_SERVER_UNAVAILABLE");
+            assert_eq!(content["type"], "warning");
+            assert_eq!(content["params"]["server_id"], server.id);
+            assert!(content["content"].as_str().unwrap().contains("configured MCP command"));
+            assert!(!row.content.contains("secret-sentinel"));
+            assert!(matches!(
+                reopened.list_messages_page(&other, &id, &query).await,
+                Err(aionui_db::DbError::NotFound(_))
+            ));
+        }
     }
 }
