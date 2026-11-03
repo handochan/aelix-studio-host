@@ -229,70 +229,74 @@ async fn late_acp_metadata_after_turn_end_updates_only_existing_cards_without_a_
     use crate::stream_persistence::StreamPersistenceAdapter;
     use aionui_ai_agent::protocol::events::StartEventData;
 
-    for (terminal, row_status) in [("completed", "finish"), ("failed", "error")] {
-        let repo = repository().await;
-        let bus = Arc::new(BroadcastEventBus::new(64));
-        let mut websocket = bus.subscribe();
-        let state = Arc::new(ConversationRuntimeStateService::default());
-        let _claim = state.try_claim_turn("c", "turn").unwrap();
-        let persistence = RuntimePersistenceCoordinator::new(state.clone());
-        let adapter = StreamPersistenceAdapter::new(
-            "u".into(),
-            "c".into(),
-            "msg".into(),
-            repo.clone(),
-            Some(persistence.clone()),
-        );
-        let AgentStreamEvent::AcpToolCall(initial) = tool(
-            json!({"sessionUpdate":"tool_call","tool_call_id":"parent","status":terminal}),
-            None,
-        ) else {
-            unreachable!()
-        };
-        adapter.persist_acp_tool_call(&initial).await;
-        let watcher = BackgroundStreamWatcher {
-            conversation_id: "c".into(),
-            user_id: "u".into(),
-            repo: repo.clone(),
-            broadcaster: bus,
-            persistence,
-            runtime_state: state,
-            title_only: true,
-            pending_started_ttl: std::time::Duration::from_secs(30),
-        };
-        let (tx, rx) = broadcast::channel(64);
-        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
-        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
-        let meta = json!({"aelix/subagents":{"version":1,"children":[{"id":"child","state":"done"}]}});
-        tx.send(tool(
-            json!({"sessionUpdate":"tool_call_update","tool_call_id":"parent"}),
-            Some(meta.clone()),
-        ))
-        .unwrap();
-        tx.send(tool(
-            json!({"sessionUpdate":"tool_call_update","tool_call_id":"unknown"}),
-            Some(meta.clone()),
-        ))
-        .unwrap();
-        // A new turn takes ownership again, even though the prior call exists.
-        tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
-        tx.send(tool(
-            json!({"sessionUpdate":"tool_call_update","tool_call_id":"parent"}),
-            Some(json!({"mustNotBeWrittenByWatcher":true})),
-        ))
-        .unwrap();
-        drop(tx);
-        watcher.run(rx).await;
-        let row = repo.get_message("u", "c", "parent").await.unwrap().unwrap();
-        assert_eq!(row.status.as_deref(), Some(row_status));
-        assert_eq!(row_to_message_response(row).unwrap().content["_meta"], meta);
-        assert!(repo.get_message("u", "c", "unknown").await.unwrap().is_none());
-        let mut frames = Vec::new();
-        while let Ok(message) = websocket.try_recv() {
-            frames.push(message);
+    for with_claim in [false, true] {
+        for (terminal, row_status) in [("completed", "finish"), ("failed", "error")] {
+            let repo = repository().await;
+            let bus = Arc::new(BroadcastEventBus::new(64));
+            let mut websocket = bus.subscribe();
+            let state = Arc::new(ConversationRuntimeStateService::default());
+            let _claim = with_claim.then(|| state.try_claim_turn("c", "turn").unwrap());
+            let persistence = RuntimePersistenceCoordinator::new(state.clone());
+            let adapter = StreamPersistenceAdapter::new(
+                "u".into(),
+                "c".into(),
+                "msg".into(),
+                repo.clone(),
+                Some(persistence.clone()),
+            );
+            let AgentStreamEvent::AcpToolCall(initial) = tool(
+                json!({"sessionUpdate":"tool_call","tool_call_id":"parent","status":terminal}),
+                None,
+            ) else {
+                unreachable!()
+            };
+            adapter.persist_acp_tool_call(&initial).await;
+            let watcher = BackgroundStreamWatcher {
+                conversation_id: "c".into(),
+                user_id: "u".into(),
+                repo: repo.clone(),
+                broadcaster: bus,
+                persistence,
+                runtime_state: state,
+                title_only: true,
+                pending_started_ttl: std::time::Duration::from_secs(30),
+            };
+            let (tx, rx) = broadcast::channel(64);
+            tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+            tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+            let meta = json!({"aelix/subagents":{"version":1,"children":[{"id":"child","state":"done","currentTool":"read","elapsedMs":42}]}});
+            tx.send(tool(
+                json!({"sessionUpdate":"tool_call_update","tool_call_id":"parent"}),
+                Some(meta.clone()),
+            ))
+            .unwrap();
+            tx.send(tool(
+                json!({"sessionUpdate":"tool_call_update","tool_call_id":"unknown"}),
+                Some(meta.clone()),
+            ))
+            .unwrap();
+            if with_claim {
+                // A new turn takes ownership again, even though the prior call exists.
+                tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
+                tx.send(tool(
+                    json!({"sessionUpdate":"tool_call_update","tool_call_id":"parent"}),
+                    Some(json!({"mustNotBeWrittenByWatcher":true})),
+                ))
+                .unwrap();
+            }
+            drop(tx);
+            watcher.run(rx).await;
+            let row = repo.get_message("u", "c", "parent").await.unwrap().unwrap();
+            assert_eq!(row.status.as_deref(), Some(row_status));
+            assert_eq!(row_to_message_response(row).unwrap().content["_meta"], meta);
+            assert!(repo.get_message("u", "c", "unknown").await.unwrap().is_none());
+            let mut frames = Vec::new();
+            while let Ok(message) = websocket.try_recv() {
+                frames.push(message);
+            }
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].name, "message.stream");
+            assert_eq!(frames[0].data["data"]["_meta"], meta);
         }
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].name, "message.stream");
-        assert_eq!(frames[0].data["data"]["_meta"], meta);
     }
 }
