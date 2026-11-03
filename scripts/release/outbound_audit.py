@@ -9,6 +9,7 @@ Exit 86 means detected outbound attempts; 87 means incomplete/unparseable eviden
 import argparse
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -75,6 +76,12 @@ def analyze(paths):
 
 
 def audit(command, report_path):
+    proxy_keys = [key for key, value in os.environ.items() if value.strip() and key.lower() in ('http_proxy', 'https_proxy', 'all_proxy')]
+    if proxy_keys:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps({'schema': 'aelix-studio-host.outbound-audit/1', 'status': 'failed', 'reason': 'proxy_environment', 'proxyKeys': proxy_keys}) + '\n')
+        print('Audit refused: proxy environment may hide destination attempts', file=sys.stderr)
+        return INCOMPLETE
     if sys.platform != 'linux' or shutil.which('strace') is None:
         raise RuntimeError('Linux strace is required; audit cannot be skipped')
     with tempfile.TemporaryDirectory(prefix='host-outbound-audit-') as directory:
@@ -114,8 +121,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--positive-control', action='store_true')
+    parser.add_argument('--child-positive-control', action='store_true')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.child_positive_control:
+        return subprocess.run([sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--positive-control']).returncode
     if args.positive_control:
         positive_control()
         return 0

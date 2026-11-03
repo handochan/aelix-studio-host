@@ -862,11 +862,37 @@ async fn configured_mirror_download_and_redirect_policy() {
         runtime_key: "darwin-arm64",
         executable: "bin/node",
     };
-    install_archive(temp.path(), spec, None).await.unwrap();
-    assert_eq!(
-        std::fs::read(temp.path().join(spec.directory_name()).join("bin/node")).unwrap(),
-        b"local mirror fixture"
-    );
+    let error = install_archive(temp.path(), spec, None).await.unwrap_err();
+    assert!(error.to_string().contains("checksum mismatch"));
+    assert!(!temp.path().join(spec.directory_name()).exists());
     let error = install_archive(temp.path(), spec, None).await.unwrap_err();
     assert!(error.to_string().contains("OUTBOUND_REDIRECT_BLOCKED"));
+}
+
+#[test]
+fn every_supported_download_pin_matches_official_node_manifest() {
+    let manifest = include_str!("../node-v24.11.0-SHASUMS256.txt");
+    for (folder, ext) in [
+        ("darwin-arm64", "tar.gz"),
+        ("darwin-x64", "tar.gz"),
+        ("linux-arm64", "tar.gz"),
+        ("linux-x64", "tar.gz"),
+        ("win-x64", "zip"),
+    ] {
+        let spec = PlatformSpec {
+            folder_suffix: folder,
+            archive_ext: ext,
+            runtime_key: "fixture",
+            executable: "fixture",
+        };
+        let filename = format!("node-v24.11.0-{folder}.{ext}");
+        let official = manifest
+            .lines()
+            .find_map(|line| {
+                let (digest, name) = line.split_once("  ")?;
+                (name == filename).then_some(digest)
+            })
+            .unwrap();
+        assert_eq!(official_archive_sha256(spec).unwrap(), official);
+    }
 }

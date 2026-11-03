@@ -273,6 +273,28 @@ where
     Ok(Some(value))
 }
 
+/// Non-terminal conversation advisory for an MCP server that could not be attached.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpUnavailableTip {
+    pub content: String,
+    #[serde(rename = "type")]
+    pub severity: &'static str,
+    pub code: &'static str,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpUnavailableNotice {
+    pub user_id: String,
+    pub conversation_id: String,
+    pub msg_id: String,
+    pub turn_id: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub hidden: bool,
+    pub data: McpUnavailableTip,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

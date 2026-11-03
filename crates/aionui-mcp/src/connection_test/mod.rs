@@ -12,8 +12,7 @@ use aionui_api_types::{
 use aionui_realtime::EventBroadcaster;
 use aionui_runtime::{
     Builder as CmdBuilder, NodeRuntimeFailureKind, NodeRuntimeProgress, NodeRuntimeProgressReporter,
-    RuntimeCommandProbe, ensure_runtime_command_with_reporter, kill_process_tree, probe_runtime_command,
-    resolve_command_path,
+    RuntimeCommandProbe, kill_process_tree, probe_runtime_command, resolve_command_path,
 };
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -119,12 +118,14 @@ impl McpConnectionTestService {
         let reporter =
             runtime_scope_id.map(|scope_id| self.runtime_reporter(user_id.map(str::to_owned), scope_id.to_owned()));
         let needs_runtime = matches!(probe_runtime_command(command), RuntimeCommandProbe::NodeTool { .. })
-            || aionui_runtime::outbound_policy::is_registry_tool_command(command);
+            || aionui_runtime::outbound_policy::is_registry_tool_command(command)
+            || aionui_runtime::outbound_policy::is_node_package_wrapper(command, args);
         let (mut cmd, resolved_env) = if needs_runtime {
-            let resolved = match ensure_runtime_command_with_reporter(command, reporter.as_deref()).await {
-                Ok(resolved) => resolved,
-                Err(error) => return spawn_error_result(command, &runtime_resolution_error(&error.to_string())),
-            };
+            let resolved =
+                match aionui_runtime::ensure_user_runtime_command_with_args(command, args, reporter.as_deref()).await {
+                    Ok(resolved) => resolved,
+                    Err(error) => return spawn_error_result(command, &runtime_resolution_error(&error.to_string())),
+                };
             (CmdBuilder::from_resolved(&resolved), resolved.env)
         } else {
             (CmdBuilder::new(resolve_stdio_command(command)), Vec::new())
@@ -602,38 +603,44 @@ mod tests {
         String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn explicit_npx_connection_probe_reports_disabled_registry() {
+    async fn explicit_npx_connection_probe_uses_public_registry() {
         const CHILD: &str = "AELIX_HOST_MCP_POLICY_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let mut child = CmdBuilder::clean_cli(std::env::current_exe().unwrap());
             child
                 .args([
                     "--exact",
-                    "connection_test::tests::explicit_npx_connection_probe_reports_disabled_registry",
+                    "connection_test::tests::explicit_npx_connection_probe_uses_public_registry",
                 ])
                 .env(CHILD, "1")
                 .env_remove(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV);
             let output = child.output().await.unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             return;
         }
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
+        let command = temp.path().join("npx");
+        let marker = temp.path().join("registry.txt");
+        let script = format!(
+            "#!/usr/bin/env python3\nimport os,json,sys\nopen({},'w').write(os.environ.get('npm_config_registry','https://registry.npmjs.org/'))\nfor line in sys.stdin:\n r=json.loads(line)\n if 'id' not in r: continue\n result={{'protocolVersion':'2024-11-05','capabilities':{{'tools':{{}}}},'serverInfo':{{'name':'fixture','version':'1'}}}} if r['method']=='initialize' else {{'tools':[]}}\n print(json.dumps({{'jsonrpc':'2.0','id':r['id'],'result':result}}),flush=True)\n",
+            serde_json::to_string(marker.to_str().unwrap()).unwrap()
+        );
+        std::fs::write(&command, script).unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
         let service = McpConnectionTestService::new(reqwest::Client::new(), Arc::new(BroadcastEventBus::new(16)));
-        for name in ["npx", "npx.cmd"] {
-            let command = temp.path().join(name);
-            std::fs::write(&command, "must not execute").unwrap();
-            let result = service
-                .test_stdio_inner(command.to_str().unwrap(), &[], &HashMap::new(), None, None)
-                .await;
-            assert_eq!(
-                result.code,
-                Some(aionui_api_types::McpConnectionTestErrorCode::CommandStartFailed)
-            );
-            let error = result.error.unwrap();
-            assert!(error.contains("OUTBOUND_DISABLED"));
-            assert!(error.contains(aionui_runtime::outbound_policy::NPM_REGISTRY_ENV));
-        }
+        let result = service
+            .test_stdio_inner(command.to_str().unwrap(), &[], &HashMap::new(), None, None)
+            .await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "https://registry.npmjs.org/");
     }
 
     #[test]

@@ -87,10 +87,58 @@ pub async fn ensure_runtime_command_with_reporter(
     command: &str,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
 ) -> Result<ResolvedCommand, NodeRuntimeError> {
+    resolve_runtime_command(command, reporter, false).await
+}
+
+/// Explicit custom agent/MCP commands may use public npm unless a mirror is set.
+pub async fn ensure_user_runtime_command(command: &str) -> Result<ResolvedCommand, NodeRuntimeError> {
+    ensure_user_runtime_command_with_reporter(command, None).await
+}
+
+pub async fn ensure_user_runtime_command_with_reporter(
+    command: &str,
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+) -> Result<ResolvedCommand, NodeRuntimeError> {
+    resolve_runtime_command(command, reporter, true).await
+}
+
+pub async fn ensure_user_runtime_command_with_args(
+    command: &str,
+    args: &[String],
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+) -> Result<ResolvedCommand, NodeRuntimeError> {
+    let mut resolved = resolve_runtime_command(command, reporter, true).await?;
+    if crate::outbound_policy::is_node_package_wrapper(command, args) {
+        resolved.env.extend(crate::outbound_policy::npm_env_for(true)?);
+    }
+    Ok(resolved)
+}
+
+pub async fn ensure_implicit_runtime_command_with_args(
+    command: &str,
+    args: &[String],
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+) -> Result<ResolvedCommand, NodeRuntimeError> {
+    crate::outbound_policy::ensure_implicit_package_command_allowed(command, args)?;
+    let mut resolved = resolve_runtime_command(command, reporter, false).await?;
+    if crate::outbound_policy::is_node_package_wrapper(command, args) {
+        resolved.env.extend(crate::outbound_policy::npm_env()?);
+    }
+    Ok(resolved)
+}
+
+async fn resolve_runtime_command(
+    command: &str,
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+    user_configured: bool,
+) -> Result<ResolvedCommand, NodeRuntimeError> {
+    if !user_configured {
+        crate::outbound_policy::ensure_implicit_package_command_allowed(command, &[])?;
+    }
     // Gate registry tools before any runtime preparation. Explicit paths and
     // Windows wrappers must not bypass the same source requirement.
     let registry_env = if crate::outbound_policy::is_registry_tool_command(command) {
-        crate::outbound_policy::npm_env()?
+        crate::outbound_policy::npm_env_for(user_configured)?
     } else {
         Vec::new()
     };
@@ -108,10 +156,18 @@ pub async fn ensure_runtime_command_with_reporter(
             .map(ResolvedCommand::plain)
             .ok_or_else(|| NodeRuntimeError::system_invalid(format!("command '{command}' not found in PATH")))?,
         RuntimeCommandProbe::NodeTool { tool, .. } => {
+            if user_configured && let Some(path) = crate::resolve_command_path(command) {
+                let mut resolved = ResolvedCommand::plain(path);
+                resolved.env.extend(registry_env);
+                return Ok(resolved);
+            }
             let runtime = ensure_node_runtime_with_reporter(reporter).await?;
             tool_command(tool, &runtime)
         }
     };
+    if user_configured {
+        resolved.env.retain(|(key, _)| key != "npm_config_registry");
+    }
     resolved.env.extend(registry_env);
     Ok(resolved)
 }

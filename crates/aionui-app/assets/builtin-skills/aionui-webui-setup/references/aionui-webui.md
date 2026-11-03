@@ -12,7 +12,7 @@ AionUi 支持 WebUI 模式，允许通过浏览器访问应用。这对于远程
 | --------------------------- | ---------------------------- | ----------------------------------------------- | ----------- |
 | **1. 局域网连接**           | 同一 WiFi/LAN 的设备访问     | 手机和电脑在同一 WiFi，启用"允许远程访问"       | ⭐ 简单     |
 | **2. 远程软件 (Tailscale)** | 跨网络访问（如办公室到家庭） | 使用 VPN 软件如 Tailscale，无需公网 IP 或服务器 | ⭐ 非常简单 |
-| **3. 服务器部署**           | 多用户访问、24/7 运行        | 部署在云服务器，通过公网 IP 直接访问            | ⭐⭐ 中等   |
+| **3. 服务器部署**           | 私有网络单用户访问、24/7 运行        | 部署在私有服务器，通过局域网或 VPN 访问            | ⭐⭐ 中等   |
 
 ### 如何选择？
 
@@ -191,15 +191,15 @@ tailscale status --json
 
 ### 适用场景
 
-- 需要多用户访问
+- 需要单用户通过同一网络或 VPN 访问
 - 需要 24/7 运行
 - 部署在云服务器上
-- 通过公网 IP 或域名访问
+- 通过局域网或 VPN 私有地址访问
 
 ### 前置要求
 
 - 云服务器（Linux/macOS）
-- 公网 IP 或域名
+- 局域网或 VPN 私有地址
 - 防火墙配置权限
 
 ---
@@ -226,38 +226,17 @@ tailscale status --json
    - 记录显示的**网络访问地址**（`http://<服务器IP>:25808`）
    - 记录**用户名**和**密码**
 
-#### Step 3: 配置防火墙
+#### Step 3: 仅允许同一网络或 VPN 访问
 
-```bash
-# Ubuntu/Debian (ufw)
-sudo ufw allow 25808/tcp
-sudo ufw reload
-
-# CentOS/RHEL (firewalld)
-sudo firewall-cmd --permanent --add-port=25808/tcp
-sudo firewall-cmd --reload
-
-# 或使用 iptables
-sudo iptables -A INPUT -p tcp --dport 25808 -j ACCEPT
-```
+使用设置界面显示的局域网地址，或 VPN/Tailscale 的私有地址。防火墙仅允许受信任的局域网/VPN 客户端；不要把此端口开放给公网，也不要配置公网 IP 或路由器端口转发。
 
 #### Step 4: 配置开机自启（可选）
 
-如果需要 AionUi 开机自启，可以配置 systemd 服务。但建议通过 AionUi 设置界面管理 WebUI，而不是通过命令行。
+可以通过设置界面管理 WebUI，并按需要配置 systemd。
 
-#### Step 5: 获取访问地址
+#### Step 5: 获取私有访问地址
 
-1. 获取服务器公网 IP：
-
-   ```bash
-   curl ifconfig.me
-   # 或
-   curl ipinfo.io/ip
-   ```
-
-2. 访问地址：`http://<公网IP>:25808`
-
-3. 如果配置了域名，可以使用：`http://<域名>:25808`
+在同一网络的设备上使用设置界面显示的网络地址；不在同一网络时，先连接 VPN/Tailscale，再使用其私有地址。
 
 ---
 
@@ -435,7 +414,6 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /Applications/
 
 ## 相关资源
 
-- [AionUi Wiki - Remote Internet Access Guide](https://github.com/iOfficeAI/AionUi/wiki/Remote-Internet-Access-Guide)
 - [AionUi Wiki - WebUI Configuration Guide](https://github.com/iOfficeAI/AionUi/wiki/WebUI-Configuration-Guide)
 - [Tailscale 官方文档](https://tailscale.com/kb/)
 

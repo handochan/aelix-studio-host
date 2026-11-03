@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import os
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import outbound_audit as audit
@@ -46,6 +48,14 @@ sendmsg(4, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(
         result = self.parse('connect(3, {sa_family=AF_INET, broken}, 16) = -1 EINVAL\nconnect(3, <unfinished ...>\n')
         self.assertEqual(result['unparsedRecords'], 2)
 
+    def test_proxy_environment_refuses_without_running_command(self):
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {key:'http://secret-sentinel@127.0.0.1:1'}, clear=True):
+                report = Path(root) / 'report.json'
+                self.assertEqual(audit.audit(['must-not-execute'], report), 87)
+                self.assertEqual(json.loads(report.read_text())['reason'], 'proxy_environment')
+                self.assertNotIn('secret-sentinel', report.read_text())
+
     @unittest.skipUnless(sys.platform == 'linux' and shutil.which('strace'), 'Linux strace required')
     def test_real_positive_control_fails_audit(self):
         with tempfile.TemporaryDirectory() as root:
@@ -58,6 +68,17 @@ sendmsg(4, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(
             self.assertGreaterEqual(evidence['externalAttempts'], 2)
             self.assertEqual(evidence['unparsedRecords'], 0)
             self.assertEqual({item['syscall'] for item in evidence['external']}, {'connect', 'sendto'})
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('strace'), 'Linux strace required')
+    def test_child_process_positive_control_is_detected(self):
+        with tempfile.TemporaryDirectory() as root:
+            report = Path(root) / 'report.json'
+            result = subprocess.run([sys.executable, '-I', '-B', str(Path(audit.__file__)), '--report', str(report), '--', sys.executable, '-I', '-B', str(Path(audit.__file__)), '--child-positive-control'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 86, result.stdout + result.stderr)
+            evidence = json.loads(report.read_text())
+            self.assertGreaterEqual(evidence['externalAttempts'], 2)
+            self.assertGreaterEqual(evidence['traceFiles'], 2)
+            self.assertEqual(evidence['unparsedRecords'], 0)
 
 
 if __name__ == '__main__':

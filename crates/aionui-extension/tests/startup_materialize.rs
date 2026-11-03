@@ -268,5 +268,49 @@ async fn failed_refresh_cannot_restore_officecli_installer_guidance() {
     )
     .unwrap();
     std::fs::write(tmp.path().join(".builtin-skills.tmp"), "force refresh failure").unwrap();
-    assert!(materialize_if_needed(tmp.path(), &FIXTURE_CORPUS, "new").await.is_err());
+    assert!(!materialize_if_needed(tmp.path(), &FIXTURE_CORPUS, "new").await.unwrap());
+    let paths = aionui_extension::resolve_skill_paths(tmp.path(), tmp.path());
+    assert!(
+        aionui_extension::read_builtin_skill(&paths, "auto-inject/officecli/SKILL.md")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        aionui_extension::list_available_skills(&paths)
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.name != "officecli")
+    );
+    assert!(
+        aionui_extension::materialize_skills_for_agent(&paths, "conv", &["officecli".into()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn locked_retired_directory_does_not_prevent_startup_or_expose_old_skills() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("builtin-skills");
+    let retired = root.join("moltbook");
+    std::fs::create_dir_all(&retired).unwrap();
+    std::fs::write(retired.join("SKILL.md"), "---\nname: moltbook\n---\nretired").unwrap();
+    std::fs::write(root.join(".version"), "old").unwrap();
+    std::fs::write(tmp.path().join(".builtin-skills.tmp"), "force rename failure").unwrap();
+    std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = materialize_if_needed(tmp.path(), &FIXTURE_CORPUS, "new").await;
+    std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_ok());
+    let paths = aionui_extension::resolve_skill_paths(tmp.path(), tmp.path());
+    assert!(
+        aionui_extension::read_builtin_skill(&paths, "moltbook/SKILL.md")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

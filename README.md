@@ -271,67 +271,100 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
 
 ## Host-managed outbound access
 
-Scope follows [Studio #15](https://github.com/handochan/aelix-studio/issues/15)
-rows 6–8 and 14, decisions 3/4, and the 2026-11-01 Moltbook retirement decision
-in [host #2](https://github.com/handochan/aelix-studio-host/issues/2).
-
-Host defaults do not fetch runtimes, packages, OfficeCLI installers or update
-metadata. A blocked operation returns an explanatory error; it is not treated
-as an offline success. Provider endpoints and explicitly configured custom
-commands/skills remain user choices.
+This follows [Studio #15](https://github.com/handochan/aelix-studio/issues/15)
+and the 2026-11-01/02 decisions in [host #2](https://github.com/handochan/aelix-studio-host/issues/2).
+Implicit host downloads and remote-image fetching are off by default. Provider
+endpoints and explicitly configured custom agents, MCP servers and custom skills
+remain user choices. In particular, a user's npm/npx command is allowed: npm's
+normal public-registry default applies unless a host mirror is configured.
 
 | Surface | Default behavior | Explicit configuration |
 | --- | --- | --- |
-| Host update check (GitHub) | Disabled; `UPDATE_CHECK_DISABLED` | Existing `AELIX_STUDIO_HOST_UPDATE_CHECK=1` and repository setting |
-| Managed Node (`nodejs.org`) | Public fallback removed; cached/bundled Node still works | `AELIX_STUDIO_HOST_NODE_MIRROR=https://mirror.example/node/dist/` |
-| Host-resolved `npm` / `npx` (including explicit paths and Windows wrappers) (npmjs) | `OUTBOUND_DISABLED` before runtime preparation when no registry is set | `AELIX_STUDIO_HOST_NPM_REGISTRY=https://mirror.example/repository/npm/` |
-| OfficeCLI missing binary / daily update | No installer or version-check HTTP request; restore Studio's bundled binary or put it on PATH | Studio owns installation and updates |
-| Public WebUI tunnel (`cloudflared`) | `aionui-webui-public` removed from builtin bundle/catalog | User-imported custom skills remain supported |
-| Moltbook | `moltbook` removed from builtin bundle/catalog | User-imported custom skills remain supported |
+| Host update check | `UPDATE_CHECK_DISABLED` | `AELIX_STUDIO_HOST_UPDATE_CHECK=1` plus repository |
+| Managed Node download | No public fallback; local cache/bundle still usable | `AELIX_STUDIO_HOST_NODE_MIRROR=https://mirror.example/node/dist/` |
+| Host-predefined npx registry agents / implicit npm | `OUTBOUND_DISABLED` without a host mirror | `AELIX_STUDIO_HOST_NPM_REGISTRY=https://mirror.example/repository/npm/` |
+| User-configured npm/npx (custom agent or MCP) | Allowed, normal npm configuration/public default | The same optional npm mirror; applies to explicit paths and Node npx-cli.js wrappers too |
+| Remote images (`/api/fs/fetch-remote-image`) | HTTP 403, `REMOTE_IMAGE_DISABLED` with reason; no request | `AELIX_STUDIO_HOST_REMOTE_IMAGES=1` preserves existing image host validation |
+| OfficeCLI missing binary / daily update | No installer/update HTTP; restore Studio's binary or PATH | Studio owns installation and updates |
+| Public WebUI tunnel / Moltbook | Removed from builtin bundle/catalog | Custom imports are unaffected |
 
-Mirror settings accept HTTP(S) URLs without embedded credentials, query strings
-or fragments. Node appends `v24.11.0/node-v24.11.0-<platform>.<extension>` under
-the configured prefix. Node redirects are rejected; failures never fall back to
-nodejs.org. Existing bundled-resource mode still requires Studio's local files.
-Local runtime validation uses offline npm settings and disables update
-notifications. The npm registry is passed into resolved child environments after environment
-cleaning, with update notifications, audit and funding requests disabled and
-registry-host replacement set to `always`. Serve package metadata, tarballs and
-all transitive dependencies from the internal registry; package install scripts,
-custom commands and agent/provider traffic require deployment-specific policy.
-These settings are source selection, not a general process firewall.
+No predefined pnpx/bunx/uvx launch sites were found in the checked host registry.
+Implicit uses of these launchers are rejected because they have no host mirror
+contract. Known Node npx-cli.js wrappers follow the npm policy. This controls
+host launch preparation, not arbitrary code run by a configured agent/skill.
+MCP launch failures emit an owner/conversation-scoped warning in the existing
+`message.stream` tips channel, with a reason; they do not terminate a turn or
+silently disappear. Connection-test history is not overwritten by a session
+attachment failure.
 
-On upgrade, the host removes retired directories only within its materialized
-`builtin-skills` tree and retires catalog rows only when `source=builtin`.
-Stale builtin override trees are filtered from builtin discovery/read/resolution.
-If refresh fails while an old builtin still carries OfficeCLI remote installer
-instructions, startup fails with its bootstrap error rather than serving that
-old guidance. The associated Moltbook builtin assistant/rules and Butler public-link offers
-are removed too; existing builtin assistant definitions are retired by the
-normal manifest reconciliation. User-owned custom skill directories and catalog rows, including same-name
-imports, remain available.
+### Settings Studio must forward
 
-Linux CI runs `scripts/release/outbound_audit.py` around the functional smoke:
-startup, denied Node/npm/npx launch preparation, retired-builtin absence,
-missing OfficeCLI preview requests, synthetic-agent registration/session/prompt,
-idle and shutdown. `strace`
-follows the complete process tree and counts IPv4/IPv6 TCP and UDP destination
-attempts, including failed calls. Loopback/Unix IPC are allowed; DNS port 53 is
-counted as outbound even on loopback. Unparseable/incomplete traces fail the gate.
-A second audited flow uses actual Node 24.11.0/npm/npx, a loopback registry
-serving a never-published synthetic ACP package, and a prompt/reply session.
-It exercises bare and explicit-path npx launches and verifies registry-prefix
-metadata and tarball requests through the real launch
-path. The pinned Node Docker fixture is prepared before auditing starts; it is
-test setup and is not shipped in the host release.
-A separate positive control deliberately attempts TCP and UDP to TEST-NET-3;
-the audit **must fail with exit 86**. Reports are uploaded with smoke evidence.
-Raw traces suppress buffers and are deleted. This establishes zero attempts for
-the exercised default synthetic lifecycle on Linux, not arbitrary user-configured
-providers, custom skills or every third-party agent.
+These are host-process environment settings, read at launch. Set them in the
+build/resource-preparation environment **and** the host launch environment where
+applicable; setting them only in the renderer does not configure the host.
+
+| Setting | Build / resource preparation | Host execution |
+| --- | --- | --- |
+| `AELIX_STUDIO_HOST_NODE_MIRROR` | Required when host prepares/downloads managed Node; use the official archive bytes under the mirror prefix | Required only if a local cache/bundle is unavailable and downloading is intended |
+| `AELIX_STUDIO_HOST_NPM_REGISTRY` | Forward if preparation intentionally invokes npm/npx | Enables host-predefined registry agents; overrides the registry for user npm/npx when set |
+| `AELIX_STUDIO_HOST_REMOTE_IMAGES` | No build download required | Omit/other values disable fetching; exactly `1` opts in. Restart the host after changing it |
+
+Mirror URLs must be HTTP(S), without embedded credentials, query or fragment.
+Node appends `v24.11.0/node-v24.11.0-<platform>.<extension>`; redirects are
+rejected and errors never fall back to nodejs.org. All downloaded Node archives,
+including mirror responses, **must** match the five pinned values from the
+[official Node 24.11.0 SHASUMS256](https://nodejs.org/dist/v24.11.0/SHASUMS256.txt)
+before extraction. The verbatim source manifest is checked in beside the
+runtime implementation. Repacking an archive changes its hash and is rejected.
+Studio must also verify these same archive hashes before supplying an expanded
+Node bundle. Expanded local directories retain the existing layout/version
+validation; an archive hash is not misrepresented as a directory hash.
+
+For npm/npx, registry selection and offline/background-request settings are
+injected after environment cleaning. With no host mirror, explicit user commands
+retain normal npm configuration; with a mirror, serve metadata, tarballs and
+transitive dependencies there. npm update notifications/audit/fund are disabled.
+A configured package or its install scripts can still make their own requests;
+these settings are source selection, not a general process firewall.
+Studio integration/installed-app acceptance remains in [Studio #28](https://github.com/handochan/aelix-studio/issues/28).
+
+### Builtin upgrade and internet-dependent skills
+
+Retirement affects only host-owned builtin directories and `source=builtin`
+catalog rows. User custom skills, including same-name imports, are preserved.
+If an upgrade cannot delete/refresh the old tree (locked file, permissions or
+rename failure), the host starts with a filtered fallback and warns. Retired
+skills and old OfficeCLI-family skills are hidden from discovery, catalog,
+read and session-use paths. Unsafe OfficeCLI installer instructions are never
+returned from builtin paths, even if physical cleanup failed. A later successful
+refresh restores safe current builtin skills.
+
+`aionui-webui-setup` documents same-network/VPN access only. The unchanged
+`morph-ppt-3d`, `mermaid`, `openclaw-setup` and `ui-ux-pro-max` skills include
+internet-dependent instructions/resources and run on user request; importing
+or invoking them is not an offline/zero-egress acceptance claim.
+
+### Outbound-attempt verification
+
+Linux CI wraps the default functional smoke with `outbound_audit.py`: startup,
+blocked predefined registry-agent checks, remote-image rejection, retired
+builtin absence, OfficeCLI missing-binary requests, synthetic ACP session,
+prompt/reply, idle and shutdown. A second audited flow uses real Node/npm/npx
+against a loopback registry (bare and absolute-path npx). Fixtures are prepared
+before auditing; no fixture is shipped in the host release.
+
+`strace -ff` follows the complete process tree and records attempted IPv4/IPv6
+connect/send calls, including failed calls. Loopback/Unix IPC are allowed; DNS
+port 53 counts as outbound even on loopback. Incomplete/unparseable evidence
+fails closed (87). If nonempty `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` is
+present (case-insensitive), the auditor refuses execution with 87 rather than
+claiming zero attempts through a proxy. `NO_PROXY` is not an exemption.
+Parent and child-process TCP/UDP positive controls must each be detected and
+fail the audit with 86. JSON reports are uploaded; raw buffer-suppressed traces
+are deleted. This measures the exercised Linux defaults/local-mirror fixture,
+not arbitrary configured providers, third-party agents, proxies or internet skills.
 
 ```sh
-# Linux, with strace installed; no provider credentials required
 python3 -I -B scripts/release/outbound_audit.py --report smoke/outbound.json -- \
   python3 -I -B scripts/release/smoke.py --binary target/debug/aelix-studio-host --report smoke/report.json
 ```

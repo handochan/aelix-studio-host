@@ -75,8 +75,20 @@ pub async fn materialize_if_needed(
 
     // Retire old copies even when the marker matches or a refresh falls back.
     // This lock also serializes retirement with another host refreshing the tree.
-    let _guard = MaterializeLockGuard::acquire(data_dir).await?;
-    crate::retired_builtins::remove_materialized(&target).await?;
+    let had_existing = target.is_dir() || data_dir.join(OLD_DIR_NAME).is_dir();
+    let _guard = match MaterializeLockGuard::acquire(data_dir).await {
+        Ok(guard) => guard,
+        Err(error) if had_existing => {
+            crate::retired_builtins::mark_degraded(&target);
+            warn!(error = %error, "builtin refresh lock unavailable; starting with filtered skills");
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = crate::retired_builtins::remove_materialized(&target).await {
+        crate::retired_builtins::mark_degraded(&target);
+        warn!(error = %error, "builtin retirement cleanup failed; stale skills remain hidden");
+    }
 
     if version_file_matches(&target, binary_version).await {
         info!(
@@ -93,20 +105,16 @@ pub async fn materialize_if_needed(
         "materializing embedded builtin skills"
     );
     match materialize_embedded_builtin_skills_unlocked(data_dir, corpus, binary_version).await {
-        Ok(()) => {}
-        Err(e) if existing_builtin_skills_looks_usable(&target).await => {
-            if crate::retired_builtins::has_legacy_installer_instructions(&target).await? {
-                error!(
-                    reason = "legacy_officecli_installer",
-                    "builtin refresh failed; refusing old remote installer instructions"
-                );
-                return Err(e);
-            }
+        Ok(()) => {
+            crate::retired_builtins::clear_degraded(&target);
+        }
+        Err(e) if had_existing => {
+            crate::retired_builtins::mark_degraded(&target);
             warn!(
                 target = %target.display(),
                 version = binary_version,
                 error = %e,
-                "failed to refresh builtin skills; continuing with existing tree"
+                "failed to refresh builtin skills; starting with filtered existing tree"
             );
             return Ok(false);
         }
@@ -236,16 +244,6 @@ async fn materialize_embedded_builtin_skills_unlocked(
     }
 
     Ok(())
-}
-
-async fn existing_builtin_skills_looks_usable(target: &Path) -> bool {
-    if !target.is_dir() {
-        return false;
-    }
-    tokio::fs::metadata(target.join(VERSION_FILE))
-        .await
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false)
 }
 
 async fn retry_startup_file_op<T, F, Fut>(operation: &str, path: &Path, mut op: F) -> std::io::Result<T>

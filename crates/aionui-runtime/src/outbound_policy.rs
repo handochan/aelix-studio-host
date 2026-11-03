@@ -17,7 +17,10 @@ pub fn is_registry_tool_command(command: &str) -> bool {
             .unwrap_or("")
             .to_ascii_lowercase()
             .as_str(),
-        "npm"
+        "pnpx"
+            | "bunx"
+            | "uvx"
+            | "npm"
             | "npx"
             | "npm.bat"
             | "npx.bat"
@@ -70,18 +73,62 @@ fn invalid_url(key: &str) -> NodeRuntimeError {
 }
 
 pub(crate) fn npm_env() -> Result<Vec<(OsString, OsString)>, NodeRuntimeError> {
-    let registry = configured_url(NPM_REGISTRY_ENV)?;
-    Ok([
-        ("npm_config_registry", registry.as_str()),
+    npm_env_for(false)
+}
+
+pub(crate) fn npm_env_for(user_configured: bool) -> Result<Vec<(OsString, OsString)>, NodeRuntimeError> {
+    let mirror_set = std::env::var(NPM_REGISTRY_ENV)
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty());
+    let mut env: Vec<(OsString, OsString)> = [
         ("npm_config_offline", "false"),
-        ("npm_config_replace_registry_host", "always"),
         ("npm_config_update_notifier", "false"),
         ("npm_config_audit", "false"),
         ("npm_config_fund", "false"),
     ]
     .into_iter()
-    .map(|(k, v)| (k.into(), v.into()))
-    .collect())
+    .map(|(key, value)| (key.into(), value.into()))
+    .collect();
+    if !user_configured || mirror_set {
+        let registry = configured_url(NPM_REGISTRY_ENV)?;
+        env.push(("npm_config_registry".into(), registry.as_str().into()));
+        env.push(("npm_config_replace_registry_host".into(), "always".into()));
+    }
+    // With no host mirror, explicit users retain normal npm configuration:
+    // npm's default is the public registry; user .npmrc/env choices remain valid.
+    Ok(env)
+}
+
+pub fn is_node_package_wrapper(command: &str, args: &[String]) -> bool {
+    matches!(
+        command
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "node" | "node.exe"
+    ) && args.first().is_some_and(|arg| {
+        matches!(
+            arg.rsplit(['/', '\\']).next().unwrap_or(""),
+            "npx-cli.js" | "npx-cli.cjs" | "npm-cli.js"
+        )
+    })
+}
+
+/// Host-owned package launchers require an explicit mirror even when wrapped by Node.
+pub fn ensure_implicit_package_command_allowed(command: &str, args: &[String]) -> Result<(), NodeRuntimeError> {
+    let basename = command.rsplit(['/', '\\']).next().unwrap_or("").to_ascii_lowercase();
+    if matches!(basename.as_str(), "pnpx" | "bunx" | "uvx") {
+        return Err(NodeRuntimeError::managed_invalid(
+            "OUTBOUND_DISABLED: implicit package launcher has no host mirror contract; configure an explicit custom agent instead",
+        ));
+    }
+    let node_wrapper = is_node_package_wrapper(command, args);
+    if is_registry_tool_command(command) || node_wrapper {
+        npm_env()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -212,6 +259,39 @@ mod tests {
             resolved
                 .env
                 .contains(&("npm_config_registry".into(), "http://127.0.0.1:9/internal/npm/".into()))
+        );
+    }
+    #[tokio::test]
+    async fn user_commands_allow_public_npm_but_implicit_launchers_stay_blocked() {
+        if !crate::test_support::run_in_env_child(
+            "outbound_policy::tests::user_commands_allow_public_npm_but_implicit_launchers_stay_blocked",
+            |command| {
+                command.env_remove(NPM_REGISTRY_ENV);
+            },
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("npx.cmd");
+        std::fs::write(&path, "fixture").unwrap();
+        let resolved = crate::ensure_user_runtime_command(path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(!resolved.env.iter().any(|(key, _)| key == "npm_config_registry"));
+        assert!(resolved.env.contains(&("npm_config_offline".into(), "false".into())));
+        for command in ["npm", "npx", "pnpx", "bunx", "uvx"] {
+            assert!(
+                ensure_implicit_package_command_allowed(command, &[])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("OUTBOUND_DISABLED")
+            );
+        }
+        assert!(
+            ensure_implicit_package_command_allowed("node", &["/runtime/npm/bin/npx-cli.js".into()])
+                .unwrap_err()
+                .to_string()
+                .contains("OUTBOUND_DISABLED")
         );
     }
 }

@@ -115,7 +115,7 @@ pub trait IFileService: Send + Sync {
 
     /// Download a remote image and return a base64 Data URL.
     /// On failure, returns a placeholder SVG Data URL.
-    async fn fetch_remote_image(&self, url: &str) -> String;
+    async fn fetch_remote_image(&self, url: &str) -> Result<String, FileError>;
 }
 
 /// Git-based workspace snapshot system for tracking file changes.

@@ -97,7 +97,7 @@ class Host:
         for directory in (home, workspace, self.root / 'extensions'):
             directory.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
-        for setting in ('AELIX_STUDIO_HOST_UPDATE_CHECK', 'AELIX_STUDIO_HOST_NODE_MIRROR', 'AELIX_STUDIO_HOST_NPM_REGISTRY'):
+        for setting in ('AELIX_STUDIO_HOST_UPDATE_CHECK', 'AELIX_STUDIO_HOST_NODE_MIRROR', 'AELIX_STUDIO_HOST_NPM_REGISTRY', 'AELIX_STUDIO_HOST_REMOTE_IMAGES'):
             env.pop(setting, None)
         env.update(
             HOME=str(home),
@@ -205,23 +205,23 @@ def run(binary, python, keep, report):
         assert disabled.get('code') == 'UPDATE_CHECK_DISABLED', disabled
         assert disabled.get('error') == 'Update checks are disabled; set AELIX_STUDIO_HOST_UPDATE_CHECK=1 to enable them', disabled
         checks.append('update_check_disabled_by_default')
-        # Exercise denied launch preparation through the real API under default
-        # download mode, rather than hiding the paths with bundled-only mode.
-        for tool, setting in [('npx', 'AELIX_STUDIO_HOST_NPM_REGISTRY'),
-                              ('npm', 'AELIX_STUDIO_HOST_NPM_REGISTRY'),
-                              ('node', 'AELIX_STUDIO_HOST_NODE_MIRROR')]:
-            _, denial = host.api('/api/agents/custom/try-connect', 'POST', {'command': tool})
-            assert denial.get('step') == 'fail_cli', (tool, denial)
-            assert 'OUTBOUND_DISABLED' in denial.get('error', ''), (tool, denial)
-            assert setting in denial['error'], (tool, denial)
-        for name in ('npm', 'npx.cmd'):
-            command = root / name
-            command.write_text('must not execute')
-            _, denial = host.api('/api/agents/custom/try-connect', 'POST', {'command': str(command)})
-            assert denial.get('step') == 'fail_cli', denial
-            assert 'OUTBOUND_DISABLED' in denial.get('error', ''), denial
-            assert 'AELIX_STUDIO_HOST_NPM_REGISTRY' in denial['error'], denial
-        checks.append('runtime_download_and_registry_disabled')
+        # Explicit custom commands may use npm; managed Node downloads remain opt-in.
+        code, image_denial = http(host.port, '/api/fs/fetch-remote-image', 'POST', {
+            'url': 'https://raw.githubusercontent.com/owner/repo/main/image.png',
+        })
+        assert code == 403 and image_denial.get('code') == 'REMOTE_IMAGE_DISABLED', image_denial
+        assert 'AELIX_STUDIO_HOST_REMOTE_IMAGES=1' in image_denial.get('error', ''), image_denial
+        checks.append('remote_images_disabled_by_default')
+        _, agents = host.api('/api/agents/management')
+        builtins = [item for item in agents if item.get('agent_source') == 'builtin'
+                    and item.get('backend') not in ('claude', 'codex', 'antigravity')
+                    and item.get('command') == 'npx']
+        assert builtins, 'Smoke must exercise a host-predefined registry agent'
+        for builtin in builtins:
+            _, denied_builtin = host.api('/api/agents/' + builtin['id'] + '/health-check', 'POST')
+            assert denied_builtin.get('last_check_error_code') == 'outbound_disabled', denied_builtin
+            assert 'AELIX_STUDIO_HOST_NPM_REGISTRY' in denied_builtin.get('last_check_error_message', ''), denied_builtin
+        checks.append('implicit_runtime_policy_enabled')
         _, skills = host.api('/api/skills')
         assert not {'moltbook', 'aionui-webui-public'} & {item['name'] for item in skills}, skills
         checks.append('retired_builtins_absent')
@@ -279,6 +279,20 @@ def run(binary, python, keep, report):
         report['exitCode'] = host.stop()
         assert report['exitCode'] == 0, 'Host did not shut down cleanly'
         checks.append('graceful_shutdown')
+        # Prove that the documented launch setting enables the existing handler.
+        # A disallowed host exercises opt-in without an external request.
+        opted_in = Host(binary, root / 'image-opt-in', env_overrides={'AELIX_STUDIO_HOST_REMOTE_IMAGES': '1'})
+        try:
+            opted_in.start()
+            _, image = opted_in.api('/api/fs/fetch-remote-image', 'POST', {'url': 'https://disallowed.example/image.png'})
+            assert image.startswith('data:image/svg+xml'), image
+            assert opted_in.stop() == 0
+        finally:
+            if opted_in.process is not None and opted_in.process.poll() is None:
+                opted_in.kill()
+            if getattr(opted_in, 'log', None) is not None and not opted_in.log.closed:
+                opted_in.log.close()
+        checks.append('remote_images_opt_in_setting')
         report['status'] = 'passed'
     except BaseException as failure:
         report['error'] = repr(failure)

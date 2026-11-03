@@ -14,7 +14,7 @@ use aionui_common::ProviderWithModel;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_realtime::EventBroadcaster;
-use aionui_runtime::ensure_runtime_command_with_reporter;
+
 use serde_json::{Map, Value};
 use tracing::{debug, info, warn};
 
@@ -563,10 +563,10 @@ async fn load_user_mcp_servers(
     };
     let rows = match rows_result {
         Ok(r) => r,
-        Err(err) => {
+        Err(_err) => {
             warn!(
                 conversation_id,
-                error = %err,
+                reason = "MCP_SERVER_UNAVAILABLE",
                 "user_mcp: list() failed; skipping injection"
             );
             return HashMap::new();
@@ -590,11 +590,20 @@ async fn load_user_mcp_servers(
                 servers.insert(row.name.clone(), config);
             }
             Err(err) => {
+                crate::mcp_resolve::report_mcp_unavailable(
+                    broadcaster.as_ref(),
+                    user_id,
+                    conversation_id,
+                    &row.id,
+                    &row.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     conversation_id,
                     server_id = %row.id,
                     server_name = %row.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "user_mcp: failed to convert row; skipping"
                 );
             }
@@ -806,11 +815,20 @@ async fn merge_session_snapshot_mcp_servers(
                 }
             }
             Err(err) => {
+                crate::mcp_resolve::report_mcp_unavailable(
+                    broadcaster.as_ref(),
+                    user_id,
+                    conversation_id,
+                    &server.id,
+                    &server.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     conversation_id = %conversation_id,
                     server_id = %server.id,
                     server_name = %server.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "session_mcp: failed to convert session snapshot; skipping"
                 );
             }
@@ -827,7 +845,7 @@ async fn ensure_stdio_launch(
     broadcaster: Arc<dyn aionui_realtime::EventBroadcaster>,
 ) -> Result<(String, Vec<String>, HashMap<String, String>), String> {
     let reporter = conversation_runtime_reporter(broadcaster, user_id.to_owned(), conversation_id.to_owned());
-    let resolved = ensure_runtime_command_with_reporter(command, Some(reporter.as_ref()))
+    let resolved = aionui_runtime::ensure_user_runtime_command_with_args(command, args, Some(reporter.as_ref()))
         .await
         .map_err(|error| error.to_string())?;
 

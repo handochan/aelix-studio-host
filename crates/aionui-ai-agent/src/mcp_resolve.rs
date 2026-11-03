@@ -18,7 +18,7 @@ use aionui_api_types::{SessionMcpServer, SessionMcpTransport, TEAM_MCP_SERVER_NA
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_realtime::EventBroadcaster;
-use aionui_runtime::ensure_runtime_command;
+
 use tracing::{info, warn};
 
 /// Resolve a conversation's user-configured MCP servers into neutral
@@ -31,14 +31,13 @@ use tracing::{info, warn};
 ///
 /// Best-effort: a repo error, a capability-unsupported transport, or a malformed
 /// `transport_config` row is warn-logged and skipped, never fatal. `broadcaster`
-/// is accepted for parity with the legacy reporter path (runtime-resolution status
-/// reporting) and reserved for that use.
+/// emits a user-scoped, non-terminal conversation advisory on resolution failure.
 pub async fn resolve_session_mcp_servers(
     repo: &dyn IMcpServerRepository,
     user_id: &str,
     selected_ids: Option<&[String]>,
     conversation_id: &str,
-    _broadcaster: Arc<dyn EventBroadcaster>,
+    broadcaster: Arc<dyn EventBroadcaster>,
 ) -> Vec<SessionMcpServer> {
     let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(user_id, ids).await,
@@ -47,6 +46,15 @@ pub async fn resolve_session_mcp_servers(
     let rows = match rows_result {
         Ok(r) => r,
         Err(err) => {
+            report_mcp_unavailable(
+                broadcaster.as_ref(),
+                user_id,
+                conversation_id,
+                "",
+                "Configured MCP servers",
+                "configuration_unavailable",
+            )
+            .await;
             warn!(conversation_id, error = %err, "mcp_resolve: list() failed; skipping injection");
             return Vec::new();
         }
@@ -66,11 +74,12 @@ pub async fn resolve_session_mcp_servers(
         match row_to_session_mcp_server(&row).await {
             Ok(server) => servers.push(server),
             Err(err) => {
+                report_mcp_unavailable(broadcaster.as_ref(), user_id, conversation_id, &row.id, &row.name, &err).await;
                 warn!(
                     conversation_id,
                     server_id = %row.id,
                     server_name = %row.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "mcp_resolve: failed to convert row; skipping"
                 );
             }
@@ -85,6 +94,54 @@ pub async fn resolve_session_mcp_servers(
         );
     }
     servers
+}
+
+/// Emit an existing warning-tip shape, which the conversation UI renders without
+/// ending a turn. Never overwrite connection-test state or echo commands/tokens.
+pub(crate) async fn report_mcp_unavailable(
+    bus: &dyn EventBroadcaster,
+    user_id: &str,
+    conversation_id: &str,
+    server_id: &str,
+    server_name: &str,
+    error: &str,
+) {
+    let reason = if error.contains("checksum mismatch") {
+        "Node archive checksum verification failed; restore trusted Node resources or correct the mirror."
+    } else if error.contains("transport_config") {
+        "The stored MCP configuration is invalid; correct its transport configuration."
+    } else if error.contains("configuration_unavailable") {
+        "MCP settings could not be loaded; check the host configuration storage."
+    } else if error.contains("OUTBOUND_CONFIG_INVALID") {
+        "The host mirror configuration is invalid; check the host mirror settings."
+    } else if error.contains("AELIX_STUDIO_HOST_NODE_MIRROR") {
+        "Node is unavailable; provide local/bundled Node or configure AELIX_STUDIO_HOST_NODE_MIRROR."
+    } else if error.contains("OUTBOUND_DISABLED") {
+        "Implicit package execution is disabled; configure the host registry mirror."
+    } else if error.contains("unsupported") {
+        "The agent does not support this MCP transport."
+    } else {
+        "The configured MCP command or transport is unavailable; check its configuration and local runtime."
+    };
+    warn!(conversation_id, server_id, reason, "MCP server could not be attached");
+    let notice = aionui_api_types::McpUnavailableNotice {
+        user_id: user_id.into(),
+        conversation_id: conversation_id.into(),
+        msg_id: aionui_common::generate_prefixed_id("mcp-notice"),
+        turn_id: String::new(),
+        kind: "tips",
+        hidden: false,
+        data: aionui_api_types::McpUnavailableTip {
+            content: format!("MCP server '{}': {reason}", server_name),
+            severity: "warning",
+            code: "MCP_SERVER_UNAVAILABLE",
+            params: serde_json::json!({"server_id":server_id}),
+        },
+    };
+    bus.broadcast(aionui_api_types::WebSocketMessage::new(
+        "message.stream",
+        serde_json::to_value(notice).expect("notice serialization"),
+    ));
 }
 
 /// Parse one `McpServerRow` into a neutral `SessionMcpServer`, resolving the stdio
@@ -123,7 +180,9 @@ pub async fn row_to_session_mcp_server(row: &McpServerRow) -> Result<SessionMcpS
             // Resolve the launch command (npx/bun → bundled path) + fold in the
             // runtime-provided args prefix + env, exactly like the legacy
             // `ensure_stdio_launch`. The resolved form is what the agent spawns.
-            let resolved = ensure_runtime_command(command).await.map_err(|e| e.to_string())?;
+            let resolved = aionui_runtime::ensure_user_runtime_command_with_args(command, &args, None)
+                .await
+                .map_err(|e| e.to_string())?;
             let mut final_args: Vec<String> = resolved
                 .args_prefix
                 .iter()
@@ -324,5 +383,64 @@ mod tests {
         let servers = resolve_session_mcp_servers(&repo, TEST_USER_ID, None, "conv-1", test_broadcaster()).await;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "docs");
+    }
+    #[tokio::test]
+    async fn failed_mcp_resolution_notifies_owner_without_overwriting_test_status() {
+        use aionui_db::{IUserRepository, SqliteMcpServerRepository, SqliteUserRepository};
+        let db = aionui_db::init_database_memory().await.unwrap();
+        let users = SqliteUserRepository::new(db.pool().clone());
+        let owner = users.create_user("mcp-owner", "hash").await.unwrap().id;
+        let other = users.create_user("mcp-other", "hash").await.unwrap().id;
+        let repo = SqliteMcpServerRepository::new(db.pool().clone());
+        let row = repo
+            .create(aionui_db::CreateMcpServerParams {
+                user_id: &owner,
+                name: "missing-tool",
+                description: None,
+                enabled: true,
+                transport_type: "stdio",
+                transport_config: r#"{"command":"/missing/secret-sentinel","env":{"TOKEN":"secret-sentinel"}}"#,
+                tools: None,
+                original_json: None,
+                builtin: false,
+            })
+            .await
+            .unwrap();
+        repo.update_status(&owner, &row.id, "connected", None).await.unwrap();
+        let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(16));
+        let mut events = bus.subscribe();
+        assert!(
+            resolve_session_mcp_servers(&repo, &owner, None, "conv-visible", bus.clone())
+                .await
+                .is_empty()
+        );
+        let notice = events.try_recv().unwrap();
+        assert_eq!(notice.name, "message.stream");
+        assert_eq!(notice.data["user_id"], owner);
+        assert_eq!(notice.data["conversation_id"], "conv-visible");
+        assert_eq!(notice.data["type"], "tips");
+        assert_eq!(notice.data["data"]["type"], "warning");
+        assert_eq!(notice.data["data"]["code"], "MCP_SERVER_UNAVAILABLE");
+        assert!(
+            notice.data["data"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("configured MCP command")
+        );
+        assert!(!notice.data.to_string().contains("secret-sentinel"));
+        assert_eq!(
+            repo.find_by_id(&owner, &row.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_test_status,
+            "connected"
+        );
+        assert!(
+            resolve_session_mcp_servers(&repo, &other, None, "other-conv", bus)
+                .await
+                .is_empty()
+        );
+        assert!(events.try_recv().is_err());
     }
 }

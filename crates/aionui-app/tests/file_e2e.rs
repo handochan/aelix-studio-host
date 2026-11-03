@@ -661,7 +661,7 @@ async fn get_image_base64_returns_data_url() {
 }
 
 #[tokio::test]
-async fn fetch_remote_image_non_whitelisted_returns_placeholder_svg() {
+async fn fetch_remote_image_is_disabled_by_default() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -673,13 +673,15 @@ async fn fetch_remote_image_non_whitelisted_returns_placeholder_svg() {
         &csrf,
     );
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     let json = body_json(resp).await;
-    let data_url = json["data"].as_str().unwrap();
+    assert_eq!(json["code"], "REMOTE_IMAGE_DISABLED");
     assert!(
-        data_url.starts_with("data:image/svg+xml"),
-        "expected placeholder SVG for non-whitelisted host"
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("AELIX_STUDIO_HOST_REMOTE_IMAGES=1")
     );
 }
 

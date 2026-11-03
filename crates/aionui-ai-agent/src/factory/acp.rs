@@ -17,7 +17,6 @@ use aionui_common::CommandSpec;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
-use aionui_runtime::{ensure_runtime_command, ensure_runtime_command_with_reporter};
 use tracing::{info, warn};
 
 use crate::runtime_status::conversation_runtime_reporter;
@@ -226,6 +225,7 @@ pub(super) async fn build(
                 &ctx.user_id,
                 &ctx.conversation_id,
                 &mcp_capabilities,
+                deps.broadcaster.clone(),
             )
             .await
         }
@@ -254,11 +254,20 @@ pub(super) async fn build(
         match session_server_to_sdk_mcp_server(server).await {
             Ok(server) => session_mcp_servers.push(server),
             Err(err) => {
+                crate::mcp_resolve::report_mcp_unavailable(
+                    deps.broadcaster.as_ref(),
+                    &ctx.user_id,
+                    &ctx.conversation_id,
+                    &server.id,
+                    &server.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     ctx.conversation_id,
                     server_id = %server.id,
                     server_name = %server.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "session_mcp: failed to convert session snapshot; skipping"
                 );
             }
@@ -362,9 +371,14 @@ async fn resolve_agent_command_spec(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AgentError::bad_request(format!("Agent '{}' has no spawn command configured", meta.name)))?;
     let reporter = conversation_runtime_reporter(broadcaster, user_id.to_owned(), conversation_id.to_owned());
-    let resolved = ensure_runtime_command_with_reporter(command, Some(reporter.as_ref()))
-        .await
-        .map_err(|error| AgentError::bad_request(format!("Agent '{}' CLI unavailable: {error}", meta.name)))?;
+    let resolved = if meta.agent_source == aionui_api_types::AgentSource::Builtin {
+        aionui_runtime::outbound_policy::ensure_implicit_package_command_allowed(command, &meta.args)
+            .map_err(|error| AgentError::bad_request(error.to_string()))?;
+        aionui_runtime::ensure_implicit_runtime_command_with_args(command, &meta.args, Some(reporter.as_ref())).await
+    } else {
+        aionui_runtime::ensure_user_runtime_command_with_args(command, &meta.args, Some(reporter.as_ref())).await
+    }
+    .map_err(|error| AgentError::bad_request(format!("Agent '{}' CLI unavailable: {error}", meta.name)))?;
 
     let mut args: Vec<String> = resolved
         .args_prefix
@@ -418,6 +432,7 @@ async fn load_user_mcp_servers(
     user_id: &str,
     conversation_id: &str,
     capabilities: &AcpMcpCapabilities,
+    broadcaster: Arc<dyn aionui_realtime::EventBroadcaster>,
 ) -> Vec<McpServer> {
     let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(user_id, ids).await,
@@ -425,10 +440,19 @@ async fn load_user_mcp_servers(
     };
     let rows = match rows_result {
         Ok(r) => r,
-        Err(err) => {
+        Err(_err) => {
+            crate::mcp_resolve::report_mcp_unavailable(
+                broadcaster.as_ref(),
+                user_id,
+                conversation_id,
+                "",
+                "Configured MCP servers",
+                "configuration_unavailable",
+            )
+            .await;
             warn!(
                 conversation_id,
-                error = %err,
+                reason = "MCP_SERVER_UNAVAILABLE",
                 "user_mcp: list() failed; skipping injection"
             );
             return Vec::new();
@@ -447,6 +471,15 @@ async fn load_user_mcp_servers(
             continue;
         }
         if !row_supported_by_capabilities(&row, capabilities) {
+            crate::mcp_resolve::report_mcp_unavailable(
+                broadcaster.as_ref(),
+                user_id,
+                conversation_id,
+                &row.id,
+                &row.name,
+                "unsupported transport",
+            )
+            .await;
             warn!(
                 conversation_id,
                 server_id = %row.id,
@@ -459,11 +492,20 @@ async fn load_user_mcp_servers(
         match row_to_sdk_mcp_server(&row).await {
             Ok(server) => servers.push(server),
             Err(err) => {
+                crate::mcp_resolve::report_mcp_unavailable(
+                    broadcaster.as_ref(),
+                    user_id,
+                    conversation_id,
+                    &row.id,
+                    &row.name,
+                    &err,
+                )
+                .await;
                 warn!(
                     conversation_id,
                     server_id = %row.id,
                     server_name = %row.name,
-                    error = %err,
+                    reason = "MCP_SERVER_UNAVAILABLE",
                     "user_mcp: failed to convert row; skipping"
                 );
             }
@@ -594,7 +636,7 @@ async fn ensure_stdio_launch(
     args: &[String],
     env: &[(String, String)],
 ) -> Result<(std::path::PathBuf, Vec<String>, Vec<EnvVariable>), String> {
-    let resolved = ensure_runtime_command(command)
+    let resolved = aionui_runtime::ensure_user_runtime_command_with_args(command, args, None)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -1076,6 +1118,39 @@ mod tests {
         assert!(row_to_sdk_mcp_server(&row).await.is_err());
     }
 
+    #[tokio::test]
+    async fn legacy_mcp_resolution_failure_emits_owner_scoped_warning() {
+        let row = make_row(
+            "broken",
+            "stdio",
+            r#"{"args":[],"env":{"TOKEN":"secret-sentinel"}}"#,
+            true,
+            false,
+        );
+        let repo = MockRepo {
+            rows: vec![row],
+            fail: false,
+        };
+        let bus = Arc::new(BroadcastEventBus::new(16));
+        let mut events = bus.subscribe();
+        let caps = AcpMcpCapabilities {
+            stdio: true,
+            http: true,
+            sse: true,
+        };
+        assert!(
+            load_user_mcp_servers(&repo, None, TEST_USER_ID, "conv-warning", &caps, bus)
+                .await
+                .is_empty()
+        );
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.data["user_id"], TEST_USER_ID);
+        assert_eq!(event.data["conversation_id"], "conv-warning");
+        assert_eq!(event.data["data"]["code"], "MCP_SERVER_UNAVAILABLE");
+        assert_eq!(event.data["data"]["type"], "warning");
+        assert!(!event.data.to_string().contains("secret-sentinel"));
+    }
+
     // -- load_user_mcp_servers integration -----------------------------------
 
     use async_trait::async_trait;
@@ -1184,7 +1259,15 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, TEST_USER_ID, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(
+            repo.as_ref(),
+            None,
+            TEST_USER_ID,
+            "conv-1",
+            &caps,
+            Arc::new(BroadcastEventBus::new(16)),
+        )
+        .await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
@@ -1209,7 +1292,15 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, TEST_USER_ID, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(
+            repo.as_ref(),
+            None,
+            TEST_USER_ID,
+            "conv-1",
+            &caps,
+            Arc::new(BroadcastEventBus::new(16)),
+        )
+        .await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
@@ -1228,7 +1319,15 @@ mod tests {
             rows: vec![],
             fail: true,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, TEST_USER_ID, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(
+            repo.as_ref(),
+            None,
+            TEST_USER_ID,
+            "conv-1",
+            &caps,
+            Arc::new(BroadcastEventBus::new(16)),
+        )
+        .await;
         assert!(servers.is_empty());
     }
 
@@ -1247,7 +1346,15 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, TEST_USER_ID, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(
+            repo.as_ref(),
+            None,
+            TEST_USER_ID,
+            "conv-1",
+            &caps,
+            Arc::new(BroadcastEventBus::new(16)),
+        )
+        .await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "good"),
@@ -1272,7 +1379,15 @@ mod tests {
         });
 
         let selected = vec!["mcp_disabled-picked".to_owned()];
-        let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), TEST_USER_ID, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(
+            repo.as_ref(),
+            Some(&selected),
+            TEST_USER_ID,
+            "conv-1",
+            &caps,
+            Arc::new(BroadcastEventBus::new(16)),
+        )
+        .await;
 
         assert_eq!(servers.len(), 1);
         match &servers[0] {
@@ -1299,7 +1414,15 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers(repo.as_ref(), None, TEST_USER_ID, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(
+            repo.as_ref(),
+            None,
+            TEST_USER_ID,
+            "conv-1",
+            &caps,
+            Arc::new(BroadcastEventBus::new(16)),
+        )
+        .await;
         assert!(servers.is_empty());
     }
 

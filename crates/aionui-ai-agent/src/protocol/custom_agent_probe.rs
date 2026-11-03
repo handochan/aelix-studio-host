@@ -19,7 +19,7 @@ use aionui_api_types::{AgentHandshake, TryConnectCustomAgentResponse};
 use aionui_common::{CommandSpec, EnvVar};
 
 use crate::protocol::acp_init_budget::{INIT_TIMEOUT_SECS, InitBudget};
-use aionui_runtime::{NodeRuntimeProgressReporter, ResolvedCommand, ensure_runtime_command_with_reporter};
+use aionui_runtime::{NodeRuntimeProgressReporter, ResolvedCommand};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
@@ -68,9 +68,33 @@ pub async fn try_connect_custom_agent_with_catalog(
     env: &HashMap<String, String>,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+    try_connect_with_policy(command, args, env, reporter, true).await
+}
+
+pub(crate) async fn try_connect_builtin_agent_with_catalog(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+    try_connect_with_policy(command, args, env, reporter, false).await
+}
+
+async fn try_connect_with_policy(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+    user_configured: bool,
+) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
     // ── Step 1 — which check ────────────────────────────────────────
     let head = first_token(command);
-    let resolved = match ensure_runtime_command_with_reporter(head, reporter).await {
+    let plan = if user_configured {
+        aionui_runtime::ensure_user_runtime_command_with_args(head, args, reporter).await
+    } else {
+        aionui_runtime::ensure_implicit_runtime_command_with_args(head, args, reporter).await
+    };
+    let resolved = match plan {
         Ok(resolved) => resolved,
         Err(error) => {
             return (

@@ -40,7 +40,7 @@ def package_archive():
         return gzip.compress(output.getvalue(), mtime=0)
 
 
-def run(binary, node_root, report):
+def run(binary, node_root, report, node_archive=None):
     archive = package_archive()
     requests = []
 
@@ -54,7 +54,9 @@ def run(binary, node_root, report):
 
         def do_GET(self):
             requests.append(self.path)
-            if self.path.lower() == '/npm/@aelix-test%2fmirror-agent':
+            if node_archive and self.path == '/node/v24.11.0/' + node_archive.name:
+                body = node_archive.read_bytes()
+            elif self.path.lower() == '/npm/@aelix-test%2fmirror-agent':
                 base = f'http://127.0.0.1:{self.server.server_port}'
                 version = {'name': PACKAGE, 'version': VERSION, 'bin': {'mirror-agent': 'agent.py'},
                            'dist': {'tarball': base + '/npm/agent.tgz',
@@ -78,13 +80,19 @@ def run(binary, node_root, report):
         launchers = list(node_root.glob('node/node-v24.11.0-*/bin/npx'))
         assert len(launchers) == 1, 'Node fixture must contain exactly one npm/npx runtime'
         explicit_npx = launchers[0]
-        host = Host(binary, Path(root), env_overrides={
+        host_env = {
             'AELIX_STUDIO_HOST_NPM_REGISTRY': f'http://127.0.0.1:{registry.server_port}/npm/',
             'AIONUI_BUNDLED_MANAGED_RESOURCES': str(node_root),
             'PATH': str(explicit_npx.parent) + os.pathsep + os.environ.get('PATH', ''),
-        }, extra_args=('--managed-resources-mode', 'bundled'))
+        }
+        if node_archive: host_env['AELIX_STUDIO_HOST_NODE_MIRROR'] = f'http://127.0.0.1:{registry.server_port}/node/'
+        host = Host(binary, Path(root), env_overrides=host_env,
+                    extra_args=('--managed-resources-mode', 'download' if node_archive else 'bundled'))
         try:
             host.start()
+            if node_archive:
+                _, prepared = host.api('/api/system/ensure-node-runtime', 'POST', {'scope':{'kind':'custom_agent','id':'node-checksum-fixture'}})
+                assert prepared.get('ready') is True, prepared
             # npx must obtain this never-published package from the configured
             # prefix, through the ordinary custom-agent/session launch path.
             for label, command in [('Mirror smoke', 'npx'), ('Mirror absolute', str(explicit_npx))]:
@@ -103,10 +111,11 @@ def run(binary, node_root, report):
                 wait_until(lambda: REPLY in json.dumps(host.api(route + '/messages')[1]), 60, 'Mirror agent reply missing')
             assert '/npm/agent.tgz' in requests, requests
             assert any(path.lower() == '/npm/@aelix-test%2fmirror-agent' for path in requests), requests
-            assert all(path.lower() in ('/npm/@aelix-test%2fmirror-agent', '/npm/agent.tgz') for path in requests), requests
+            assert all(path.lower() in ('/npm/@aelix-test%2fmirror-agent', '/npm/agent.tgz') or (node_archive and path == '/node/v24.11.0/' + node_archive.name) for path in requests), requests
+            if node_archive: assert '/node/v24.11.0/' + node_archive.name in requests, requests
             assert host.stop() == 0
             report.update(status='passed', registryRequests=requests,
-                          checks=['real_npx_registry_prefix', 'real_npm_tarball', 'real_npx_explicit_path', 'acp_prompt_reply', 'graceful_shutdown'])
+                          checks=['real_npx_registry_prefix', 'real_npm_tarball', 'real_npx_explicit_path', 'acp_prompt_reply', 'graceful_shutdown'] + (['official_node_archive_verified'] if node_archive else []))
         except BaseException:
             if host.log_path.exists():
                 report['hostLogTail'] = host.log_path.read_text(errors='replace')[-6000:]
@@ -121,12 +130,13 @@ def run(binary, node_root, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
+    parser.add_argument('--node-archive', type=Path, help='Official unchanged Node archive served by the loopback mirror')
     parser.add_argument('--node-root', type=Path, required=True, help='Bundled resources root containing node/node-v24.11.0-<platform>')
     parser.add_argument('--report', type=Path, required=True)
     args = parser.parse_args()
     report = {'status': 'failed'}
     try:
-        run(args.binary.resolve(), args.node_root.resolve(), report)
+        run(args.binary.resolve(), args.node_root.resolve(), report, args.node_archive.resolve() if args.node_archive else None)
     finally:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + '\n')

@@ -124,6 +124,5 @@ description: 'AionUi WebUI configuration expert: Helps users configure AionUi We
 
 ## 参考资源
 
-- [AionUi Wiki - Remote Internet Access Guide](https://github.com/iOfficeAI/AionUi/wiki/Remote-Internet-Access-Guide)
 - [AionUi Wiki - WebUI Configuration Guide](https://github.com/iOfficeAI/AionUi/wiki/WebUI-Configuration-Guide)
 - [Tailscale 官方文档](https://tailscale.com/kb/)
