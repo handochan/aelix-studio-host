@@ -237,9 +237,10 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
   workspace crates (see [License](#license)) and, today, only aionrs'
   code-less hakari `workspace-hack` crate. `[sources]` limits git dependencies
   to aionrs.
-- **Advisories:** the upstream v0.2.2 `Cargo.lock` already matches 19 RustSec
+- **Advisories:** the upstream v0.2.2 `Cargo.lock` matches 20 RustSec
   advisories (rustls, rustls-webpki, webpki-roots, zip, zstd, tokio,
-  crypto-bigint and others). They are listed in `deny.toml` as a baseline so
+  crypto-bigint and others; RUSTSEC-2026-0429 for zip was published after the
+  baseline was introduced). They are listed in `deny.toml` as a baseline so
   that any new advisory fails CI. They are known, unresolved issues, not
   accepted risks. The owner decided they must be resolved before the Beta
   release ([#7](https://github.com/handochan/aelix-studio-host/issues/7)).
