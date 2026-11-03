@@ -157,9 +157,12 @@ pub(crate) async fn report_mcp_unavailable(
             severity: "warning",
             code: "MCP_SERVER_UNAVAILABLE",
             params: serde_json::json!({"server_id":server_id}),
+            supersedes_key: format!("mcp-unavailable:{server_id}"),
         },
     };
     // Persist before publishing: background/team runs may have no subscriber.
+    // Like other superseding tips, retain attempts in storage; the shared key
+    // replaces the visible card in live streams and reloaded history.
     if let Some(repo) = conversation_repo {
         let row = aionui_db::models::MessageRow {
             id: notice.msg_id.clone(),
@@ -560,6 +563,35 @@ mod tests {
             assert_eq!(content["code"], "MCP_SERVER_UNAVAILABLE");
             assert_eq!(content["type"], "warning");
             assert_eq!(content["params"]["server_id"], server.id);
+            assert_eq!(content["supersedes_key"], format!("mcp-unavailable:{}", server.id));
+            // Reattachment after an idle reap/restart gets new message IDs but
+            // retains the same card identity in both live and saved payloads.
+            let retry_bus = Arc::new(aionui_realtime::BroadcastEventBus::new(16));
+            let mut events = retry_bus.subscribe();
+            for _ in 0..2 {
+                assert!(
+                    resolve_session_mcp_servers(&mcp, Some(&conversations), &owner, None, &id, retry_bus.clone())
+                        .await
+                        .is_empty()
+                );
+            }
+            let first = events.try_recv().unwrap();
+            let second = events.try_recv().unwrap();
+            assert_ne!(first.data["msg_id"], second.data["msg_id"]);
+            assert_eq!(first.data["data"]["supersedes_key"], content["supersedes_key"]);
+            assert_eq!(second.data["data"]["supersedes_key"], content["supersedes_key"]);
+            let history = reopened.list_messages_page(&owner, &id, &query).await.unwrap();
+            assert_eq!(
+                history.items.len(),
+                3,
+                "match existing superseding tips: keep attempts, merge the card on read"
+            );
+            for saved in &history.items {
+                let tip: serde_json::Value = serde_json::from_str(&saved.content).unwrap();
+                assert_eq!(tip["supersedes_key"], content["supersedes_key"]);
+                assert_eq!(tip["params"]["server_id"], server.id);
+            }
+
             assert!(content["content"].as_str().unwrap().contains("configured MCP command"));
             assert!(!row.content.contains("secret-sentinel"));
             assert!(matches!(
@@ -567,5 +599,22 @@ mod tests {
                 Err(aionui_db::DbError::NotFound(_))
             ));
         }
+    }
+    #[tokio::test]
+    async fn different_mcp_servers_do_not_share_a_superseding_card() {
+        let bus = aionui_realtime::BroadcastEventBus::new(16);
+        let mut events = bus.subscribe();
+        let error = McpResolveError::InvalidConfiguration("missing command".into());
+        for id in ["server-a", "server-b"] {
+            report_mcp_unavailable(&bus, None, "owner", "conv", id, id, &error).await;
+        }
+        let first = events.try_recv().unwrap();
+        let second = events.try_recv().unwrap();
+        assert_eq!(first.data["data"]["supersedes_key"], "mcp-unavailable:server-a");
+        assert_eq!(second.data["data"]["supersedes_key"], "mcp-unavailable:server-b");
+        assert_ne!(
+            first.data["data"]["supersedes_key"],
+            second.data["data"]["supersedes_key"]
+        );
     }
 }

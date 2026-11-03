@@ -477,6 +477,13 @@ async fn load_user_mcp_servers(
             continue;
         }
         if !row_supported_by_capabilities(&row, capabilities) {
+            warn!(
+                conversation_id,
+                server_id = %row.id,
+                server_name = %row.name,
+                transport_type = %row.transport_type,
+                "user_mcp: transport unsupported by ACP agent; skipping"
+            );
             continue;
         }
         match row_to_sdk_mcp_server(&row).await {

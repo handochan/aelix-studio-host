@@ -44,30 +44,46 @@ pub(crate) async fn remove_materialized(root: &Path) -> Result<(), std::io::Erro
     Ok(())
 }
 
-pub(crate) fn forbidden_text(text: &str) -> bool {
+pub(crate) fn forbidden_text(root: &Path, path: &Path, text: &str) -> bool {
+    // Scope deployment wording by the owning skill's path, not its display name
+    // or a reference filename. Legacy flat markdown skills are supported too.
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let mut parts = relative.components().filter_map(|part| match part {
+        std::path::Component::Normal(name) => name.to_str(),
+        _ => None,
+    });
+    let first = parts.next().unwrap_or("");
+    let skill = if first.eq_ignore_ascii_case("auto-inject") {
+        parts.next().unwrap_or("")
+    } else {
+        first
+    };
+    let webui_setup =
+        skill.eq_ignore_ascii_case("aionui-webui-setup") || skill.eq_ignore_ascii_case("aionui-webui-setup.md");
     let text = text.to_ascii_lowercase();
     text.contains("d.officecli.ai/install.")
         || text.contains("raw.githubusercontent.com/iofficeai/officecli/main/install.")
         || text.contains("remote-internet-access-guide")
         || text.contains("curl ifconfig.me")
         || text.contains("<公网ip>")
-        || [
-            "多用户、24/7",
-            "需要多用户访问或 24/7 运行",
-            "需要 24/7 运行",
-            "部署在云服务器上",
-            "云服务器（linux/macos）",
-            "检查云服务器安全组规则",
-            "生产环境建议配置 https",
-            "使用 nginx 等反向代理",
-        ]
-        .iter()
-        .any(|phrase| text.contains(phrase))
+        || (webui_setup
+            && [
+                "多用户、24/7",
+                "需要多用户访问或 24/7 运行",
+                "需要 24/7 运行",
+                "部署在云服务器上",
+                "云服务器（linux/macos）",
+                "检查云服务器安全组规则",
+                "生产环境建议配置 https",
+                "使用 nginx 等反向代理",
+            ]
+            .iter()
+            .any(|phrase| text.contains(phrase)))
 }
 
-async fn safe_tree(path: &Path) -> Result<bool, std::io::Error> {
+async fn safe_tree(root: &Path, path: &Path) -> Result<bool, std::io::Error> {
     if path.is_file() {
-        return Ok(!forbidden_text(&tokio::fs::read_to_string(path).await?));
+        return Ok(!forbidden_text(root, path, &tokio::fs::read_to_string(path).await?));
     }
     let mut directories = vec![path.to_path_buf()];
     while let Some(dir) = directories.pop() {
@@ -79,7 +95,7 @@ async fn safe_tree(path: &Path) -> Result<bool, std::io::Error> {
             }
             if (kind.is_file() || kind.is_symlink())
                 && entry.path().extension().is_some_and(|e| e == "md")
-                && forbidden_text(&tokio::fs::read_to_string(entry.path()).await?)
+                && forbidden_text(root, &entry.path(), &tokio::fs::read_to_string(entry.path()).await?)
             {
                 return Ok(false);
             }
@@ -102,7 +118,7 @@ pub(crate) async fn available(root: &Path, name: &str, path: &Path) -> bool {
             && (office_family(name)
                 || office_family(directory_name)
                 || path.file_stem().and_then(|n| n.to_str()).is_some_and(office_family)))
-        || !safe_tree(&path).await.unwrap_or(false);
+        || !safe_tree(root, &path).await.unwrap_or(false);
     if blocked {
         tracing::warn!(
             skill = name,
@@ -128,13 +144,111 @@ mod tests {
             "生产环境建议配置 HTTPS",
             "使用 Nginx 等反向代理",
         ] {
-            assert!(forbidden_text(old), "stale guidance must be hidden: {old}");
+            assert!(
+                forbidden_text(Path::new(""), Path::new("aionui-webui-setup/SKILL.md"), old),
+                "stale guidance must be hidden: {old}"
+            );
+            assert!(
+                !forbidden_text(
+                    Path::new(""),
+                    Path::new("other-skill/references/aionui-webui-setup.md"),
+                    old,
+                ),
+                "deployment wording must stay available outside webui-setup: {old}"
+            );
         }
-        assert!(!forbidden_text(include_str!(
-            "../../aionui-app/assets/builtin-skills/aionui-webui-setup/SKILL.md"
-        )));
-        assert!(!forbidden_text(include_str!(
-            "../../aionui-app/assets/builtin-skills/aionui-webui-setup/references/aionui-webui.md"
-        )));
+        assert!(!forbidden_text(
+            Path::new(""),
+            Path::new("aionui-webui-setup/SKILL.md"),
+            include_str!("../../aionui-app/assets/builtin-skills/aionui-webui-setup/SKILL.md")
+        ));
+        assert!(!forbidden_text(
+            Path::new(""),
+            Path::new("aionui-webui-setup/SKILL.md"),
+            include_str!("../../aionui-app/assets/builtin-skills/aionui-webui-setup/references/aionui-webui.md")
+        ));
+    }
+    #[test]
+    fn original_forbidden_instructions_still_apply_to_every_builtin() {
+        for text in [
+            "https://d.officecli.ai/install.sh",
+            "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.ps1",
+            "Remote-Internet-Access-Guide",
+            "curl ifconfig.me",
+            "http://<公网IP>:25808",
+        ] {
+            for skill in ["other-skill", "aionui-webui-setup"] {
+                assert!(forbidden_text(Path::new(""), &Path::new(skill).join("SKILL.md"), text));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deployment_wording_only_hides_its_webui_owner_in_list_read_and_use_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::resolve_skill_paths(tmp.path(), tmp.path());
+        let root = &paths.builtin_skills_dir;
+        for name in ["other-skill", "aionui-webui-setup"] {
+            let dir = root.join(name);
+            tokio::fs::create_dir_all(dir.join("references")).await.unwrap();
+            tokio::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Fixture\n---\nSafe entry point"),
+            )
+            .await
+            .unwrap();
+            // A reference filename cannot make another skill count as webui-setup.
+            tokio::fs::write(
+                dir.join("references/aionui-webui-setup.md"),
+                "部署在云服务器上\n需要 24/7 运行\n使用 Nginx 等反向代理",
+            )
+            .await
+            .unwrap();
+        }
+        assert!(available(root, "aionui-webui-setup", &root.join("other-skill")).await);
+        let list = crate::list_available_skills(&paths).await.unwrap();
+        assert!(list.iter().any(|skill| skill.name == "other-skill"));
+        assert!(!list.iter().any(|skill| skill.name == "aionui-webui-setup"));
+        for prefix in ["", "./"] {
+            assert!(
+                !crate::read_builtin_skill(&paths, &format!("{prefix}other-skill/references/aionui-webui-setup.md"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                crate::read_builtin_skill(
+                    &paths,
+                    &format!("{prefix}aionui-webui-setup/references/aionui-webui-setup.md")
+                )
+                .await
+                .unwrap()
+                .is_empty()
+            );
+        }
+        assert_eq!(
+            crate::materialize_skills_for_agent(&paths, "conv-other", &["other-skill".into()])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            crate::materialize_skills_for_agent(&paths, "conv-webui", &["aionui-webui-setup".into()])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Cover auto-inject and the legacy flat-file layout without extra I/O.
+        assert!(forbidden_text(
+            root,
+            &root.join("auto-inject/aionui-webui-setup/references/guide.md"),
+            "部署在云服务器上"
+        ));
+        assert!(forbidden_text(
+            root,
+            &root.join("aionui-webui-setup.md"),
+            "部署在云服务器上"
+        ));
     }
 }

@@ -191,7 +191,10 @@ pub async fn read_builtin_skill(paths: &SkillPaths, file_name: &str) -> Result<S
         return Ok(String::new());
     }
     let file_path = paths.builtin_skills_dir.join(file_name);
-    let components: Vec<_> = Path::new(file_name).components().collect();
+    let components: Vec<_> = Path::new(file_name)
+        .components()
+        .filter(|part| !matches!(part, std::path::Component::CurDir))
+        .collect();
     let index = usize::from(
         components
             .first()
@@ -212,7 +215,7 @@ pub async fn read_builtin_skill(paths: &SkillPaths, file_name: &str) -> Result<S
         }
     }
     let content = read_file_or_empty(&file_path).await?;
-    if crate::retired_builtins::forbidden_text(&content) {
+    if crate::retired_builtins::forbidden_text(&paths.builtin_skills_dir, &file_path, &content) {
         warn!(
             reason = "unsafe_builtin_instructions",
             "builtin resource hidden; restore bundled skills"

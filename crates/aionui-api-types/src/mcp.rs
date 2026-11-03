@@ -281,6 +281,8 @@ pub struct McpUnavailableTip {
     pub severity: &'static str,
     pub code: &'static str,
     pub params: serde_json::Value,
+    /// Stable card identity across worker restarts for the same MCP server.
+    pub supersedes_key: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
