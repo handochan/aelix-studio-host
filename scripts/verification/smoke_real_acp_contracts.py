@@ -4,6 +4,12 @@ Real host + ACP/native processes, with a synthetic loopback model and isolated
 state. No real provider credentials. Adapted from aelix-acp@16d6555's smoke_host.py.
 Only structural wire data, synthetic child metadata and structured errors are
 retained. This does not test Studio rendering or history reconciliation.
+
+Run with an isolated interpreter:
+
+    python3 -I -B scripts/verification/smoke_real_acp_contracts.py \
+        --host /path/to/aelix-studio-host --aelix /path/to/aelix \
+        --acp-source /path/to/aelix-acp/src --output /tmp/host-4-probe
 """
 import argparse
 import asyncio
@@ -19,7 +25,8 @@ import sys
 import tempfile
 import threading
 
-from smoke_real_acp_crash import Host, frames, http
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from smoke_real_acp_crash import Host, frames, http  # noqa: E402
 
 
 def tap(log, argv):
