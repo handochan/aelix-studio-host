@@ -162,6 +162,10 @@ pub enum AcpError {
     /// Protocol not connected (used before connect or after disconnect).
     NotConnected,
 
+    /// The prompt was handed to the SDK, then its connection was lost without
+    /// a response. Execution may already have happened; never replay this turn.
+    PromptOutcomeUnknown,
+
     /// Initialize handshake timed out.
     InitTimeout { timeout_secs: u64 },
 
@@ -258,6 +262,9 @@ impl std::fmt::Display for AcpError {
                 Ok(())
             }
             AcpError::NotConnected => f.write_str("ACP protocol not connected"),
+            AcpError::PromptOutcomeUnknown => {
+                f.write_str("The prompt was sent, but the Agent connection was lost and its outcome is unknown")
+            }
             AcpError::InitTimeout { timeout_secs } => {
                 write!(f, "Initialize handshake timed out after {timeout_secs}s")
             }
@@ -269,6 +276,18 @@ impl std::fmt::Display for AcpError {
 }
 
 impl AcpError {
+    /// Apply only after prompt dispatch. Do not infer delivery from the absence
+    /// of streamed output, or classify ordinary agent error replies as EOF.
+    pub(crate) fn after_prompt_dispatch(self, transport_closed: bool) -> Self {
+        if matches!(self, Self::Disconnected { .. } | Self::NotConnected)
+            || (transport_closed && matches!(self, Self::AgentInternal { .. }))
+        {
+            Self::PromptOutcomeUnknown
+        } else {
+            self
+        }
+    }
+
     /// Whether the caller may retry the operation.
     #[allow(dead_code)] // Will be used once retry logic is wired into the send path.
     pub(crate) fn is_retryable(&self) -> bool {

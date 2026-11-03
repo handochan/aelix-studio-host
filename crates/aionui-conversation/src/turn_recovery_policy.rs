@@ -40,6 +40,7 @@ impl TurnRecoveryPolicy {
             && agent_type == AgentType::Acp
             && outcome.terminal.is_error()
             && retryable == Some(true)
+            && error_code != Some(AgentErrorCode::UserAgentPromptOutcomeUnknown)
             && error_code != Some(AgentErrorCode::UserLlmProviderModelNotFound)
             && (session_recovery_signal.is_some() || !is_provider_turn_error(error_code, outcome))
             && safe_to_auto_replay
@@ -140,6 +141,28 @@ mod tests {
             attempt: TurnAttemptSummary::default(),
             ..RelayOutcome::default()
         }
+    }
+
+    #[test]
+    fn unknown_prompt_outcome_cannot_replay_even_with_retry_or_resume_hint() {
+        let mut outcome = retryable_clean_error();
+        outcome.terminal = RelayTerminal::Error {
+            code: Some(AgentErrorCode::UserAgentPromptOutcomeUnknown),
+            retryable: Some(true),
+        };
+        outcome.attempt.terminal_error = Some(AgentStreamErrorData::classified(
+            "session/load resume hint",
+            AgentErrorCode::UserAgentPromptOutcomeUnknown,
+            AgentErrorOwnership::UserAgent,
+            None,
+            true,
+            false,
+            None,
+        ));
+        assert_eq!(
+            TurnRecoveryPolicy::decide(AgentType::Acp, None, &outcome, RuntimeLifecycleState::Active, false,),
+            TurnRecoveryDecision::None
+        );
     }
 
     #[test]
