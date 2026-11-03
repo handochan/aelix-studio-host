@@ -22,12 +22,16 @@ impl ConversationService {
         }
 
         let stream_error = err.stream_error();
-        let code = top_level_code.map(str::to_owned).or_else(|| {
-            stream_error
-                .code
-                .and_then(|code| serde_json::to_value(code).ok())
-                .and_then(|value| value.as_str().map(str::to_owned))
-        });
+        let code = err
+            .protocol_error_code()
+            .or(top_level_code)
+            .map(str::to_owned)
+            .or_else(|| {
+                stream_error
+                    .code
+                    .and_then(|code| serde_json::to_value(code).ok())
+                    .and_then(|value| value.as_str().map(str::to_owned))
+            });
         let details = match stream_error.workspace_path.as_deref() {
             Some(workspace_path) => serde_json::json!({
                 "detail": stream_error.detail,

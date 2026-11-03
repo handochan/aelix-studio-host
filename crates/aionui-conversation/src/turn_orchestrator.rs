@@ -119,6 +119,7 @@ impl ConversationTurnOrchestrator {
                 } else {
                     top_level_code
                 };
+                let top_level_code = send_error.protocol_error_code().unwrap_or(top_level_code);
                 if send_error.is_openclaw_gateway_unreachable() {
                     warn!(
                         conversation_id = %input.conv_id,

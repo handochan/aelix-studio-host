@@ -919,7 +919,12 @@ impl StreamRelay {
 
             self.send_system_responses(&processed.system_responses);
             outcome.system_responses = processed.system_responses;
-        } else if let AgentStreamEvent::Error(data) = event {
+        }
+        if let AgentStreamEvent::Error(data) = event
+            && (text.is_empty() || data.protocol_code.is_some())
+        {
+            // A partial response does not carry the structured failure. Keep
+            // the code/data available after reload as well as on the live wire.
             self.adapter.persist_error_tip(data).await;
         }
 

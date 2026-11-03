@@ -67,9 +67,8 @@ pub(crate) struct BackgroundStreamWatcher {
     pub broadcaster: Arc<dyn EventBroadcaster>,
     pub persistence: RuntimePersistenceCoordinator,
     pub runtime_state: Arc<ConversationRuntimeStateService>,
-    /// True for non-Session (ACP manager) instances: consume ONLY agent
-    /// session titles and leave every other frame to the existing ACP
-    /// delivery paths (orphan turns / card refreshes are Session semantics).
+    /// True for ACP manager instances: consume titles and late metadata on
+    /// existing tool calls, without creating orphan turns.
     pub title_only: bool,
     /// Expiry for a pending `MessageLifecycle{Started}` (see
     /// [`PENDING_STARTED_TTL`]); injectable so tests can use a short bound.
@@ -113,6 +112,7 @@ impl BackgroundStreamWatcher {
         // arming instant bounds its lifetime: a Started whose terminal echo was
         // lost must not claim an unrelated later turn (see PENDING_STARTED_TTL).
         let mut pending_user_msg: Option<(String, std::time::Instant)> = None;
+        let mut acp_turn_ended = false;
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
@@ -227,9 +227,26 @@ impl BackgroundStreamWatcher {
                 }
                 continue;
             }
-            // Title-only watchers (ACP manager instances) stop here: orphan
-            // turns and card refreshes are Session-instance semantics.
             if self.title_only {
+                match &ev {
+                    AgentStreamEvent::Start(_) => acp_turn_ended = false,
+                    AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_) => acp_turn_ended = true,
+                    AgentStreamEvent::AcpToolCall(data)
+                        if data.meta.is_some()
+                            && data.update.status.is_none()
+                            && (acp_turn_ended
+                                || self.runtime_state.active_turn_id_for(&self.conversation_id).is_none()) =>
+                    {
+                        // A terminal event can reach this receiver before the
+                        // orchestrator releases its claim. Start resets the
+                        // boundary so an active relay remains the sole writer.
+                        // Verified: manager/acp/agent_session_flow.rs emits Start
+                        // before prompt; aelix-acp@16d6555/session.py:subagent_progress
+                        // emits statusless metadata for a closed parent call.
+                        self.handle_acp_metadata_refresh(data).await;
+                    }
+                    _ => {}
+                }
                 continue;
             }
             // While a user turn is active its own relay owns the stream.
@@ -275,6 +292,34 @@ impl BackgroundStreamWatcher {
             conversation_id = %self.conversation_id,
             "background stream watcher stopped (stream closed)"
         );
+    }
+
+    async fn handle_acp_metadata_refresh(
+        &self,
+        data: &aionui_ai_agent::protocol::events::tool_call::AcpToolCallEventData,
+    ) {
+        // Never invent a card from a late update or cross conversation/user IDs.
+        match self
+            .repo
+            .get_message(&self.user_id, &self.conversation_id, &data.update.tool_call_id)
+            .await
+        {
+            Ok(Some(row)) if row.r#type == "acp_tool_call" => {}
+            Ok(_) => return,
+            Err(error) => {
+                warn!(error = %ErrorChain(&error), "Failed to load ACP tool call for late metadata");
+                return;
+            }
+        }
+        let adapter = StreamPersistenceAdapter::new(
+            self.user_id.clone(),
+            self.conversation_id.clone(),
+            String::new(),
+            self.repo.clone(),
+            Some(self.persistence.clone()),
+        );
+        adapter.persist_acp_tool_call(data).await;
+        self.forward_out_of_turn_frame(&AgentStreamEvent::AcpToolCall(data.clone()));
     }
 
     /// A between-turns card refresh: forward the two frames the frontend already

@@ -158,6 +158,14 @@ pub enum AcpError {
         data: Option<serde_json::Value>,
     },
 
+    /// Application contract from the negotiated Aelix adapter. Other agents'
+    /// errors retain the generic protocol mapping and data exposure policy.
+    ApplicationError {
+        code: i32,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
+
     // ── Local errors ──────────────────────────────────────────────
     /// Protocol not connected (used before connect or after disconnect).
     NotConnected,
@@ -253,7 +261,8 @@ impl std::fmt::Display for AcpError {
                 }
                 Ok(())
             }
-            AcpError::OtherProtocolError { code, message, data } => {
+            AcpError::OtherProtocolError { code, message, data }
+            | AcpError::ApplicationError { code, message, data } => {
                 write!(f, "Agent protocol error (code {code}): {message}")?;
                 if let Some(data) = data {
                     let compact = serde_json::to_string(data).unwrap_or_else(|_| "<unserializable data>".to_owned());
@@ -318,12 +327,12 @@ impl AcpError {
 
     pub(crate) fn from_sdk_for_agent(err: SdkError, context: &str, agent_name: Option<&str>) -> Self {
         let code = i32::from(err.code);
-        // ACP schema 1.5.0/src/v1/error.rs reserves -32000 for AuthRequired.
+        // agent-client-protocol-schema-1.5.0/src/v1/error.rs reserves -32000 for AuthRequired.
         // Only the identified Aelix adapter uses it for busy/limit instead:
         // aelix-acp@16d6555/src/aelix_acp/server.py (initialize and dispatch).
         // Preserve standard authentication behavior for every other agent.
-        if matches!(code, -33001 | -33002 | -32004) || (code == -32000 && agent_name == Some("aelix-acp")) {
-            return AcpError::OtherProtocolError {
+        if agent_name == Some("aelix-acp") && matches!(code, -33001 | -33002 | -32000 | -32004) {
+            return AcpError::ApplicationError {
                 code,
                 message: err.message,
                 data: err.data,
@@ -991,7 +1000,7 @@ mod application_error_tests {
             "session/load",
             Some("aelix-acp"),
         );
-        assert!(matches!(busy, AcpError::OtherProtocolError {code:-32000,data:Some(ref value),..} if value == &data));
+        assert!(matches!(busy, AcpError::ApplicationError {code:-32000,data:Some(ref value),..} if value == &data));
         assert!(!busy.is_retryable());
     }
 
@@ -999,10 +1008,14 @@ mod application_error_tests {
     fn structured_application_errors_win_over_session_not_found_heuristics_and_transport_loss() {
         for code in [-33001, -33002, -32004] {
             let data = json!({"profile":"Session not found: authored-profile","retryable":false});
-            let error = AcpError::from_sdk(SdkError::new(code, "refused").data(data.clone()), "session/load")
-                .after_prompt_dispatch(true);
+            let error = AcpError::from_sdk_for_agent(
+                SdkError::new(code, "refused").data(data.clone()),
+                "session/load",
+                Some("aelix-acp"),
+            )
+            .after_prompt_dispatch(true);
             assert!(
-                matches!(error,AcpError::OtherProtocolError {code:actual,data:Some(ref value),..} if actual == code && value == &data)
+                matches!(error,AcpError::ApplicationError {code:actual,data:Some(ref value),..} if actual == code && value == &data)
             );
             assert!(!error.is_retryable());
         }

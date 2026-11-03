@@ -79,7 +79,9 @@ class Model:
             last = messages[-1] if messages else {}
             content = json.dumps(last.get("content"))
             if last.get("role") == "user" and "FAIL_NOW" in content:
-                body = b'data: {"error":{"message":"SYNTHETIC_TURN_FAILURE","type":"server_error"}}\n\n'
+                partial = {"id":"partial", "object":"chat.completion.chunk", "created":0, "model":"one",
+                           "choices":[{"index":0,"delta":{"role":"assistant","content":"PARTIAL_BEFORE_FAILURE"},"finish_reason":None}]}
+                body = ("data: " + json.dumps(partial) + "\n\n" + 'data: {"error":{"message":"SYNTHETIC_TURN_FAILURE","type":"server_error"}}\n\n').encode()
             else:
                 if last.get("role") == "user" and "DELEGATE_NOW" in content:
                     delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": f"call_agent_{len(self.requests)}", "type": "function",
@@ -177,6 +179,8 @@ async def scenario(args):
             failure = next(e for e in tips if e.get("code") == "USER_AGENT_TURN_FAILED_AFTER_DISPATCH")
             assert failure["protocol_code"] == -33002 and failure["retryable"] is False
             assert failure["data"] == replies[0]["errorData"], failure
+            assert "SYNTHETIC_TURN_FAILURE" in failure["detail"], failure
+            assert any("PARTIAL_BEFORE_FAILURE" in r["content"] and r["status"] == "error" for r in host.rows(conversation)), host.rows(conversation)
             assert model.count("FAIL_NOW") == 1
             observed["dispatchFailure"] = {"code": failure["code"], "data": failure["data"], "modelRequests": 1,
                                             "promptRequests": sum(f["method"] == "session/prompt" for f in after)}
@@ -203,7 +207,15 @@ async def scenario(args):
                 reply = next(f for f in frames(log)[mark:] if f["errorCode"] == -33001)
                 assert reply["errorData"] == details["data"]
                 assert not [f for f in frames(log)[mark:] if f["method"] in ("session/new", "session/prompt")]
-                observed["lock"] = {"httpStatus": status, "code": result["code"], "protocolCode": details["protocol_code"], "data": details["data"], "noPromptOrNewSession": True}
+                send_status, _ = await asyncio.to_thread(http, host.port, route + "/messages", "POST", {"content":"WHILE_LOCKED"})
+                assert send_status in (200, 202), send_status
+                await host.idle(route)
+                tips = [json.loads(r["content"]) for r in host.rows(conversation) if r["type"] == "tips"]
+                lock_tip = next(t for t in tips if t.get("error",{}).get("code") == "USER_AGENT_SESSION_LOCKED")
+                assert lock_tip["code"] == "USER_AGENT_SESSION_LOCKED", lock_tip
+                assert lock_tip["error"]["data"] == details["data"], lock_tip
+                assert model.count("WHILE_LOCKED") == 0
+                observed["lock"] = {"sendFailureTopLevelCode":lock_tip["code"],"httpStatus": status, "code": result["code"], "protocolCode": details["protocol_code"], "data": details["data"], "noPromptOrNewSession": True}
             finally:
                 holder.stdin.close()
                 try:

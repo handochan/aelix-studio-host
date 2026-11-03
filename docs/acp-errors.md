@@ -28,14 +28,15 @@ human-readable error messages to determine these reasons.
   transport-loss outcome from host #6.
 
 Standard ACP reserves `-32000` for authentication (verified:
-`agent-client-protocol-schema-1.5.0/src/v1/error.rs`). The busy interpretation
-applies only after initialization identifies `agentInfo.name` as `aelix-acp`.
-Other agents keep the existing authentication behavior.
+`agent-client-protocol-schema-1.5.0/src/v1/error.rs`). These application interpretations
+apply only after initialization identifies `agentInfo.name` as `aelix-acp`.
+Other agents keep the existing authentication and generic protocol error behavior.
 
 Tool-call `_meta` is stored in the message content alongside `update`, with
 opaque keys and values. SQLite JSON merge-patch preserves omitted fields,
 removes keys patched with null, and replaces arrays with the newest array.
-A statusless metadata update retains the terminal tool status. History
+Statusless metadata updates retain terminal tool status, including after a turn
+ends; the background watcher updates existing cards without creating a turn. History
 previews compact large tool output without truncating `_meta`.
 
 This change covers host #4 scopes 2 and 3. Replay suppression is unchanged;

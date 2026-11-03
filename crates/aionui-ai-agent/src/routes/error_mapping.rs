@@ -36,6 +36,19 @@ fn acp_error_to_api_error(err: AcpError) -> ApiError {
         AcpError::InvalidParams { .. } => ApiError::BadRequest(acp_error_public_message(&err)),
         AcpError::AgentInternal { .. } => ApiError::BadGateway(acp_error_public_message(&err)),
         AcpError::OtherProtocolError { .. } => ApiError::BadGateway(acp_error_public_message(&err)),
+        AcpError::ApplicationError { .. } => {
+            let error = crate::AgentSendError::from_acp_error_ref(&err);
+            if let Some(code) = error.protocol_error_code() {
+                ApiError::coded(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    code,
+                    error.stream_error().message.clone(),
+                    Some(serde_json::to_value(error.stream_error()).expect("agent error is JSON serializable")),
+                )
+            } else {
+                ApiError::BadGateway(acp_error_public_message(&err))
+            }
+        }
         AcpError::NotConnected | AcpError::PromptOutcomeUnknown => ApiError::BadGateway(acp_error_public_message(&err)),
         AcpError::InitTimeout { .. } => ApiError::BadGateway(acp_error_public_message(&err)),
         // Short config/mode/model RPC timeout: connection is alive, the agent
@@ -58,7 +71,9 @@ fn acp_error_public_message(err: &AcpError) -> String {
         AcpError::MethodNotFound { .. } => "Agent method is not supported.".to_owned(),
         AcpError::InvalidParams { .. } => "Invalid ACP request parameters.".to_owned(),
         AcpError::AgentInternal { code, .. } => format!("Agent internal error (code {code})"),
-        AcpError::OtherProtocolError { code, .. } => format!("Agent protocol error (code {code})"),
+        AcpError::OtherProtocolError { code, .. } | AcpError::ApplicationError { code, .. } => {
+            format!("Agent protocol error (code {code})")
+        }
         AcpError::NotConnected => "ACP protocol is not connected.".to_owned(),
         AcpError::PromptOutcomeUnknown => "The prompt was sent, but its outcome is unknown.".to_owned(),
         AcpError::InitTimeout { .. } => "Agent initialization timed out.".to_owned(),
