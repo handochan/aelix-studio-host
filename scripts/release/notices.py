@@ -238,14 +238,14 @@ def generate(rust_target, cargo, archive, output, build_log=None):
     policy = license_policy()
     config = make_config(policy, native_policy, packages)
     config_path = work / 'about.toml'
-    config_path.write_text(config, encoding='utf-8')
+    config_path.write_bytes(config.encode('utf-8'))
     argv = [str(about), '-c', 'never', 'generate', '--locked', '--offline', '--fail', '--format', 'json',
             '--config', str(config_path), '--manifest-path', str(ROOT / 'crates/aionui-app/Cargo.toml'),
             '--target', rust_target]
     raw, diagnostics = checked_tool_run(argv)
     resolved = json.loads(raw)
-    (work / 'cargo-about.json').write_text(raw, encoding='utf-8')
-    (work / 'cargo-about.stderr').write_text(diagnostics, encoding='utf-8')
+    (work / 'cargo-about.json').write_bytes(raw.encode('utf-8'))
+    (work / 'cargo-about.stderr').write_bytes(diagnostics.encode('utf-8'))
     selected, texts = {}, {}
     for entry in resolved['licenses']:
         for user in entry['used_by']:
