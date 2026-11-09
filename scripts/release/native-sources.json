@@ -1,0 +1,707 @@
+{
+  "decision": "https://github.com/handochan/aelix-studio-host/issues/20",
+  "packages": [
+    {
+      "buildScriptsSha256": "24ba3525a4e90473586a5837027da43d42ebe210fc7049657135e4056b2229ce",
+      "components": [
+        {
+          "component": "aws-lc-rs native files/links declaration",
+          "licenseConditions": "ISC AND (Apache-2.0 OR ISC)",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "b50b376e7d24a0598488b730c3034ffcd0b58dd36c0913a24b9903a3cfd04bf7"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "version": "1.19.0"
+        }
+      ],
+      "crate": "aws-lc-rs",
+      "links": "aws_lc_rs_1_19_0_sys",
+      "nativeFileCount": 0,
+      "nativeFilesSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "packagedFilesSha256": "daa254573d7bc10649c3d0dae137f77fe763d5f070048919d46d4301a5488fa0",
+      "sourceArchiveSha256": "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53",
+      "version": "1.19.0"
+    },
+    {
+      "buildScriptsSha256": "f0261aeda5d0ee0c3aeda68b05948e82c9bb1e14315299b69d251f5c3b54519f",
+      "components": [
+        {
+          "component": "AWS-LC and BoringSSL/OpenSSL-derived code",
+          "licenseConditions": "ISC, Apache-2.0, MIT, BSD-3-Clause and the alternatives described verbatim in LICENSE; AWS explicitly elects BSD-3-Clause for Jitter Entropy.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e"
+            },
+            {
+              "path": "aws-lc/LICENSE",
+              "sha256": "977c541bd25ffe36975dde25c028c0cd15ddf3d08243983b58e8a6a3d9447523"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "f109ca50dd66b555899664eb487f681e3ac5ad479acfc7a318bccc094416e692",
+          "version": "packaged snapshot in aws-lc-sys 0.47.0"
+        },
+        {
+          "component": "Fiat Cryptography",
+          "licenseConditions": "See component-specific copyright and license election in the original AWS-LC LICENSE.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e"
+            },
+            {
+              "path": "aws-lc/third_party/fiat/LICENSE",
+              "sha256": "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061"
+            }
+          ],
+          "sourcePrefixes": [
+            "aws-lc/third_party/fiat/"
+          ],
+          "sourceSha256": "7ffac97a366386efafcf34b8efee99412a9e94033ebf392a751da8f222c5e8e4",
+          "version": "packaged snapshot in aws-lc-sys 0.47.0"
+        },
+        {
+          "component": "s2n-bignum",
+          "licenseConditions": "See component-specific copyright and license election in the original AWS-LC LICENSE.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e"
+            }
+          ],
+          "sourcePrefixes": [
+            "aws-lc/third_party/s2n-bignum/"
+          ],
+          "sourceSha256": "db30fab4789e38dab1d0b635f69d9a1408bb8fa4fe4ca7cde2005b4d81368a1c",
+          "version": "packaged snapshot in aws-lc-sys 0.47.0"
+        },
+        {
+          "component": "Jitter Entropy",
+          "licenseConditions": "See component-specific copyright and license election in the original AWS-LC LICENSE.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e"
+            }
+          ],
+          "sourcePrefixes": [
+            "aws-lc/third_party/jitterentropy/"
+          ],
+          "sourceSha256": "6e868729f51e686b21573c4d25dd566ea6658abf6048768869c7da8f8877d933",
+          "version": "packaged snapshot in aws-lc-sys 0.47.0"
+        }
+      ],
+      "crate": "aws-lc-sys",
+      "links": "aws_lc_0_47_0",
+      "nativeFileCount": 1908,
+      "nativeFilesSha256": "f109ca50dd66b555899664eb487f681e3ac5ad479acfc7a318bccc094416e692",
+      "packagedFilesSha256": "191a53d19572e012512c8ff6b713fd2887c5e1473da3f4e80c8f545adc495a9b",
+      "sourceArchiveSha256": "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52",
+      "version": "0.47.0"
+    },
+    {
+      "buildScriptsSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "components": [
+        {
+          "component": "cc native files/links declaration",
+          "licenseConditions": "MIT OR Apache-2.0; compiler-family probe is a build tool, not host runtime code.",
+          "notices": [
+            {
+              "path": "LICENSE-APACHE",
+              "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+            },
+            {
+              "path": "LICENSE-MIT",
+              "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "b338e0b248671945c5d12a0220a98128aee6d8d1c9334b4d727598c41739e97d",
+          "version": "1.2.62"
+        }
+      ],
+      "crate": "cc",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "b338e0b248671945c5d12a0220a98128aee6d8d1c9334b4d727598c41739e97d",
+      "packagedFilesSha256": "601ffb964584166d21c86ff0bf55b11731642cce59ac312208df965c4aede7ae",
+      "sourceArchiveSha256": "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98",
+      "version": "1.2.62"
+    },
+    {
+      "buildScriptsSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "components": [
+        {
+          "component": "BZip2 Rust implementation and C compatibility header",
+          "licenseConditions": "bzip2-1.0.6; include/bzlib.h identifies the historical 1.1.0 header. No C bzip2-sys implementation is in this graph.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "54e1fd7bd53273e601c9599eb162a004dacddee031ae297ee7109a7beb93b1c2"
+            },
+            {
+              "endLine": 18,
+              "path": "include/bzlib.h",
+              "sha256": "886a4c62c02f30a4b5e317277b0f0973f79d8865fb5229f27a9afb7f17882a0e",
+              "startLine": 1
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "e58502543331d53ea8a52b1fad0222f92e56b958a0f8e814a5405f9a82f62c41",
+          "version": "0.2.6"
+        }
+      ],
+      "crate": "libbz2-rs-sys",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "e58502543331d53ea8a52b1fad0222f92e56b958a0f8e814a5405f9a82f62c41",
+      "packagedFilesSha256": "cd9ffc4fa2b89a9b8ddf979cdafbdb13e68dd9a5c62812a9be5e54268982db3c",
+      "sourceArchiveSha256": "32f454fd6831a29c0e827ed075bca2a15be201bd57f4168f0fd1041124eab17e",
+      "version": "0.2.6"
+    },
+    {
+      "buildScriptsSha256": "e17461421adfe25a9ca088da542dade1a7a705cff1d866250c00969db86b0ad0",
+      "components": [
+        {
+          "component": "libgit2",
+          "licenseConditions": "GPL v2 with the verbatim LINKING EXCEPTION in libgit2/COPYING; COPYING also retains notices for bundled subcomponents and disabled alternatives.",
+          "notices": [
+            {
+              "path": "libgit2/COPYING",
+              "sha256": "e3712465634e97cfd850822a4eb5ac7d2f8a10f753189366d5a2060046f28288"
+            },
+            {
+              "path": "libgit2/AUTHORS",
+              "sha256": "4dcad1137963b32d192da9771ca6055d84b20c41e6cd23bdfa6c47782d8a54f9"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "1d5a6baa51c3c0209bd37f807c4a1d95b8854e26e759eca53442f26f5e266b59",
+          "version": "1.9.3"
+        },
+        {
+          "component": "llhttp",
+          "licenseConditions": "MIT",
+          "notices": [
+            {
+              "path": "libgit2/deps/llhttp/LICENSE-MIT",
+              "sha256": "ebca854e0134cd256d673627c20499f42577eb74bacf08b9f25b626a73c91277"
+            }
+          ],
+          "sourcePrefixes": [
+            "libgit2/deps/llhttp/"
+          ],
+          "sourceSha256": "71e020cbc7d48965cf61b0d6360f7a6b8c3f920ae199a2d1a8e8a13d6e54a9e7",
+          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+        },
+        {
+          "component": "xdiff",
+          "licenseConditions": "LGPL 2.1 or later source headers; retain the full LGPL text in libgit2/COPYING",
+          "notices": [
+            {
+              "endLine": 21,
+              "path": "libgit2/deps/xdiff/xdiffi.c",
+              "sha256": "b48645e69ea2b895ba23f10c2767b5472f66221ea35c134735ad29d8221cb076",
+              "startLine": 1
+            },
+            {
+              "path": "libgit2/COPYING",
+              "sha256": "e3712465634e97cfd850822a4eb5ac7d2f8a10f753189366d5a2060046f28288"
+            }
+          ],
+          "sourcePrefixes": [
+            "libgit2/deps/xdiff/"
+          ],
+          "sourceSha256": "f998e8c348fdb2885785dc297e940b317e47c934f3a0e87da784dd43f8e22333",
+          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+        },
+        {
+          "component": "PCRE",
+          "licenseConditions": "BSD conditions in the verbatim PCRE LICENCE",
+          "notices": [
+            {
+              "path": "libgit2/deps/pcre/LICENCE",
+              "sha256": "51b3dea44f63338b84b9c97b3d793826a8397309068cf9379a423216ab8ea5b2"
+            }
+          ],
+          "sourcePrefixes": [
+            "libgit2/deps/pcre/"
+          ],
+          "sourceSha256": "9ab705a95e7ff37ac96d37dc2768e3c7e04ee001ccf01558db54f27d4bb28061",
+          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+        },
+        {
+          "component": "libgit2 zlib copy",
+          "licenseConditions": "Zlib",
+          "notices": [
+            {
+              "path": "libgit2/deps/zlib/LICENSE",
+              "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+            }
+          ],
+          "sourcePrefixes": [
+            "libgit2/deps/zlib/"
+          ],
+          "sourceSha256": "d747874e53232f0c4c591b515bbb59faefb9b19a17290254fb82326875a37467",
+          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+        },
+        {
+          "component": "libgit2 winhttp definitions",
+          "licenseConditions": "LGPL; retained as packaged source superset; actual Windows HTTPS backend depends on selected features",
+          "notices": [
+            {
+              "path": "libgit2/deps/winhttp/COPYING.LGPL",
+              "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+            }
+          ],
+          "sourcePrefixes": [
+            "libgit2/deps/winhttp/"
+          ],
+          "sourceSha256": "04d785bfe4254fe57f215b2a15b17a5beb5b9c8a49d16b8bbc2fb4570fc8208f",
+          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+        }
+      ],
+      "crate": "libgit2-sys",
+      "links": "git2",
+      "nativeFileCount": 564,
+      "nativeFilesSha256": "1d5a6baa51c3c0209bd37f807c4a1d95b8854e26e759eca53442f26f5e266b59",
+      "packagedFilesSha256": "a4ec79aeaadc92ee167b3bff653b84eb0a337b3495f2ff26c98b892695d81f5d",
+      "sourceArchiveSha256": "9b26f66f35e1871b22efcf7191564123d2a446ca0538cde63c23adfefa9b15b7",
+      "version": "0.18.4+1.9.3",
+      "wrapperClarification": {
+        "file": {
+          "path": "LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        "fileLicense": "Apache-2.0",
+        "license": "MIT OR Apache-2.0"
+      }
+    },
+    {
+      "buildScriptsSha256": "0ca3504525a3b556497a0a5952b0a210465715c1640e5fb1148433a7454b562c",
+      "components": [
+        {
+          "component": "SQLite C amalgamation",
+          "licenseConditions": "Public-domain copyright disclaimer and blessing in sqlite3/sqlite3.c; no substitution with Unlicense.",
+          "notices": [
+            {
+              "endLine": 39,
+              "path": "sqlite3/sqlite3.c",
+              "sha256": "85a5af182b96fd6917f6807346148632860816c1a180f3fe09f2ee8fa0fa2e1e",
+              "startLine": 29
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "4a99fb76c3002f6337e0591ed361048d1d9ab9e494ec55d6943aec161a50d38e",
+          "version": "3.46.0"
+        },
+        {
+          "component": "SQLCipher alternative",
+          "licenseConditions": "BSD-style conditions in sqlcipher/LICENSE; disabled alternatives are retained in source inventory.",
+          "notices": [
+            {
+              "path": "sqlcipher/LICENSE",
+              "sha256": "ea4fcb309f14a22065e1ea45362d494d320012249ed865fe9c7c0946db754131"
+            }
+          ],
+          "sourcePrefixes": [
+            "sqlcipher/"
+          ],
+          "sourceSha256": "6de58a37e444da3c2c9e9edd76eff202ff4578aaef0f580148a3660ed1610eb1",
+          "version": "packaged snapshot in libsqlite3-sys 0.30.1"
+        }
+      ],
+      "crate": "libsqlite3-sys",
+      "links": "sqlite3",
+      "nativeFileCount": 9,
+      "nativeFilesSha256": "4a99fb76c3002f6337e0591ed361048d1d9ab9e494ec55d6943aec161a50d38e",
+      "packagedFilesSha256": "3e6c75aeeb7077862abcf05ab150b4287fe7e886a69dee3cc29d67f58518d172",
+      "sourceArchiveSha256": "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149",
+      "version": "0.30.1"
+    },
+    {
+      "buildScriptsSha256": "e0df0ce1c7ada894df91b96960a9caf7d425e5c7287a779be4e6b314d0e5c644",
+      "components": [
+        {
+          "component": "zlib and optional zlib-ng",
+          "licenseConditions": "Zlib; optional source alternatives and copyright are retained from src/zlib/LICENSE and src/zlib-ng/LICENSE.md.",
+          "notices": [
+            {
+              "path": "src/zlib/LICENSE",
+              "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+            },
+            {
+              "path": "src/zlib-ng/LICENSE.md",
+              "sha256": "6c9f0d975b41afaa34d22f55bb8986ce69e5cb7ad327cb2b28820cd425edf5ee"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "b4b214bf567f193108cf165be6988537a1abccc0d503e53bfef0a260a5fbebd2",
+          "version": "packaged snapshot in libz-sys 1.1.31"
+        }
+      ],
+      "crate": "libz-sys",
+      "links": "z",
+      "nativeFileCount": 179,
+      "nativeFilesSha256": "b4b214bf567f193108cf165be6988537a1abccc0d503e53bfef0a260a5fbebd2",
+      "packagedFilesSha256": "f5febcf13c66ec420a6c67ae2bd26f8f34cd97e1e41abca474c81018794c5c83",
+      "sourceArchiveSha256": "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2",
+      "version": "1.1.31"
+    },
+    {
+      "buildScriptsSha256": "d9cc39934a6e7cc3b8fa7e9845c461cf0922423d4fdd5f8de4dc4feb3f2b159e",
+      "components": [
+        {
+          "component": "nix native files/links declaration",
+          "licenseConditions": "MIT; test/test_kmod/hello_mod/hello.c is test-only.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "66e3ee1fa7f909ad3c612d556f2a0cdabcd809ad6e66f3b0605015ac64841b70"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "6f75ba2fc9e06c95187a71f75a86739779e987d25e26bdedbb3a1090c45bef77",
+          "version": "0.31.3"
+        }
+      ],
+      "crate": "nix",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "6f75ba2fc9e06c95187a71f75a86739779e987d25e26bdedbb3a1090c45bef77",
+      "packagedFilesSha256": "b29c182740b120c8c112cfcc700cc8aa9ffc4fe4fe7d4dee3f113ae923127f89",
+      "sourceArchiveSha256": "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d",
+      "version": "0.31.3"
+    },
+    {
+      "buildScriptsSha256": "d408b795896bb6faa6cb0014811d645ed395cdd4ecfb536c94dee5568610f5b1",
+      "components": [
+        {
+          "component": "ring native crypto and BoringSSL-derived code",
+          "licenseConditions": "Apache-2.0 AND ISC; Fiat MIT and once_cell Apache-2.0 OR MIT originals are retained.",
+          "notices": [
+            {
+              "path": "LICENSE",
+              "sha256": "b3d734001a94efff3579978d953391aa7115f877657d25eb54037a43875d078a"
+            },
+            {
+              "path": "LICENSE-BoringSSL",
+              "sha256": "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d"
+            },
+            {
+              "path": "LICENSE-other-bits",
+              "sha256": "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"
+            },
+            {
+              "path": "third_party/fiat/LICENSE",
+              "sha256": "9eacbcb81be660840c714a560a9d65ba07913db98dd4baf969f78dd499fdd60f"
+            },
+            {
+              "path": "src/polyfill/once_cell/LICENSE-APACHE",
+              "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+            },
+            {
+              "path": "src/polyfill/once_cell/LICENSE-MIT",
+              "sha256": "6ee2ed6c77710de911761acd5fc1ad1da00f476beb1a7ef27e78c2d1858deafc"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "247ba1a228f7127d174665d1081788361b0f165f3103ee2d9940fc4018519410",
+          "version": "packaged snapshot in ring 0.17.14"
+        }
+      ],
+      "crate": "ring",
+      "links": "ring_core_0_17_14_",
+      "nativeFileCount": 152,
+      "nativeFilesSha256": "247ba1a228f7127d174665d1081788361b0f165f3103ee2d9940fc4018519410",
+      "packagedFilesSha256": "e0644b8d7663dccbe7063d5f8d1186678459e6258d7a86a9405c35adc707ab09",
+      "sourceArchiveSha256": "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7",
+      "version": "0.17.14"
+    },
+    {
+      "buildScriptsSha256": "ece80ec22ef005521916f791e4608b172f138dc82d8a8e112756871df2332ee2",
+      "components": [
+        {
+          "component": "signal-hook native files/links declaration",
+          "licenseConditions": "Apache-2.0 OR MIT; extract.c is compiled only with extended-siginfo-raw.",
+          "notices": [
+            {
+              "path": "LICENSE-APACHE",
+              "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+            },
+            {
+              "path": "LICENSE-MIT",
+              "sha256": "503558bfefe66ca15e4e3f7955b3cb0ec87fd52f29bf24b336af7bd00e946d5c"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "9bd1cb913be7011f0b4247041bd6d0abe86cdb06384c451e25ab153d95395d02",
+          "version": "0.3.18"
+        }
+      ],
+      "crate": "signal-hook",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "9bd1cb913be7011f0b4247041bd6d0abe86cdb06384c451e25ab153d95395d02",
+      "packagedFilesSha256": "094f3dd5ab191b1fa228d37e36262ae17b97a97130df6aa977ef95712a477a7d",
+      "sourceArchiveSha256": "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2",
+      "version": "0.3.18"
+    },
+    {
+      "buildScriptsSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "components": [
+        {
+          "component": "vcpkg native files/links declaration",
+          "licenseConditions": "MIT OR Apache-2.0",
+          "notices": [
+            {
+              "path": "LICENSE-APACHE",
+              "sha256": "60c93a31f490375aadf64098b75f10715010379541021e00261045d7800611d3"
+            },
+            {
+              "path": "LICENSE-MIT",
+              "sha256": "016d20f335060a70e79d9fcf8dfaa6201114d65d592211f4bdfb8ae9ca2bc1dc"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "8c851dab86faeb059536de3baa32cec76f21c987c84ea82fc31d23406df8081f",
+          "version": "0.2.15"
+        }
+      ],
+      "crate": "vcpkg",
+      "links": null,
+      "nativeFileCount": 341,
+      "nativeFilesSha256": "8c851dab86faeb059536de3baa32cec76f21c987c84ea82fc31d23406df8081f",
+      "packagedFilesSha256": "add2ec1cc7126cfdf0ecd1ae63fba8a790f5303f921256a5f45cee505d561629",
+      "sourceArchiveSha256": "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426",
+      "version": "0.2.15"
+    },
+    {
+      "buildScriptsSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "components": [
+        {
+          "component": "walkdir native files/links declaration",
+          "licenseConditions": "Unlicense OR MIT; compare/nftw.c is benchmark-only.",
+          "notices": [
+            {
+              "path": "COPYING",
+              "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f"
+            },
+            {
+              "path": "LICENSE-MIT",
+              "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f"
+            },
+            {
+              "path": "UNLICENSE",
+              "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "8d090afdfaeb7aae83d2478c84387be9a10aee7c6f0bd6c13f2da7c02dcf3f6c",
+          "version": "2.5.0"
+        }
+      ],
+      "crate": "walkdir",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "8d090afdfaeb7aae83d2478c84387be9a10aee7c6f0bd6c13f2da7c02dcf3f6c",
+      "packagedFilesSha256": "0b56553f472cf42b661961dcf89ffdfafe9e2c0fdcad4e59ebe7b304421a8397",
+      "sourceArchiveSha256": "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b",
+      "version": "2.5.0"
+    },
+    {
+      "buildScriptsSha256": "a5c9e9f988156ffed8222aa5497b5dc306b0070e1b518dee250a3f772a83a66b",
+      "components": [
+        {
+          "component": "Zstandard",
+          "licenseConditions": "BSD-3-Clause option of the BSD-3-Clause OR GPL-2.0 licensing; original BSD text retained.",
+          "notices": [
+            {
+              "path": "zstd/LICENSE",
+              "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+            },
+            {
+              "path": "LICENSE.BSD-3-Clause",
+              "sha256": "bf7017a73a95ea63bf3716b13ec2bcd79c92942356e3408c6fb66332bad6d977"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "ce9a79cc53f46dce39410b9d0015ea23aa4f0e85ed87ee65b179fa2377d60325",
+          "version": "1.5.7"
+        }
+      ],
+      "crate": "zstd-sys",
+      "links": "zstd",
+      "nativeFileCount": 101,
+      "nativeFilesSha256": "ce9a79cc53f46dce39410b9d0015ea23aa4f0e85ed87ee65b179fa2377d60325",
+      "packagedFilesSha256": "a2de709ac271d35bf82706e4943ffd47fdadfbf9b7c91e283625c74390e30487",
+      "sourceArchiveSha256": "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3",
+      "version": "2.1.2+zstd.1.5.7",
+      "wrapperClarification": {
+        "file": {
+          "path": "LICENSE.BSD-3-Clause",
+          "sha256": "bf7017a73a95ea63bf3716b13ec2bcd79c92942356e3408c6fb66332bad6d977"
+        },
+        "fileLicense": "BSD-3-Clause",
+        "license": "BSD-3-Clause"
+      }
+    },
+    {
+      "buildScriptsSha256": "a61592aa06141e05230330743c180530bf1ac0c47a240e8874793a0640cf9791",
+      "components": [
+        {
+          "component": "winapi native files/links declaration",
+          "licenseConditions": "MIT OR Apache-2.0",
+          "notices": [
+            {
+              "path": "LICENSE-APACHE",
+              "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+            },
+            {
+              "path": "LICENSE-MIT",
+              "sha256": "ce7bc3499fee93d5022ef430d5e4201e79a6d9154f3974e42f41349f0569e09b"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "version": "0.3.9"
+        }
+      ],
+      "crate": "winapi",
+      "links": null,
+      "nativeFileCount": 0,
+      "nativeFilesSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "packagedFilesSha256": "aaee996e1a3643e491fc0f91c6f6e5104672aaddae9b8bd37a18d7dbe0d9d93d",
+      "sourceArchiveSha256": "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419",
+      "version": "0.3.9"
+    },
+    {
+      "buildScriptsSha256": "1fbee6578c71fb11913f0e03a49cb10c6893e7b7bd87c6d301a200e45af1869d",
+      "components": [
+        {
+          "component": "windows_x86_64_msvc native files/links declaration",
+          "licenseConditions": "MIT OR Apache-2.0",
+          "notices": [
+            {
+              "path": "license-apache-2.0",
+              "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+            },
+            {
+              "path": "license-mit",
+              "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "80eb554f339d789a931188c1d72ebf05f49dbc82089db6bb7a2abd03cc0d3a40",
+          "version": "0.48.5"
+        }
+      ],
+      "crate": "windows_x86_64_msvc",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "80eb554f339d789a931188c1d72ebf05f49dbc82089db6bb7a2abd03cc0d3a40",
+      "packagedFilesSha256": "6bc439d4bc1d693eefa61b5724eb00f3e23810714cce95ff2e6d0cb587ac15bb",
+      "sourceArchiveSha256": "ed94fce61571a4006852b7389a063ab983c02eb1bb37b47f8272ce92d06d9538",
+      "version": "0.48.5"
+    },
+    {
+      "buildScriptsSha256": "25ac701582983c8f95789c04a2729414336582f1c2333c1d27daeb1fce0aabf4",
+      "components": [
+        {
+          "component": "windows_x86_64_msvc native files/links declaration",
+          "licenseConditions": "MIT OR Apache-2.0",
+          "notices": [
+            {
+              "path": "license-apache-2.0",
+              "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+            },
+            {
+              "path": "license-mit",
+              "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "f52bb70ecddf6410cd1921c39a1e93dfcf360763448d42a4c7caff356e9eeda7",
+          "version": "0.52.6"
+        }
+      ],
+      "crate": "windows_x86_64_msvc",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "f52bb70ecddf6410cd1921c39a1e93dfcf360763448d42a4c7caff356e9eeda7",
+      "packagedFilesSha256": "65b144d045bcc35b642a42d6f9419fcf07f6648605ddfa12c49cf0ea7d1a1249",
+      "sourceArchiveSha256": "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec",
+      "version": "0.52.6"
+    },
+    {
+      "buildScriptsSha256": "25ac701582983c8f95789c04a2729414336582f1c2333c1d27daeb1fce0aabf4",
+      "components": [
+        {
+          "component": "windows_x86_64_msvc native files/links declaration",
+          "licenseConditions": "MIT OR Apache-2.0",
+          "notices": [
+            {
+              "path": "license-apache-2.0",
+              "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+            },
+            {
+              "path": "license-mit",
+              "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+            }
+          ],
+          "sourcePrefixes": [
+            ""
+          ],
+          "sourceSha256": "29bfd199da224692781f2e3d1f48ebd23fac65ef3ca5311a9db61997ef689315",
+          "version": "0.53.1"
+        }
+      ],
+      "crate": "windows_x86_64_msvc",
+      "links": null,
+      "nativeFileCount": 1,
+      "nativeFilesSha256": "29bfd199da224692781f2e3d1f48ebd23fac65ef3ca5311a9db61997ef689315",
+      "packagedFilesSha256": "9cc40c9d23a7307a11e10984132531c0b0b85061c2099d49f185b140ce753f18",
+      "sourceArchiveSha256": "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650",
+      "version": "0.53.1"
+    }
+  ],
+  "schema": "aelix-studio-host.native-source-policy/1",
+  "scope": "All native files in selected packages, including disabled/test code; actual linkage is recorded separately."
+}
