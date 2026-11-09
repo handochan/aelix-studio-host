@@ -112,6 +112,40 @@ impl From<ExtensionError> for ApiError {
                     "limit_bytes": limit_bytes,
                 })),
             ),
+            ExtensionError::SkillImportZipTooLarge {
+                total_bytes,
+                limit_bytes,
+            } => ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "SKILL_IMPORT_ZIP_TOO_LARGE",
+                "The entire zip archive exceeds the skill import size limit across all skills.",
+                Some(json!({"total_bytes": total_bytes, "limit_bytes": limit_bytes})),
+            ),
+            ExtensionError::SkillImportZipTooManyEntries {
+                entry_count,
+                limit_entries,
+            } => ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "SKILL_IMPORT_ZIP_TOO_MANY_ENTRIES",
+                "Skill zip contains too many entries or output paths.",
+                Some(json!({"entry_count": entry_count, "limit_entries": limit_entries})),
+            ),
+            ExtensionError::SkillImportZipCompressionRatio {
+                file_path,
+                expanded_bytes,
+                compressed_bytes,
+                limit_ratio,
+            } => ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "SKILL_IMPORT_ZIP_COMPRESSION_RATIO",
+                "A skill zip entry exceeds the compression ratio limit.",
+                Some(json!({
+                    "error_path": file_path,
+                    "expanded_bytes": expanded_bytes,
+                    "compressed_bytes": compressed_bytes,
+                    "limit_ratio": limit_ratio,
+                })),
+            ),
             ExtensionError::SkillImportInvalidZip(_) => ApiError::coded(
                 StatusCode::BAD_REQUEST,
                 "SKILL_IMPORT_INVALID_ZIP",

@@ -1,3 +1,7 @@
+mod archive;
+
+use archive::extract_zip_archive;
+
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -760,11 +764,14 @@ pub async fn import_skills_with_repo_for_user(
         let destination = extract_dir.clone();
         let extraction = tokio::task::spawn_blocking(move || extract_zip_archive(&archive, &destination))
             .await
-            .map_err(|e| ExtensionError::SkillImportInvalidZip(format!("Zip extraction task failed: {e}")))?;
+            .unwrap_or_else(|e| {
+                Err(ExtensionError::SkillImportInvalidZip(format!(
+                    "Zip extraction task failed: {e}"
+                )))
+            });
 
         if let Err(err) = extraction {
-            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-            let _ = tokio::fs::remove_dir(&temp_root).await;
+            cleanup_zip_staging(&extract_dir, &temp_root).await;
             return Err(err);
         }
 
@@ -790,8 +797,7 @@ pub async fn import_skills_with_repo_for_user(
         }
         .await;
 
-        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-        let _ = tokio::fs::remove_dir(&temp_root).await;
+        cleanup_zip_staging(&extract_dir, &temp_root).await;
         return result;
     }
 
@@ -837,6 +843,20 @@ pub async fn import_skills_with_repo_for_user(
     ))
 }
 
+async fn cleanup_zip_staging(extract_dir: &Path, temp_root: &Path) {
+    if let Err(err) = tokio::fs::remove_dir_all(extract_dir).await
+        && err.kind() != io::ErrorKind::NotFound
+    {
+        warn!(error_kind = ?err.kind(), "failed to clean skill zip extraction staging");
+    }
+    // A concurrent import can still own another child of the shared temp root.
+    if let Err(err) = tokio::fs::remove_dir(temp_root).await
+        && !matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty)
+    {
+        warn!(error_kind = ?err.kind(), "failed to remove empty skill zip temporary root");
+    }
+}
+
 async fn import_skills_from_zip(paths: &SkillPaths, archive_path: &Path) -> Result<SkillImportOutcome, ExtensionError> {
     let temp_root = paths.user_skills_dir.join(".import-tmp");
     tokio::fs::create_dir_all(&temp_root).await?;
@@ -852,11 +872,14 @@ async fn import_skills_from_zip(paths: &SkillPaths, archive_path: &Path) -> Resu
     let destination = extract_dir.clone();
     let extraction = tokio::task::spawn_blocking(move || extract_zip_archive(&archive, &destination))
         .await
-        .map_err(|e| ExtensionError::SkillImportInvalidZip(format!("Zip extraction task failed: {e}")))?;
+        .unwrap_or_else(|e| {
+            Err(ExtensionError::SkillImportInvalidZip(format!(
+                "Zip extraction task failed: {e}"
+            )))
+        });
 
     if let Err(err) = extraction {
-        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-        let _ = tokio::fs::remove_dir(&temp_root).await;
+        cleanup_zip_staging(&extract_dir, &temp_root).await;
         return Err(err);
     }
 
@@ -878,8 +901,7 @@ async fn import_skills_from_zip(paths: &SkillPaths, archive_path: &Path) -> Resu
     }
     .await;
 
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-    let _ = tokio::fs::remove_dir(&temp_root).await;
+    cleanup_zip_staging(&extract_dir, &temp_root).await;
     result
 }
 
@@ -1055,6 +1077,9 @@ fn skill_import_error_code(err: &ExtensionError) -> &'static str {
         ExtensionError::SkillImportSymlinkEntry(_) => "SKILL_IMPORT_SYMLINK_ENTRY",
         ExtensionError::SkillImportFileTooLarge { .. } => "SKILL_IMPORT_FILE_TOO_LARGE",
         ExtensionError::SkillImportTotalTooLarge { .. } => "SKILL_IMPORT_TOTAL_TOO_LARGE",
+        ExtensionError::SkillImportZipTooLarge { .. } => "SKILL_IMPORT_ZIP_TOO_LARGE",
+        ExtensionError::SkillImportZipTooManyEntries { .. } => "SKILL_IMPORT_ZIP_TOO_MANY_ENTRIES",
+        ExtensionError::SkillImportZipCompressionRatio { .. } => "SKILL_IMPORT_ZIP_COMPRESSION_RATIO",
         ExtensionError::SkillImportInvalidZip(_) => "SKILL_IMPORT_INVALID_ZIP",
         ExtensionError::PathTraversal(_) => "SKILL_IMPORT_INVALID_NAME",
         _ => "SKILL_IMPORT_FAILED",
@@ -2054,73 +2079,6 @@ async fn collect_skill_dirs_recursive(dir: &Path, result: &mut Vec<PathBuf>) -> 
 
     result.sort();
     Ok(())
-}
-
-fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), ExtensionError> {
-    let file = std::fs::File::open(archive_path)?;
-    let mut archive = zip::ZipArchive::new(file).map_err(zip_error)?;
-
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(zip_error)?;
-        let entry_name = entry.name().map_err(zip_error)?.into_owned();
-        reject_zip_symlink(&entry)?;
-        let relative_path = safe_zip_entry_path(&entry_name)?;
-        let output_path = destination.join(relative_path);
-
-        if entry.is_dir() {
-            std::fs::create_dir_all(&output_path)?;
-            continue;
-        }
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut output = std::fs::File::create(&output_path)?;
-        io::copy(&mut entry, &mut output)?;
-    }
-
-    Ok(())
-}
-
-fn safe_zip_entry_path(name: &str) -> Result<PathBuf, ExtensionError> {
-    if name.is_empty() || name.contains('\\') {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    let path = Path::new(name);
-    if path.is_absolute() {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    let mut safe_path = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => safe_path.push(part),
-            Component::CurDir => {}
-            _ => return Err(ExtensionError::PathTraversal(name.to_string())),
-        }
-    }
-
-    if safe_path.as_os_str().is_empty() {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    Ok(safe_path)
-}
-
-fn reject_zip_symlink<R: io::Read>(entry: &zip::read::ZipFile<'_, R>) -> Result<(), ExtensionError> {
-    if let Some(mode) = entry.unix_mode()
-        && mode & 0o170000 == 0o120000
-    {
-        return Err(ExtensionError::SkillImportSymlinkEntry(
-            entry.name().map_err(zip_error)?.into_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn zip_error(err: zip::result::ZipError) -> ExtensionError {
-    ExtensionError::SkillImportInvalidZip(err.to_string())
 }
 
 /// Parse SKILL.md frontmatter to extract name and description.
