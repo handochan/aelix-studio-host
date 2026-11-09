@@ -218,6 +218,13 @@ def main():
             raise ValueError('Compiler differs from the pinned Rust toolchain ' + channel)
         if container:
             report['buildContainer']['osRelease'] = capture(['cat', '/etc/os-release'])
+        # Offline license metadata includes the workspace's target-specific
+        # build/dev manifests, which a package-only build need not download.
+        # Fetch locked inputs first; dev dependencies remain excluded from the
+        # generated distribution notice graph.
+        fetch_argv = [cargo, 'fetch', '--locked', '--target', rust_target]
+        report['licenseFetchArgv'] = fetch_argv
+        subprocess.run([*prefix, *fetch_argv], cwd=ROOT, env=environment, check=True)
         argv = [cargo, 'build', '--locked', '--release', '-p', policy['package'], '--bin', policy['binary'],
                 '--target', rust_target, '--target-dir', str(target_dir), '--message-format=json-render-diagnostics']
         report['buildArgv'] = argv
