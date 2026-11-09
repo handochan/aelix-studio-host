@@ -1150,6 +1150,14 @@ mod tests {
         assert_eq!(event.data["conversation_id"], "conv-warning");
         assert_eq!(event.data["data"]["code"], "MCP_SERVER_UNAVAILABLE");
         assert_eq!(event.data["data"]["type"], "warning");
+        assert_eq!(
+            event.data["data"]["params"],
+            serde_json::json!({
+                "server_id": "mcp_broken",
+                "server_name": "broken",
+                "reason_code": "invalid_configuration",
+            })
+        );
         assert!(!event.data.to_string().contains("secret-sentinel"));
     }
 

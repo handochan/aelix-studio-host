@@ -33,6 +33,16 @@ pub enum McpResolveError {
 }
 
 impl McpResolveError {
+    /// Stable translation discriminator, following the snake_case availability
+    /// reason codes in the agent registry. Never derive it from error text.
+    fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ConfigurationUnavailable => "configuration_unavailable",
+            Self::InvalidConfiguration(_) => "invalid_configuration",
+            Self::Runtime(_) => "runtime_unavailable",
+        }
+    }
+
     fn reason(&self) -> &'static str {
         match self {
             Self::ConfigurationUnavailable => "MCP settings could not be loaded; check the host configuration storage.",
@@ -156,7 +166,12 @@ pub(crate) async fn report_mcp_unavailable(
             content: format!("MCP server '{}': {reason}", server_name),
             severity: "warning",
             code: "MCP_SERVER_UNAVAILABLE",
-            params: serde_json::json!({"server_id":server_id}),
+            params: serde_json::json!({
+                "server_id": server_id,
+                // Reuse only the display name already present in the fallback.
+                "server_name": server_name,
+                "reason_code": error.reason_code(),
+            }),
             supersedes_key: format!("mcp-unavailable:{server_id}"),
         },
     };
@@ -467,6 +482,14 @@ mod tests {
         assert_eq!(notice.data["type"], "tips");
         assert_eq!(notice.data["data"]["type"], "warning");
         assert_eq!(notice.data["data"]["code"], "MCP_SERVER_UNAVAILABLE");
+        assert_eq!(
+            notice.data["data"]["params"],
+            serde_json::json!({
+                "server_id": row.id,
+                "server_name": "missing-tool",
+                "reason_code": "runtime_unavailable",
+            })
+        );
         assert!(
             notice.data["data"]["content"]
                 .as_str()
@@ -498,6 +521,78 @@ mod tests {
         assert!(!runtime.reason().contains("secret-sentinel"));
         let config = McpResolveError::InvalidConfiguration("unsupported runtime".into());
         assert!(config.reason().contains("stored MCP configuration is invalid"));
+    }
+
+    #[tokio::test]
+    async fn resolution_failures_emit_translation_params_for_every_reason() {
+        let mut invalid = make_row("설정 오류", true);
+        invalid.transport_config = r#"{"headers":{"Authorization":"Bearer secret-sentinel"}}"#.into();
+        let mut runtime = make_row("missing-tool", true);
+        runtime.transport_type = "stdio".into();
+        runtime.transport_config = r#"{"command":"/missing/secret-sentinel","env":{"TOKEN":"secret-sentinel"}}"#.into();
+        let cases = [
+            (
+                MockRepo {
+                    rows: vec![],
+                    fail: true,
+                },
+                "configuration_unavailable",
+                "",
+                "Configured MCP servers",
+                "MCP settings could not be loaded; check the host configuration storage.",
+            ),
+            (
+                MockRepo {
+                    rows: vec![invalid],
+                    fail: false,
+                },
+                "invalid_configuration",
+                "mcp_설정 오류",
+                "설정 오류",
+                "The stored MCP configuration is invalid; correct its transport configuration.",
+            ),
+            (
+                MockRepo {
+                    rows: vec![runtime],
+                    fail: false,
+                },
+                "runtime_unavailable",
+                "mcp_missing-tool",
+                "missing-tool",
+                "The configured MCP command or runtime is unavailable; check its configuration, local runtime and host mirror settings.",
+            ),
+        ];
+        for (repo, reason_code, server_id, server_name, reason) in cases {
+            let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(16));
+            let mut events = bus.subscribe();
+            assert!(
+                resolve_session_mcp_servers(&repo, None, TEST_USER_ID, None, "conv-1", bus)
+                    .await
+                    .is_empty()
+            );
+            let event = events.try_recv().unwrap();
+            assert_eq!(event.name, "message.stream");
+            assert_eq!(event.data["user_id"], TEST_USER_ID);
+            assert_eq!(event.data["conversation_id"], "conv-1");
+            assert_eq!(event.data["type"], "tips");
+            assert_eq!(event.data["hidden"], false);
+            assert_eq!(
+                event.data["data"],
+                serde_json::json!({
+                    "content": format!("MCP server '{server_name}': {reason}"),
+                    "type": "warning",
+                    "code": "MCP_SERVER_UNAVAILABLE",
+                    "params": {
+                        "server_id": server_id,
+                        "server_name": server_name,
+                        "reason_code": reason_code,
+                    },
+                    "supersedes_key": format!("mcp-unavailable:{server_id}"),
+                })
+            );
+            assert!(!event.data.to_string().contains("secret-sentinel"));
+            assert!(events.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
@@ -563,6 +658,8 @@ mod tests {
             assert_eq!(content["code"], "MCP_SERVER_UNAVAILABLE");
             assert_eq!(content["type"], "warning");
             assert_eq!(content["params"]["server_id"], server.id);
+            assert_eq!(content["params"]["server_name"], "missing-tool");
+            assert_eq!(content["params"]["reason_code"], "runtime_unavailable");
             assert_eq!(content["supersedes_key"], format!("mcp-unavailable:{}", server.id));
             // Reattachment after an idle reap/restart gets new message IDs but
             // retains the same card identity in both live and saved payloads.
@@ -590,6 +687,7 @@ mod tests {
                 let tip: serde_json::Value = serde_json::from_str(&saved.content).unwrap();
                 assert_eq!(tip["supersedes_key"], content["supersedes_key"]);
                 assert_eq!(tip["params"]["server_id"], server.id);
+                assert_eq!(tip["params"], content["params"]);
             }
 
             assert!(content["content"].as_str().unwrap().contains("configured MCP command"));
