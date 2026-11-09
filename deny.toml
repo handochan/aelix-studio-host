@@ -13,10 +13,17 @@ targets = [
 
 [advisories]
 # User-approved exception, distinct from an unresolved advisory baseline.
-# The other 19 inherited advisories were resolved in host #7. Any future
-# unresolved baseline entries must be documented separately from this exception.
+# The other 19 inherited advisories were resolved in host #7.
+#
+# Unresolved baseline: advisories published after host #7 that match the
+# current Cargo.lock. They are listed so CI fails only on NEW advisories; they
+# are not fixes or accepted risks. Each must be fixed before Beta in host #23,
+# with its baseline entry removed when fixed.
 ignore = [
     { id = "RUSTSEC-2024-0449", reason = "User decision 2026-11-03: unmaintained notice with no patched version; upstream aionrs aion-memory also requires unsafe-libyaml. Removal: handochan/aelix-studio-host#18 (Later)." },
+    { id = "RUSTSEC-2026-0441", reason = "Unresolved baseline (2026-11-09): pin-utils 0.1.0 unmaintained, no safe upgrade. Fix: handochan/aelix-studio-host#23." },
+    { id = "RUSTSEC-2026-0459", reason = "Unresolved baseline (2026-11-09): libsqlite3-sys 0.30.1 (SQLite < 3.54.0) via rusqlite and sqlx. Fix: handochan/aelix-studio-host#23." },
+    { id = "RUSTSEC-2026-0462", reason = "Unresolved baseline (2026-11-09): rmcp 1.7.0 unbounded Streamable HTTP response body. Fix: handochan/aelix-studio-host#23." },
 ]
 
 [licenses]
