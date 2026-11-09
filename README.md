@@ -248,9 +248,17 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
   license text was checked separately from the general allow list.
 - **Advisories:** dependency updates resolve 19 of the 20 inherited RustSec
   advisories, including all four zip notices, in
-  [#7](https://github.com/handochan/aelix-studio-host/issues/7). There are no
-  unresolved advisory baseline entries. Calamine 0.38 also addresses
-  RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail CI.
+  [#7](https://github.com/handochan/aelix-studio-host/issues/7). Calamine 0.38
+  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories
+  fail CI.
+- **Unresolved advisory baseline (2026-11-09):** three advisories published
+  after #7 match the current `Cargo.lock`. RUSTSEC-2026-0459 is
+  `libsqlite3-sys` 0.30.1, through `rusqlite` and `sqlx`. RUSTSEC-2026-0462 is
+  `rmcp` 1.7.0. RUSTSEC-2026-0441 is `pin-utils` 0.1.0, which is unmaintained.
+  They are listed in `deny.toml` so CI fails only on new advisories. This does
+  not fix the advisories or accept their risks: each must be fixed before Beta
+  in [#23](https://github.com/handochan/aelix-studio-host/issues/23), with its
+  baseline entry removed when fixed.
 - **User-approved advisory exception (2026-11-03):** RUSTSEC-2024-0449 is an
   unmaintained notice for `unsafe-libyaml`, with no patched version. It remains
   through both the host's `serde_yaml` and upstream aionrs' `aion-memory`;
