@@ -121,6 +121,22 @@ def decode_original(item):
     return data.decode('utf-8', errors='replace')
 
 
+def check_required_originals(package, originals, supplements):
+    for required in supplements.get('apacheAudit', {}).get('requiredNotices', []):
+        if (required['crate'], required['version']) == (package['name'], package['version']):
+            if not any(item['path'] == 'upstream/' + required['path'] and item['sha256'] == required['sha256']
+                       for item in originals):
+                raise ValueError('Missing audited upstream NOTICE: ' + package['name'])
+    if (package.get('source') or '').startswith('git+'):
+        pins = [p for p in supplements.get('gitRootLicenses', []) if p['source'] == package['source']]
+        if not pins:
+            raise ValueError('Git dependency root license has not been audited: ' + package['name'])
+        for pin in pins:
+            if not any(item['path'] == 'repository-root/' + pin['path'] and item['sha256'] == pin['sha256']
+                       for item in originals):
+                raise ValueError('Missing or changed git root license: ' + package['name'])
+
+
 def package_originals(package, supplements):
     root = Path(package['manifest_path']).parent
     if 'Apache-2.0' in (package.get('license') or '') and not (package.get('source') or '').startswith('git+'):
@@ -171,6 +187,7 @@ def package_originals(package, supplements):
         originals.append(item)
     if not any(item['kind'] != 'copyright-comment' for item in originals):
         raise ValueError('Missing original license file: ' + package['name'] + ' ' + package['version'])
+    check_required_originals(package, originals, supplements)
     return originals
 
 
@@ -346,6 +363,7 @@ def validate_bundle(text_bytes, json_bytes, result, rust_target):
     if render(bundle) != text_bytes:
         raise ValueError('Readable notices do not match inventory')
     policy = license_policy()
+    supplements = load('license-sources.json')
     if result['crateCount'] != len(bundle['crates']) or result['nativePackageCount'] != len(bundle['nativeSources']):
         raise ValueError('Third-party notice counts differ')
     if len({(p['name'], p['version']) for p in bundle['crates']}) != len(bundle['crates']):
@@ -359,11 +377,13 @@ def validate_bundle(text_bytes, json_bytes, result, rust_target):
             raise ValueError('Missing original crate notice')
         for item in package['originals']:
             decode_original(item)
+        check_required_originals(package, package['originals'], supplements)
     for package in bundle.get('privatePackages', []):
         if not package['originals']:
             raise ValueError('Private third-party package is missing its original notices')
         for item in package['originals']:
             decode_original(item)
+        check_required_originals(package, package['originals'], supplements)
     native_policy = load('native-sources.json')
     names = {(p['name'], p['version']) for p in bundle['crates']}
     expected_native = {(p['crate'], p['version']) for p in native_policy['packages']

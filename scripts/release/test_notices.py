@@ -155,7 +155,9 @@ class NativeSourceTests(unittest.TestCase):
             (package / 'NOTICE.txt').write_text('Apache attribution\n')
             (package / 'source.rs').write_text('// Copyright component owner\nfn f() {}\n')
             items = notices.package_originals({'name': 'fixture', 'version': '1.0.0', 'source': 'git+fixture',
-                                               'manifest_path': str(package / 'Cargo.toml')}, {'files': []})
+                                               'manifest_path': str(package / 'Cargo.toml')},
+                                              {'files': [], 'gitRootLicenses': [{'source': 'git+fixture', 'path': 'LICENSE',
+                                                                               'sha256': sha256((root / 'LICENSE').read_bytes())}]})
             paths = {item['path'] for item in items}
             self.assertIn('repository-root/LICENSE', paths)
             self.assertIn('NOTICE.txt', paths)
@@ -173,6 +175,19 @@ class NativeSourceTests(unittest.TestCase):
             package['version'] = '1.0.1'
             with self.assertRaisesRegex(ValueError, 'Apache NOTICE audit is missing'):
                 notices.package_originals(package, policy)
+
+    def test_audited_notice_and_git_original_cannot_be_omitted(self):
+        package = {'name': 'fixture', 'version': '1.0.0', 'source': 'registry+fixture'}
+        item = notices.original('upstream/NOTICE', b'Original attribution\n')
+        policy = {'apacheAudit': {'requiredNotices': [{'crate': 'fixture', 'version': '1.0.0',
+                                                      'path': 'NOTICE', 'sha256': item['sha256']}]}}
+        notices.check_required_originals(package, [item], policy)
+        with self.assertRaisesRegex(ValueError, 'Missing audited upstream NOTICE'):
+            notices.check_required_originals(package, [], policy)
+        package['source'] = 'git+fixture'
+        policy = {'gitRootLicenses': [{'source': 'git+fixture', 'path': 'LICENSE', 'sha256': item['sha256']}]}
+        with self.assertRaisesRegex(ValueError, 'Missing or changed git root license'):
+            notices.check_required_originals(package, [item], policy)
 
 
 class BundleValidationTests(unittest.TestCase):

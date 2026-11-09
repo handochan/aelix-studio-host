@@ -753,6 +753,103 @@
         "reason": "non-GitHub repository",
         "repository": "https://codeberg.org/swsnr/gethostname.rs.git"
       }
+    ],
+    "requiredNotices": [
+      {
+        "crate": "aws-lc-rs",
+        "version": "1.19.0",
+        "repository": "aws/aws-lc-rs",
+        "commit": "5d496f88b40f327e28315deecc1a5a1fd1e81e95",
+        "path": "NOTICE",
+        "sha256": "38959e06d4e48e85ff548e145c944ea8094d227d8ce7fb8cdba0de478de128a5"
+      },
+      {
+        "crate": "aws-lc-sys",
+        "version": "0.47.0",
+        "repository": "aws/aws-lc-rs",
+        "commit": "5d496f88b40f327e28315deecc1a5a1fd1e81e95",
+        "path": "NOTICE",
+        "sha256": "38959e06d4e48e85ff548e145c944ea8094d227d8ce7fb8cdba0de478de128a5"
+      },
+      {
+        "crate": "aws-sdk-bedrock",
+        "version": "1.141.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-sso",
+        "version": "1.98.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-ssooidc",
+        "version": "1.100.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-sts",
+        "version": "1.103.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-config",
+        "version": "1.8.16",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-credential-types",
+        "version": "1.3.1",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-runtime",
+        "version": "1.7.3",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sigv4",
+        "version": "1.6.4",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "c42d314c972a95e7cfd9583eef5113a2e1d6dccb",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-types",
+        "version": "1.3.15",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      }
     ]
-  }
+  },
+  "gitRootLicenses": [
+    {
+      "source": "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75",
+      "path": "LICENSE",
+      "sha256": "9ff7efda502098c7d8029a7f17e1b4e0e837a91d78c7add23a93d3ec0c08c7d4"
+    }
+  ]
 }
