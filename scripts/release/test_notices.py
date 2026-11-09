@@ -162,6 +162,18 @@ class NativeSourceTests(unittest.TestCase):
             self.assertTrue(any('copyright-' in path for path in paths))
             self.assertIn('Copyright upstream owner', '\n'.join(notices.decode_original(x) for x in items))
 
+    def test_new_apache_package_version_requires_notice_audit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'LICENSE').write_text('Original Apache license\n')
+            package = {'name': 'apache-fixture', 'version': '1.0.0', 'source': 'registry+fixture',
+                       'license': 'Apache-2.0', 'manifest_path': str(root / 'Cargo.toml')}
+            policy = {'files': [], 'apacheAudit': {'packageVersions': ['apache-fixture@1.0.0']}}
+            self.assertEqual(len(notices.package_originals(package, policy)), 1)
+            package['version'] = '1.0.1'
+            with self.assertRaisesRegex(ValueError, 'Apache NOTICE audit is missing'):
+                notices.package_originals(package, policy)
+
 
 class BundleValidationTests(unittest.TestCase):
     def test_fixture_validates_for_every_target(self):

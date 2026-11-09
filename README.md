@@ -343,11 +343,17 @@ exact published VCS revision and hashes of upstream originals checked into
 clipboard-win, CRC, include_dir, objc2 and MCP crates; generated canonical text
 alone is not treated as their original copyright notice.
 
-For the current lockfile, the package/repository-root scan found **zero separate
-Apache NOTICE files** in the five target graphs and the supplemented upstream
-license locations. This is recorded as an empty `apacheNoticeFiles` list, not as
-a fabricated NOTICE. If a selected source contains one, the recursive scan keeps
-it verbatim. The original host `NOTICE` remains a separate archive member.
+For the current lockfile, the packaged sources contain no separate Apache NOTICE
+files, but an additional upstream VCS-root audit found **two original AWS NOTICE
+texts**, referenced by eleven package/version entries. Those exact originals are
+pinned in `license-sources.json` and retained in every target's bundle. The audit
+checked 490 upstream directories for 361 Apache-licensed package versions, with
+five repository-URL corrections verified by byte-identical published manifests.
+Its scope and unavailable-revision/non-GitHub cross-checks are recorded in the
+same file; upstream absence is not asserted where a revision is unavailable.
+All published package files are scanned regardless. New Apache package versions
+require an updated NOTICE audit, and any discovered NOTICE is retained verbatim.
+The original host `NOTICE` remains a separate archive member.
 Missing originals fail generation. The source audit and actual per-target counts,
 link choices, originals and `missingNotices` result are available in each build
 receipt/inventory and dry-run artifact. Studio installer integration remains a

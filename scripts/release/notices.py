@@ -123,6 +123,9 @@ def decode_original(item):
 
 def package_originals(package, supplements):
     root = Path(package['manifest_path']).parent
+    if 'Apache-2.0' in (package.get('license') or '') and not (package.get('source') or '').startswith('git+'):
+        if package['name'] + '@' + package['version'] not in supplements['apacheAudit']['packageVersions']:
+            raise ValueError('Apache NOTICE audit is missing for package/version: ' + package['name'])
     originals = []
     seen_comments = set()
     for path in source_files(root):
@@ -283,6 +286,13 @@ def generate(rust_target, cargo, archive, output, build_log=None):
         package = packages[event['package_id']]
         if package['id'] not in included and package.get('source') and package.get('publish') != []:
             raise ValueError('Built third-party package missing from license graph: ' + package['name'])
+    if build_log:
+        for message in messages:
+            if message.get('reason') != 'compiler-artifact':
+                continue
+            package = packages[message['package_id']]
+            if package['id'] not in included and package.get('source') and package.get('publish') != []:
+                raise ValueError('Compiled third-party package missing from license graph: ' + package['name'])
     bundle['crates'].sort(key=lambda x: (x['name'], x['version']))
     bundle['nativeSources'].sort(key=lambda x: x['crate'])
     json_bytes = canonical(bundle)
