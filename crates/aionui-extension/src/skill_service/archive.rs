@@ -1,5 +1,7 @@
+mod layout;
+
 use std::collections::HashSet;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::ExtensionError;
@@ -14,16 +16,23 @@ use super::{MAX_SKILL_IMPORT_FILE_BYTES, MAX_SKILL_IMPORT_TOTAL_BYTES};
 const MAX_ZIP_ENTRIES: usize = 4096;
 const MAX_ZIP_COMPRESSION_RATIO: u64 = 200;
 
-pub(super) fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), ExtensionError> {
+pub(super) struct OversizedZipFile {
+    pub relative_path: PathBuf,
+    pub file_bytes: u64,
+}
+
+pub(super) fn extract_zip_archive(
+    archive_path: &Path,
+    destination: &Path,
+) -> Result<Vec<OversizedZipFile>, ExtensionError> {
     let file = std::fs::File::open(archive_path)?;
     let raw_entry_reader = file.try_clone()?;
     let mut archive = zip::ZipArchive::new(file).map_err(zip_error)?;
     enforce_entry_count(archive.len())?;
-    if archive.has_duplicate_names() {
-        enforce_raw_entry_count(raw_entry_reader, archive.central_directory_start())?;
-    }
+    layout::validate(&mut archive, raw_entry_reader)?;
     let mut output_paths = HashSet::new();
     let mut total_bytes = 0_u64;
+    let mut oversized = Vec::new();
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(zip_error)?;
@@ -46,36 +55,21 @@ pub(super) fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Re
         }
         let mut output = std::fs::File::create(&output_path)?;
         let compressed_bytes = entry.compressed_size();
-        copy_entry(&mut entry, &mut output, &entry_name, compressed_bytes, &mut total_bytes)?;
-    }
-
-    Ok(())
-}
-
-fn enforce_raw_entry_count(file: std::fs::File, directory_start: u64) -> Result<(), ExtensionError> {
-    // zip 9's len() counts unique names. Preserve supported duplicate entries,
-    // but bound their raw count too. The library has already validated this
-    // central directory; only walk its length-delimited records, without data
-    // allocation/decompression, and stop immediately on the 4097th record.
-    let mut reader = io::BufReader::new(file);
-    reader.seek(SeekFrom::Start(directory_start)).map_err(invalid_zip_io)?;
-    let mut count = 0;
-    loop {
-        let mut signature = [0; 4];
-        reader.read_exact(&mut signature).map_err(invalid_zip_io)?;
-        if signature != *b"PK\x01\x02" {
-            return Ok(());
+        match copy_entry(&mut entry, &mut output, &entry_name, compressed_bytes, &mut total_bytes) {
+            Ok(()) => {}
+            Err(ExtensionError::SkillImportFileTooLarge { file_bytes, .. }) => {
+                drop(output);
+                std::fs::remove_file(&output_path)?;
+                oversized.push(OversizedZipFile {
+                    relative_path,
+                    file_bytes,
+                });
+            }
+            Err(error) => return Err(error),
         }
-        count += 1;
-        enforce_entry_count(count)?;
-        let mut header = [0; 42];
-        reader.read_exact(&mut header).map_err(invalid_zip_io)?;
-        let skip: i64 = [24, 26, 28]
-            .into_iter()
-            .map(|offset| i64::from(u16::from_le_bytes([header[offset], header[offset + 1]])))
-            .sum();
-        reader.seek(SeekFrom::Current(skip)).map_err(invalid_zip_io)?;
     }
+
+    Ok(oversized)
 }
 
 fn enforce_entry_count(entry_count: usize) -> Result<(), ExtensionError> {
@@ -113,13 +107,11 @@ fn copy_entry(
         };
         let next_file_bytes = file_bytes + count as u64;
         let next_total_bytes = *total_bytes + count as u64;
-        if next_file_bytes > MAX_SKILL_IMPORT_FILE_BYTES {
-            return Err(ExtensionError::SkillImportFileTooLarge {
-                file_path: Some(name.to_owned()),
-                file_bytes: next_file_bytes,
-                limit_bytes: MAX_SKILL_IMPORT_FILE_BYTES,
-            });
-        }
+        // Charge decoded bytes, including the 50 MiB + 1 probe, permanently.
+        // Deleting a partial file never refunds budget: repeated skipped files
+        // cannot buy more expansion work or hide earlier disk writes. This is
+        // conservatively at least all bytes written, not header size accounting.
+        *total_bytes = next_total_bytes;
         if next_total_bytes > MAX_SKILL_IMPORT_TOTAL_BYTES {
             return Err(ExtensionError::SkillImportZipTooLarge {
                 total_bytes: next_total_bytes,
@@ -134,9 +126,15 @@ fn copy_entry(
                 limit_ratio: MAX_ZIP_COMPRESSION_RATIO,
             });
         }
+        if next_file_bytes > MAX_SKILL_IMPORT_FILE_BYTES {
+            return Err(ExtensionError::SkillImportFileTooLarge {
+                file_path: Some(name.to_owned()),
+                file_bytes: next_file_bytes,
+                limit_bytes: MAX_SKILL_IMPORT_FILE_BYTES,
+            });
+        }
         output.write_all(&buffer[..count])?;
         file_bytes = next_file_bytes;
-        *total_bytes = next_total_bytes;
     }
 }
 
@@ -214,7 +212,7 @@ mod tests {
             if file_bytes == MAX_SKILL_IMPORT_FILE_BYTES + 1)
         );
         assert_eq!(output.0, MAX_SKILL_IMPORT_FILE_BYTES);
-        assert_eq!(total, output.0);
+        assert_eq!(total, MAX_SKILL_IMPORT_FILE_BYTES + 1);
         assert_eq!(input.limit(), 0);
     }
 
@@ -230,7 +228,7 @@ mod tests {
             if total_bytes == MAX_SKILL_IMPORT_TOTAL_BYTES + 1)
         );
         assert_eq!(output.0, 0);
-        assert_eq!(total, initial);
+        assert_eq!(total, MAX_SKILL_IMPORT_TOTAL_BYTES + 1);
         assert_eq!(input.limit(), 91);
     }
 
@@ -256,8 +254,46 @@ mod tests {
                     })
                 ));
                 assert_eq!(output.0, 0);
-                assert_eq!(total, 0);
+                assert_eq!(total, 201);
             }
         }
+    }
+
+    #[test]
+    fn extractor_removes_partial_oversized_file_before_continuing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("partial.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(6));
+        writer.start_file("bad/data.bin", options).unwrap();
+        let mut state = 1_u32;
+        let mut block = [0_u8; 4096];
+        for byte in &mut block {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        let mut remaining = MAX_SKILL_IMPORT_FILE_BYTES + 1;
+        while remaining > 0 {
+            let count = remaining.min(block.len() as u64) as usize;
+            writer.write_all(&block[..count]).unwrap();
+            remaining -= count as u64;
+        }
+        writer.start_file("good/keep", options).unwrap();
+        writer.write_all(b"retained").unwrap();
+        writer.finish().unwrap();
+        assert!(std::fs::metadata(&archive).unwrap().len() < 2 * 1024 * 1024);
+        let destination = tmp.path().join("extracted");
+
+        let oversized = extract_zip_archive(&archive, &destination).unwrap();
+
+        assert_eq!(oversized.len(), 1);
+        assert_eq!(oversized[0].relative_path, Path::new("bad/data.bin"));
+        assert_eq!(oversized[0].file_bytes, MAX_SKILL_IMPORT_FILE_BYTES + 1);
+        assert!(!destination.join("bad/data.bin").exists());
+        assert_eq!(std::fs::read(destination.join("good/keep")).unwrap(), b"retained");
     }
 }

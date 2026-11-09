@@ -1,6 +1,5 @@
 mod archive;
-
-use archive::extract_zip_archive;
+mod import_staging;
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -718,7 +717,10 @@ pub async fn import_skills(paths: &SkillPaths, source_path: &Path) -> Result<Ski
 
         return import_skill_dirs_batch(
             paths,
-            skills.into_iter().map(|skill| PathBuf::from(skill.path)).collect(),
+            skills
+                .into_iter()
+                .map(|skill| SkillImportCandidate::from(PathBuf::from(skill.path)))
+                .collect(),
             operation_id,
         )
         .await;
@@ -750,55 +752,23 @@ pub async fn import_skills_with_repo_for_user(
     let source_path_text = source_path.to_string_lossy().into_owned();
 
     if is_zip_path(source_path) {
-        let temp_root = paths.user_skills_dir.join(".import-tmp");
-        tokio::fs::create_dir_all(&temp_root).await?;
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let extract_dir = temp_root.join(format!("skills-{}-{nonce}", std::process::id()));
-        tokio::fs::create_dir_all(&extract_dir).await?;
-
-        let archive = source_path.to_path_buf();
-        let destination = extract_dir.clone();
-        let extraction = tokio::task::spawn_blocking(move || extract_zip_archive(&archive, &destination))
-            .await
-            .unwrap_or_else(|e| {
-                Err(ExtensionError::SkillImportInvalidZip(format!(
-                    "Zip extraction task failed: {e}"
-                )))
-            });
-
-        if let Err(err) = extraction {
-            cleanup_zip_staging(&extract_dir, &temp_root).await;
-            return Err(err);
+        let extracted = import_staging::extract_to_staging(&paths.user_skills_dir, source_path).await?;
+        let skill_dirs = zip_skill_candidates(&extracted).await?;
+        if skill_dirs.is_empty() {
+            return Err(ExtensionError::SkillImportNoSkillFound(
+                source_path.display().to_string(),
+            ));
         }
-
-        let result = async {
-            let mut skill_dirs = Vec::new();
-            collect_skill_dirs_recursive(&extract_dir, &mut skill_dirs).await?;
-            if skill_dirs.is_empty() {
-                return Err(ExtensionError::SkillImportNoSkillFound(
-                    source_path.display().to_string(),
-                ));
-            }
-
-            import_skill_dirs_batch_with_repo(
-                paths,
-                repo,
-                user_id,
-                skill_dirs,
-                &operation_id,
-                &source_label,
-                Some(&source_path_text),
-            )
-            .await
-        }
+        return import_skill_dirs_batch_with_repo(
+            paths,
+            repo,
+            user_id,
+            skill_dirs,
+            &operation_id,
+            &source_label,
+            Some(&source_path_text),
+        )
         .await;
-
-        cleanup_zip_staging(&extract_dir, &temp_root).await;
-        return result;
     }
 
     let source_path = normalize_import_source_path(source_path)?;
@@ -811,7 +781,7 @@ pub async fn import_skills_with_repo_for_user(
                 paths,
                 repo,
                 user_id,
-                vec![source_path],
+                vec![source_path.into()],
                 &operation_id,
                 &source_label,
                 Some(&source_path_text),
@@ -830,7 +800,10 @@ pub async fn import_skills_with_repo_for_user(
             paths,
             repo,
             user_id,
-            skills.into_iter().map(|skill| PathBuf::from(skill.path)).collect(),
+            skills
+                .into_iter()
+                .map(|skill| SkillImportCandidate::from(PathBuf::from(skill.path)))
+                .collect(),
             &operation_id,
             &source_label,
             Some(&source_path_text),
@@ -843,78 +816,109 @@ pub async fn import_skills_with_repo_for_user(
     ))
 }
 
-async fn cleanup_zip_staging(extract_dir: &Path, temp_root: &Path) {
-    if let Err(err) = tokio::fs::remove_dir_all(extract_dir).await
-        && err.kind() != io::ErrorKind::NotFound
-    {
-        warn!(error_kind = ?err.kind(), "failed to clean skill zip extraction staging");
-    }
-    // A concurrent import can still own another child of the shared temp root.
-    if let Err(err) = tokio::fs::remove_dir(temp_root).await
-        && !matches!(err.kind(), io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty)
-    {
-        warn!(error_kind = ?err.kind(), "failed to remove empty skill zip temporary root");
-    }
+/// Remove abandoned extraction staging before the startup catalog scan. Active
+/// imports retain a shared OS lease; cleanup only takes an exclusive try-lock.
+pub async fn cleanup_skill_import_staging(paths: &SkillPaths) -> Result<bool, ExtensionError> {
+    let user_skills_dir = paths.user_skills_dir.clone();
+    tokio::task::spawn_blocking(move || import_staging::cleanup_abandoned(&user_skills_dir))
+        .await
+        .map_err(|error| ExtensionError::Internal(format!("Skill staging cleanup task failed: {error}")))?
 }
 
 async fn import_skills_from_zip(paths: &SkillPaths, archive_path: &Path) -> Result<SkillImportOutcome, ExtensionError> {
-    let temp_root = paths.user_skills_dir.join(".import-tmp");
-    tokio::fs::create_dir_all(&temp_root).await?;
-
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let extract_dir = temp_root.join(format!("skills-{}-{nonce}", std::process::id()));
-    tokio::fs::create_dir_all(&extract_dir).await?;
-
-    let archive = archive_path.to_path_buf();
-    let destination = extract_dir.clone();
-    let extraction = tokio::task::spawn_blocking(move || extract_zip_archive(&archive, &destination))
-        .await
-        .unwrap_or_else(|e| {
-            Err(ExtensionError::SkillImportInvalidZip(format!(
-                "Zip extraction task failed: {e}"
-            )))
-        });
-
-    if let Err(err) = extraction {
-        cleanup_zip_staging(&extract_dir, &temp_root).await;
-        return Err(err);
+    let extracted = import_staging::extract_to_staging(&paths.user_skills_dir, archive_path).await?;
+    let skill_dirs = zip_skill_candidates(&extracted).await?;
+    if skill_dirs.is_empty() {
+        return Err(ExtensionError::SkillImportNoSkillFound(
+            archive_path.display().to_string(),
+        ));
     }
+    import_skill_dirs_batch(
+        paths,
+        skill_dirs,
+        aionui_common::generate_prefixed_id("skill_import_op"),
+    )
+    .await
+}
 
-    let result = async {
-        let mut skill_dirs = Vec::new();
-        collect_skill_dirs_recursive(&extract_dir, &mut skill_dirs).await?;
-        if skill_dirs.is_empty() {
-            return Err(ExtensionError::SkillImportNoSkillFound(
-                archive_path.display().to_string(),
-            ));
+struct SkillImportCandidate {
+    path: PathBuf,
+    failure: Option<ExtensionError>,
+}
+
+impl From<PathBuf> for SkillImportCandidate {
+    fn from(path: PathBuf) -> Self {
+        Self { path, failure: None }
+    }
+}
+
+async fn zip_skill_candidates(
+    extracted: &import_staging::ExtractedZip,
+) -> Result<Vec<SkillImportCandidate>, ExtensionError> {
+    let root = extracted.staging.path();
+    let mut directories = Vec::new();
+    // This trusted staging root is deliberately entered; ordinary disk scans
+    // never enter any .import-tmp subtree.
+    collect_skill_dirs_inside(root, &mut directories).await?;
+    for file in &extracted.oversized {
+        if file
+            .relative_path
+            .file_name()
+            .is_some_and(|name| name == SKILL_MANIFEST_FILE)
+            && !file
+                .relative_path
+                .components()
+                .any(|part| part.as_os_str() == import_staging::TEMP_DIR_NAME)
+        {
+            directories.push(root.join(file.relative_path.parent().unwrap_or(Path::new(""))));
         }
-
-        import_skill_dirs_batch(
-            paths,
-            skill_dirs,
-            aionui_common::generate_prefixed_id("skill_import_op"),
-        )
-        .await
     }
-    .await;
-
-    cleanup_zip_staging(&extract_dir, &temp_root).await;
-    result
+    // Match recursive discovery: an outer SKILL.md owns its entire subtree,
+    // including a nested/oversized SKILL.md whose partial file was removed.
+    directories.sort_by_key(|path| path.components().count());
+    let mut outermost: Vec<PathBuf> = Vec::new();
+    for directory in directories {
+        if !outermost.iter().any(|parent| directory.starts_with(parent)) {
+            outermost.push(directory);
+        }
+    }
+    outermost.sort();
+    Ok(outermost
+        .into_iter()
+        .map(|path| {
+            let failure = extracted
+                .oversized
+                .iter()
+                .find(|file| root.join(&file.relative_path).starts_with(&path))
+                .map(|file| ExtensionError::SkillImportFileTooLarge {
+                    file_path: root
+                        .join(&file.relative_path)
+                        .strip_prefix(&path)
+                        .ok()
+                        .map(|relative| relative.to_string_lossy().into_owned()),
+                    file_bytes: file.file_bytes,
+                    limit_bytes: MAX_SKILL_IMPORT_FILE_BYTES,
+                });
+            SkillImportCandidate { path, failure }
+        })
+        .collect())
 }
 
 async fn import_skill_dirs_batch(
     paths: &SkillPaths,
-    skill_dirs: Vec<PathBuf>,
+    skill_dirs: Vec<SkillImportCandidate>,
     operation_id: String,
 ) -> Result<SkillImportOutcome, ExtensionError> {
     let mut imported = Vec::new();
     let mut failed = Vec::new();
 
-    for skill_dir in skill_dirs {
-        match import_skill(paths, &skill_dir).await {
+    for candidate in skill_dirs {
+        let skill_dir = candidate.path;
+        let result = match candidate.failure {
+            Some(error) => Err(error),
+            None => import_skill(paths, &skill_dir).await,
+        };
+        match result {
             Ok(name) => imported.push(name),
             Err(err) => failed.push(skill_import_failure_from_error(&import_source_name(&skill_dir), &err)),
         }
@@ -940,7 +944,7 @@ async fn import_skill_dirs_batch_with_repo(
     paths: &SkillPaths,
     repo: &dyn ISkillRepository,
     user_id: &str,
-    skill_dirs: Vec<PathBuf>,
+    skill_dirs: Vec<SkillImportCandidate>,
     operation_id: &str,
     source_label: &str,
     source_path: Option<&str>,
@@ -948,9 +952,14 @@ async fn import_skill_dirs_batch_with_repo(
     let mut imported = Vec::new();
     let mut failed = Vec::new();
 
-    for skill_dir in skill_dirs {
+    for candidate in skill_dirs {
+        let skill_dir = candidate.path;
         let source_name = import_source_name(&skill_dir);
-        match import_skill_with_repo_for_user(paths, repo, user_id, &skill_dir).await {
+        let result = match candidate.failure {
+            Some(error) => Err(error),
+            None => import_skill_with_repo_for_user(paths, repo, user_id, &skill_dir).await,
+        };
+        match result {
             Ok(skill) => {
                 repo.create_import_record_for_user(
                     user_id,
@@ -1664,6 +1673,12 @@ fn dedupe_user_visible_skill_rows(rows: Vec<SkillRow>) -> Vec<SkillRow> {
     let mut merged: Vec<SkillRow> = Vec::new();
 
     for row in rows {
+        // Older startups could have backfilled abandoned staging. Hide those
+        // rows before resolving user/global name precedence, without deleting
+        // catalog history or allowing a stale row to shadow a valid builtin.
+        if is_import_temporary_path(Path::new(&row.path)) {
+            continue;
+        }
         if let Some(index) = merged.iter().position(|existing| existing.name == row.name) {
             if merged[index].user_id.is_none() && row.user_id.is_some() {
                 merged[index] = row;
@@ -2059,6 +2074,24 @@ async fn scan_skill_dirs(dir: &Path) -> Result<Vec<ScannedSkill>, ExtensionError
 }
 
 async fn collect_skill_dirs_recursive(dir: &Path, result: &mut Vec<PathBuf>) -> Result<(), ExtensionError> {
+    if is_import_temporary_path(dir) {
+        return Ok(());
+    }
+    collect_skill_dirs_inside(dir, result).await
+}
+
+fn is_import_temporary_path(path: &Path) -> bool {
+    path.components()
+        .any(|part| part.as_os_str() == import_staging::TEMP_DIR_NAME)
+}
+
+async fn collect_skill_dirs_inside(dir: &Path, result: &mut Vec<PathBuf>) -> Result<(), ExtensionError> {
+    if dir
+        .file_name()
+        .is_some_and(|name| name == import_staging::TEMP_DIR_NAME)
+    {
+        return Ok(());
+    }
     if dir.join(SKILL_MANIFEST_FILE).exists() {
         result.push(dir.to_path_buf());
         return Ok(());
@@ -2073,7 +2106,7 @@ async fn collect_skill_dirs_recursive(dir: &Path, result: &mut Vec<PathBuf>) -> 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let entry_path = entry.path();
         if entry_path.is_dir() {
-            Box::pin(collect_skill_dirs_recursive(&entry_path, result)).await?;
+            Box::pin(collect_skill_dirs_inside(&entry_path, result)).await?;
         }
     }
 

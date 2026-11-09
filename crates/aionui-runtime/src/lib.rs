@@ -10,6 +10,8 @@ pub mod managed_resources_contract;
 pub use managed_resources_contract::current_runtime_key;
 pub mod node_runtime;
 pub mod outbound_policy;
+mod process_probe;
+pub use process_probe::process_may_exist;
 mod registry_npx_lock;
 mod resolver;
 mod shell_env;

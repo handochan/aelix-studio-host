@@ -1,5 +1,8 @@
 //! Exercise archive input through the public import service after the zip upgrade.
 
+#[path = "zip_import_security/review_regressions.rs"]
+mod review_regressions;
+
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -117,12 +120,14 @@ async fn compressed_zip_rejects_file_over_50_mib_without_catalog_or_staging_resi
     let db = init_database_memory().await.unwrap();
     let repo = SqliteSkillRepository::new(db.pool().clone());
 
-    let error = import_skills_with_repo(&paths, &repo, &archive).await.unwrap_err();
+    let outcome = import_skills_with_repo(&paths, &repo, &archive).await.unwrap();
 
-    // Extraction now rejects the whole archive before installation/catalog writes.
-    assert!(matches!(error, ExtensionError::SkillImportFileTooLarge {
-        file_bytes, limit_bytes, ..
-    } if file_bytes == 50 * MIB + 1 && limit_bytes == 50 * MIB));
+    assert!(outcome.imported.is_empty());
+    assert_eq!(outcome.failed.len(), 1);
+    assert_eq!(outcome.failed[0].code, "SKILL_IMPORT_FILE_TOO_LARGE");
+    assert_eq!(outcome.failed[0].actual_bytes, Some((50 * MIB + 1) as i64));
+    assert_eq!(outcome.failed[0].limit_bytes, Some((50 * MIB) as i64));
+    assert_eq!(outcome.failed[0].error_path.as_deref(), Some("data-0.bin"));
     assert!(repo.find_by_name("archive-skill").await.unwrap().is_none());
     assert_clean(&paths);
 }
@@ -222,11 +227,13 @@ async fn zip_cannot_bypass_actual_size_budget_with_forged_header() {
     let mut reader = zip::ZipArchive::new(std::fs::File::open(&archive).unwrap()).unwrap();
     assert_eq!(reader.by_index(1).unwrap().size(), u64::from(u32::MAX - 1));
 
-    let error = import_skills(&paths, &archive).await.unwrap_err();
+    let outcome = import_skills(&paths, &archive).await.unwrap();
 
-    assert!(matches!(error, ExtensionError::SkillImportFileTooLarge {
-        file_bytes, limit_bytes, ..
-    } if file_bytes == 50 * MIB + 1 && limit_bytes == 50 * MIB));
+    assert!(outcome.imported.is_empty());
+    assert_eq!(outcome.failed.len(), 1);
+    assert_eq!(outcome.failed[0].code, "SKILL_IMPORT_FILE_TOO_LARGE");
+    assert_eq!(outcome.failed[0].actual_bytes, Some((50 * MIB + 1) as i64));
+    assert_eq!(outcome.failed[0].limit_bytes, Some((50 * MIB) as i64));
     assert_clean(&paths);
 }
 
