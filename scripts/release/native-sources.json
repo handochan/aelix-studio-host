@@ -192,7 +192,11 @@
             ""
           ],
           "sourceSha256": "1d5a6baa51c3c0209bd37f807c4a1d95b8854e26e759eca53442f26f5e266b59",
-          "version": "1.9.3"
+          "version": "1.9.3",
+          "versionEvidence": {
+            "path": "libgit2/include/git2/version.h",
+            "sha256": "b52f9ec0cd39ab4e11329d3f33ee041eb86d5a02e8b8a3e4833fdf494bddd367"
+          }
         },
         {
           "component": "llhttp",
@@ -207,7 +211,11 @@
             "libgit2/deps/llhttp/"
           ],
           "sourceSha256": "71e020cbc7d48965cf61b0d6360f7a6b8c3f920ae199a2d1a8e8a13d6e54a9e7",
-          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+          "version": "9.2.1",
+          "versionEvidence": {
+            "path": "libgit2/deps/llhttp/llhttp.h",
+            "sha256": "066ec0eea575a2dddad32ab9ca39b2805b69b32187ed78e1231cfee24b786f3c"
+          }
         },
         {
           "component": "xdiff",
@@ -243,7 +251,11 @@
             "libgit2/deps/pcre/"
           ],
           "sourceSha256": "9ab705a95e7ff37ac96d37dc2768e3c7e04ee001ccf01558db54f27d4bb28061",
-          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+          "version": "8.45",
+          "versionEvidence": {
+            "path": "libgit2/deps/pcre/pcre.h",
+            "sha256": "a0cf7c5c7659779e198e31d856fc3d2cbeb73b0caed8d8a95a1b15ce1af28880"
+          }
         },
         {
           "component": "libgit2 zlib copy",
@@ -258,7 +270,11 @@
             "libgit2/deps/zlib/"
           ],
           "sourceSha256": "d747874e53232f0c4c591b515bbb59faefb9b19a17290254fb82326875a37467",
-          "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
+          "version": "1.3.1",
+          "versionEvidence": {
+            "path": "libgit2/deps/zlib/zlib.h",
+            "sha256": "8a5579af72ea4f427ff00a4150f0ccb3fc5c1e4379f726e101133b1ab9fc600c"
+          }
         },
         {
           "component": "libgit2 winhttp definitions",
@@ -356,7 +372,30 @@
             ""
           ],
           "sourceSha256": "b4b214bf567f193108cf165be6988537a1abccc0d503e53bfef0a260a5fbebd2",
-          "version": "packaged snapshot in libz-sys 1.1.31"
+          "version": "1.3.2",
+          "versionEvidence": {
+            "path": "src/zlib/zlib.h",
+            "sha256": "818667d6ab6a37fe7469cb06a7f0cb2c2cb2f2c948a03e5accf1a4a74bf3020a"
+          }
+        },
+        {
+          "component": "zlib-ng alternative",
+          "licenseConditions": "Zlib; optional alternative, retained as source superset.",
+          "notices": [
+            {
+              "path": "src/zlib-ng/LICENSE.md",
+              "sha256": "6c9f0d975b41afaa34d22f55bb8986ce69e5cb7ad327cb2b28820cd425edf5ee"
+            }
+          ],
+          "sourcePrefixes": [
+            "src/zlib-ng/"
+          ],
+          "sourceSha256": "6779c931e585925fb1eedc49599bcc87b726a795a3c33a98cd1e277ad6889355",
+          "version": "2.3.3",
+          "versionEvidence": {
+            "path": "src/zlib-ng/zlib-ng.h.in",
+            "sha256": "0e56e94df2d417619099f8f0f1b97a8af4642b200cb1ade95ceccb962c3f55af"
+          }
         }
       ],
       "crate": "libz-sys",
@@ -558,7 +597,11 @@
             ""
           ],
           "sourceSha256": "ce9a79cc53f46dce39410b9d0015ea23aa4f0e85ed87ee65b179fa2377d60325",
-          "version": "1.5.7"
+          "version": "1.5.7",
+          "versionEvidence": {
+            "path": "zstd/lib/zstd.h",
+            "sha256": "9b4bc8245565c98ccfc61c07749928b57e7c0f6fddb0530c4f6aa1971893d88b"
+          }
         }
       ],
       "crate": "zstd-sys",
