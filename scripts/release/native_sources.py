@@ -57,8 +57,8 @@ def check_native(package, root, policy, linked=None):
     entry, = matches
     if package_hash(root) != entry['packagedFilesSha256']:
         raise ValueError('Native package source hash mismatch: ' + package['name'])
-    archives = list((root.parents[2] / 'cache').glob('*/' + package['name'] + '-' + package['version'] + '.crate'))
-    if len(archives) != 1 or sha256(archives[0].read_bytes()) != entry['sourceArchiveSha256']:
+    archive = root.parents[2] / 'cache' / root.parent.name / (package['name'] + '-' + package['version'] + '.crate')
+    if not archive.is_file() or sha256(archive.read_bytes()) != entry['sourceArchiveSha256']:
         raise ValueError('Native source archive hash mismatch: ' + package['name'])
     if entry['nativeFilesSha256'] != sha256(canonical(inventory)):
         raise ValueError('Native source hash mismatch (new, missing or changed source): ' + package['name'])
