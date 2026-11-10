@@ -272,8 +272,12 @@ remain PR ② of [#2](https://github.com/handochan/aelix-studio-host/issues/2).
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs migration
 immutability, `cargo fmt`, `cargo clippy -D warnings`, `cargo nextest`, the
-release-script tests, a linux-x64 host smoke, and `cargo deny check`
+release-script tests, a linux-x64 host smoke, and `cargo deny --locked check`
 ([`deny.toml`](deny.toml)): advisories, licenses, bans and sources.
+The dependency policy covers the five release targets with default features
+and workspace development dependencies. The release PR workflow also builds
+the default-feature application and runs its smoke on all five targets,
+including Windows and the Linux GLIBC ceilings.
 
 - **Licenses:** crates must use a license on the allow list. Every crate
   marked `publish = false` is skipped, including third-party ones: our
@@ -285,16 +289,21 @@ release-script tests, a linux-x64 host smoke, and `cargo deny check`
 - **Advisories:** dependency updates resolve 19 of the 20 inherited RustSec
   advisories, including all four zip notices, in
   [#7](https://github.com/handochan/aelix-studio-host/issues/7). Calamine 0.38
-  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories
-  fail CI.
-- **Unresolved advisory baseline (2026-11-09):** three advisories published
-  after #7 match the current `Cargo.lock`. RUSTSEC-2026-0459 is
-  `libsqlite3-sys` 0.30.1, through `rusqlite` and `sqlx`. RUSTSEC-2026-0462 is
-  `rmcp` 1.7.0. RUSTSEC-2026-0441 is `pin-utils` 0.1.0, which is unmaintained.
-  They are listed in `deny.toml` so CI fails only on new advisories. This does
-  not fix the advisories or accept their risks: each must be fixed before Beta
-  in [#23](https://github.com/handochan/aelix-studio-host/issues/23), with its
-  baseline entry removed when fixed.
+  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail CI,
+  including transitive unsound notices (`unsound = "all"`), except for the
+  documented baseline and approved exception below. Host #23 upgrades rmcp to
+  3.9.0 (0462), removes pin-utils through AWS updates (0441), and updates
+  event-listener to 5.4.2 (0221) and lru to 0.18.2 (0253).
+  [The dependency change record](docs/host-23-dependencies.md) lists every
+  changed crate, its reason, and the SDK HTTP test scope.
+- **Unresolved advisory baseline (2026-11-10):** RUSTSEC-2026-0459 remains for
+  `libsqlite3-sys` 0.30.1 through unchanged `rusqlite` and `sqlx` dependencies.
+  SQLx SQLite 0.9.0 requires libsqlite3-sys <0.38, which conflicts with the
+  patched 0.39 through `links = "sqlite3"`. The owner chose to wait for a
+  compatible SQLx release without vendoring, patching, or adding an exception.
+  Recheck at Beta preparation in
+  [#23](https://github.com/handochan/aelix-studio-host/issues/23). This baseline
+  is not a fix or risk acceptance; the advisory remains a Beta blocker.
 - **User-approved advisory exception (2026-11-03):** RUSTSEC-2024-0449 is an
   unmaintained notice for `unsafe-libyaml`, with no patched version. It remains
   through both the host's `serde_yaml` and upstream aionrs' `aion-memory`;
