@@ -16,6 +16,8 @@ import build  # noqa: E402
 import identity  # noqa: E402
 import provenance  # noqa: E402
 import smoke  # noqa: E402
+import notices  # noqa: E402
+from test_notices import fixture_bundle  # noqa: E402
 
 ROOT = HERE.parents[1]
 POLICY = json.loads((HERE / 'policy.json').read_text())
@@ -160,9 +162,15 @@ class AssembleTests(unittest.TestCase):
             'policySha256': 'f' * 64, 'buildRecipeSha256': '0' * 64, 'checkoutFilesVerified': 1440,
             'archive': archive_filename or build.archive_name(label, spec['rustTarget']), 'version': version,
         }
+        text, inventory, result = fixture_bundle(spec['rustTarget'], label=label, commit=COMMIT)
+        receipt['thirdPartyNotices'] = result
+        for filename, data in zip(notices.FILES, (text, inventory)):
+            (directory / filename).write_bytes(data)
         (directory / 'build-receipt.json').write_text(json.dumps(receipt))
         members = [(binary, directory / binary, 0o755), ('LICENSE', ROOT / 'LICENSE', 0o644),
-                   ('NOTICE', ROOT / 'NOTICE', 0o644), ('build-receipt.json', directory / 'build-receipt.json', 0o644)]
+                   ('NOTICE', ROOT / 'NOTICE', 0o644)]
+        members += [(filename, directory / filename, 0o644) for filename in notices.FILES]
+        members += [('build-receipt.json', directory / 'build-receipt.json', 0o644)]
         build.write_archive(directory / receipt['archive'], members, 1_700_000_000)
         (directory / 'smoke.json').write_text(json.dumps({
             'status': smoke_status, 'binarySha256': receipt['binarySha256'], 'checks': ['version'],
@@ -186,6 +194,8 @@ class AssembleTests(unittest.TestCase):
                 binary = 'aelix-studio-host.exe' if name.startswith('win32-') else 'aelix-studio-host'
                 self.assertEqual(target['binary'], binary)
                 self.assertEqual(provenance.member_names(output / target['archive']), [binary, *provenance.MEMBERS])
+                self.assertEqual(target['thirdPartyNotices']['status'], 'passed')
+                notices.verify_output(source / ('release-' + name))
             self.assertEqual(result['upstream']['commitsSinceUpstream'], 3)
             self.assertTrue(result['build']['runUrl'].endswith('/actions/runs/42'))
             lines = (output / provenance.CHECKSUMS).read_text().splitlines()

@@ -22,6 +22,7 @@ on:
       - "scripts/check-glibc-baseline.sh"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "deny.toml"
       - "crates/*/Cargo.toml"
       - "rust-toolchain.toml"
       - ".gitattributes"
@@ -107,6 +108,8 @@ jobs:
           fi
           "${PYTHON}" -I -B scripts/release/build.py --target "${TARGET}" --label "${LABEL}" \
             --output "dist/release-${TARGET}" --target-dir "${RUNNER_TEMP}/cargo-target" "${cargo_args[@]}"
+      - name: Verify archived third-party notices and allow lists
+        run: '"${PYTHON}" -I -B scripts/release/notices.py --verify-output "dist/release-${TARGET}"'
       - name: Host smoke
         run: |
           binary=aelix-studio-host
@@ -120,6 +123,11 @@ jobs:
           path: |
             dist/release-${{ matrix.target }}/build-receipt.json
             dist/release-${{ matrix.target }}/smoke.json
+            dist/release-${{ matrix.target }}/third-party-result.json
+            dist/release-${{ matrix.target }}/THIRD-PARTY-NOTICES.txt
+            dist/release-${{ matrix.target }}/third-party-licenses.json
+            dist/release-${{ matrix.target }}/cargo-build.jsonl
+            dist/release-${{ matrix.target }}/license-work/cargo-about.stderr
             dist/release-${{ matrix.target }}/aelix-studio-host-*
           if-no-files-found: error
           retention-days: 30

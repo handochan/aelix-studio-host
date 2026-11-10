@@ -41,7 +41,8 @@ The facts below are recorded without a legal interpretation.
   [aionrs](https://github.com/iOfficeAI/aionrs) (`Cargo.toml` at `v0.2.11`, a
   dependency of this workspace) declare Apache-2.0.
 
-Every release archive contains `LICENSE` and `NOTICE`.
+Every new release archive contains `LICENSE`, `NOTICE`,
+`THIRD-PARTY-NOTICES.txt` and `third-party-licenses.json`.
 
 ## Modifications
 
@@ -96,7 +97,8 @@ separate, reviewed commits.
   `aelix-studio-host 0.2.2`); the tag and provenance identify the Aelix build.
 - Release tags never start with `v`, so they cannot collide with the upstream
   `v*` tags, and the release workflow only reacts to `host-v*`.
-- Each archive contains `aelix-studio-host` (`aelix-studio-host.exe`), `LICENSE`, `NOTICE` and
+- Each archive contains `aelix-studio-host` (`aelix-studio-host.exe`), `LICENSE`, `NOTICE`,
+  `THIRD-PARTY-NOTICES.txt`, `third-party-licenses.json` and
   that target's `build-receipt.json`. Rust targets are
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
   `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. Upstream's
@@ -108,6 +110,11 @@ separate, reviewed commits.
   signing), compiler versions, Rust flags, the Linux build container and its
   measured GLIBC requirement, and the host smoke result. It is a plain JSON
   record, not a signed attestation.
+- Third-party notice generation is mandatory for release and dry-run builds.
+  Each receipt and the assembled provenance record the generator/helper hashes,
+  cargo-about version, verified tool archive and executable hashes, arguments,
+  result/config/diagnostic hashes, policy hashes, package counts and both notice
+  file hashes. A source-only audit cannot pass archive assembly.
 
 Studio pins a release by tag plus the archive SHA-256 from
 `aelix-studio-host-checksums.txt`, and downloads
@@ -158,7 +165,8 @@ checks do not establish that Studio launches it.
    turn, idle state and graceful shutdown.
 4. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
    every receipt, archive member and smoke report, then writes the checksums
-   and provenance.
+   and provenance. It also rechecks the archived third-party notices against the
+   current crate/native policies and their original-notice hashes.
 5. **Publish** (tag runs only) creates the GitHub release. This workflow
    refuses an existing release and never replaces its assets; that is a
    property of this workflow, not of the repository.
@@ -186,6 +194,34 @@ python3 scripts/release/smoke.py --binary /tmp/aelix-studio-host-linux-arm64/ael
 On Linux the smoke can run directly; from macOS, run it inside the build image
 (`docker run ... python3 scripts/release/smoke.py ...`). Native targets need
 the Rust toolchain pinned in `rust-toolchain.toml`.
+
+#### Rebuilding with modified LGPL sources
+
+The notice bundle and release notes identify the actual host release tag and
+commit, the public source tree and that ref's `Cargo.lock`. Dry runs have no
+release tag and identify the exact source commit instead. Check out that ref in
+a separate local checkout before making changes.
+
+Use the pinned Rust toolchain and `cargo fetch --locked` to obtain the original
+dependencies. `cargo metadata --locked --format-version 1` identifies the source
+directory for `libgit2-sys`; copy that whole package to a local dependency fork
+and edit its `libgit2/deps/xdiff` sources. Preserve its original LGPL notices.
+Build the host with a local Cargo patch, for example on a matching native target:
+
+```sh
+cargo --config 'patch.crates-io.libgit2-sys.path="/absolute/path/to/modified-libgit2-sys"' \
+  build --release -p aionui-app --bin aelix-studio-host --target <rust-target>
+```
+
+The local patch intentionally updates the modified checkout's lockfile to the
+local source; the release tag's original `Cargo.lock` remains the reference for
+the unmodified dependency versions and checksums. Use the release policy's Rust
+flags for the selected target (`-C target-feature=+crt-static` on Windows), and
+the pinned Linux build image above for Linux builds. This ordinary Cargo build
+produces the modified host without requiring the release allow list to accept
+changed source hashes. Distributing a new release through the strict packaging
+pipeline requires auditing the modified sources and updating their native-source
+and notice hashes in that fork.
 
 ## Update checks and existing data
 
@@ -274,6 +310,131 @@ including Windows and the Linux GLIBC ceilings.
   changing only the host parser cannot remove it. The owner approved this one
   exception separately from the unresolved baseline. Removal is tracked in
   [Later #18](https://github.com/handochan/aelix-studio-host/issues/18).
+
+### Third-party release notices
+
+[`notices.py`](scripts/release/notices.py) uses **cargo-about 0.8.4**, with
+all five runner archives pinned by SHA-256 in
+[`license-tools.json`](scripts/release/license-tools.json). This version supplies
+both macOS architectures, Linux musl executables for the Debian build containers,
+and Windows x64. Its root-manifest/target filtering and SPDX alternative selection
+avoid inventing a second license detector. No ClearlyDefined data or mutable
+upstream downloads are used during license resolution. The tool is downloaded
+from its fixed release, checksum-verified, extracted without executing archive
+paths, and its version is checked before use.
+
+Each target uses the default features of `aionui-app`, its own target-filtered
+graph and `--locked --offline --fail`. Build dependencies are deliberately retained
+as a conservative superset; dev dependencies are excluded. The five graphs differ,
+so no cross-target union is substituted. Crate SPDX choices are checked against
+`deny.toml`, including exact-name/exact-version exceptions. Unsupported policy
+syntax, a missing license text/original, nonzero exit, or an error/parse diagnostic
+on stderr fails the build even if the tool exits zero. `deny.toml` is not modified.
+
+The separate native-source allow list is
+[`native-sources.json`](scripts/release/native-sources.json), following the
+[owner's host #20 decision](https://github.com/handochan/aelix-studio-host/issues/20).
+Every entry pins the package version, original `.crate` SHA-256, unpacked package
+file inventory, native file inventory, build recipe, component/source hashes,
+license conditions and verbatim notice-file hashes. Components include libgit2
+1.9.3 with its complete `COPYING`/LINKING EXCEPTION, llhttp, xdiff, PCRE, libgit2's
+alternative zlib/winhttp sources, SQLite 3.46.0's disclaimer/blessing and optional
+SQLCipher source, AWS-LC and its Fiat/s2n-bignum/Jitter Entropy code, ring, zlib/
+zlib-ng, Zstandard 1.5.7 and the BZip2 Rust implementation/header. Snapshot-only
+subcomponents are identified by their containing package version and exact source
+hash rather than an invented upstream version. Compiler probes, benchmark/test
+files and Windows import libraries are also inventoried, with their package
+licenses; this does not assert they are runtime C implementations.
+
+Discovery scans C/C++/Objective-C, assembly, headers and prebuilt native libraries
+in the resolved package sources, together with `links` declarations. This includes
+`.inc`, `.inl`, `.hh`, `.ipp`, `.tcc`, `.sx`, `.nasm`, `.c++`, `.cppm`, `.def`,
+Perl assembly generators (`.pl`), CUDA sources and native `.in` templates, in
+addition to the usual `.c`/`.h`/`.S` and library/object extensions. It checks
+all files of each native package as well as native files and build recipes, so
+new/removed/changed source or templates cannot silently pass. Private workspace
+packages are scanned too. Unknown native packages, versions, hashes, uncovered
+source paths, missing originals or unknown Cargo native-link outputs fail closed.
+The scanner is an inventory of packaged source, not a general static analyzer of
+arbitrary future build scripts or code downloaded by them.
+
+The [2026-11-11 owner decision](https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765)
+explicitly approves xdiff as **LGPL-2.1-or-later**, separately from libgit2's
+linking exception. xdiff is statically linked in the five default-feature release
+builds. The audited winhttp `.def` source superset receives the same corresponding
+source information; these definition files are unused by MSVC. Every affected
+notice preamble and generated release note names the public host repository,
+actual release tag/commit, that ref's Cargo.lock and the rebuild procedure above.
+Missing or altered LGPL preambles and mismatched tag/commit references fail
+archive verification and assembly.
+
+The expanded source inventory changed four existing packages; original package,
+archive, build recipe and notice bytes did not change. `inventoryReview` in the
+native policy records every added path and before/after inventory hash:
+
+| Package | Previous → expanded files | Added source categories |
+| --- | ---: | --- |
+| aws-lc-sys 0.47.0 | 1908 → 1990 | 75 `.pl`, 4 `.inc`, 3 header `.in` |
+| libgit2-sys 0.18.4+1.9.3 | 564 → 569 | 2 winhttp `.def`, 3 header `.in` |
+| libz-sys 1.1.31 | 179 → 186 | 7 zlib-ng header `.in` |
+| ring 0.17.14 | 152 → 193 | 38 `.pl`, 2 `.inl`, 1 `.inc` |
+
+Their existing Apache/ISC/Zlib source notices remain applicable; the newly explicit
+LGPL approval and source guidance are recorded on xdiff/winhttp. No crate version
+or dependency license selection changed.
+
+`cargo build --message-format=json-render-diagnostics` supplies the actual
+`build-script-executed` link evidence for each release binary. Native records
+distinguish explicit `static=` links, system/dynamic link declarations and no
+native link output. A system library does not bypass source/notice checks: the
+same pinned packaged-source superset is retained, and the actual link result is
+recorded. This avoids forcing vendoring or changing dependency features. The
+audited build recipes are `libgit2-sys/build.rs` (system probe then vendored C,
+including llhttp/xdiff/PCRE), `libsqlite3-sys/build.rs` (bundled or system),
+`libz-sys/build.rs`, `zstd-sys/build.rs`, `ring/build.rs` and `aws-lc-sys/builder/`.
+Their hashes are part of the allow list. Native composite-license scanning is
+kept separate from Rust wrapper SPDX selection; checksum-verified wrapper
+clarifications for libgit2-sys and zstd-sys prevent cargo-about's deprecated-GPL
+parse error without discarding the native originals or suppressing diagnostics.
+
+The TXT and JSON retain original licensing files recursively (including `NOTICE`,
+`COPYING`, `COPYRIGHT`, `AUTHORS` and `LICENSES/`), original copyright/SPDX comment
+blocks, and git repository-root licenses. Thus aionrs's original
+`Copyright 2026 iOfficeAI` survives. JSON retains precise file bytes as base64
+with SHA-256; TXT renders them for reading. Where published crates omit a license
+file, [`license-sources.json`](scripts/release/license-sources.json) records the
+exact published VCS revision and hashes of upstream originals checked into
+[`licenses/`](scripts/release/licenses). These supplements cover ACP, SIMD,
+clipboard-win, CRC, include_dir, objc2 and MCP crates; generated canonical text
+alone is not treated as their original copyright notice.
+
+For the current lockfile, the packaged sources contain no separate Apache NOTICE
+files, but an additional upstream VCS-root audit found **two original AWS NOTICE
+texts**, referenced by eleven package/version entries. Those exact originals are
+pinned in `license-sources.json` and retained in every target's bundle. The owner
+also approved directly associating the identical smithy-rs NOTICE with every
+locked `aws-smithy-*` package/version: there are **12** such pairs. The main merge
+for host #23 replaces retired Smithy versions and adds aws-smithy-schema while
+retaining one aws-smithy-http version. The review's historical 18 entries are the entire no-VCS/non-GitHub
+cross-check list, including six unrelated entries. The Smithy associations pin
+the original NOTICE SHA and the distributed `.crate` SHA rather than inventing a
+published VCS revision. This brings the per-target NOTICE references to 23. The audit
+checked 490 upstream directories for 361 Apache-licensed package versions, with
+five repository-URL corrections verified by byte-identical published manifests.
+Its scope and unavailable-revision/non-GitHub cross-checks are recorded in the
+same file; upstream absence is not asserted where a revision is unavailable.
+All published package files are scanned regardless. New Apache package versions
+require an updated NOTICE audit, and any discovered NOTICE is retained verbatim.
+The original host `NOTICE` remains a separate archive member.
+Missing originals fail generation. The source audit and actual per-target counts,
+link choices, originals and `missingNotices` result are available in each build
+receipt/inventory and dry-run artifact. Studio installer integration remains a
+separate step after pinning a host release.
+
+```sh
+python3 -I -B -m unittest discover -s scripts/release -p 'test_*.py' -v
+python3 -I -B scripts/release/notices.py --verify-output dist/release-linux-x64
+```
 
 ## Tags and upstream remotes
 

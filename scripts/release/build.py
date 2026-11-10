@@ -35,6 +35,7 @@ NOTICE_FILES = ('LICENSE', 'NOTICE')
 
 sys.path.insert(0, str(HERE))
 import identity  # noqa: E402
+import notices  # noqa: E402
 
 
 def digest(path):
@@ -149,7 +150,7 @@ def container_prefix(spec, channel, output, target_dir, cache_dir, report):
             '--env', 'RUSTUP_TOOLCHAIN=' + channel,
             '--env', 'RUSTFLAGS=' + spec.get('rustFlags', ''),
             '--volume', str(ROOT) + ':' + str(ROOT) + ':ro',
-            '--volume', str(output) + ':' + str(output) + ':ro',
+            '--volume', str(output) + ':' + str(output) + ':rw',
             '--volume', str(target_dir) + ':' + str(target_dir) + ':rw',
             '--volume', str(cache_dir / 'registry') + ':/usr/local/cargo/registry:rw',
             '--volume', str(cache_dir / 'git') + ':/usr/local/cargo/git:rw',
@@ -217,10 +218,31 @@ def main():
             raise ValueError('Compiler differs from the pinned Rust toolchain ' + channel)
         if container:
             report['buildContainer']['osRelease'] = capture(['cat', '/etc/os-release'])
+        # cargo-about gathers unfiltered metadata before filtering its graph.
+        # Fetch the whole lockfile, including manifests for other platforms;
+        # a target-only fetch leaves offline metadata incomplete on clean CI.
+        # The emitted notice graph still excludes dev/other-target packages.
+        fetch_argv = [cargo, 'fetch', '--locked']
+        report['licenseFetchArgv'] = fetch_argv
+        subprocess.run([*prefix, *fetch_argv], cwd=ROOT, env=environment, check=True)
         argv = [cargo, 'build', '--locked', '--release', '-p', policy['package'], '--bin', policy['binary'],
-                '--target', rust_target, '--target-dir', str(target_dir)]
+                '--target', rust_target, '--target-dir', str(target_dir), '--message-format=json-render-diagnostics']
         report['buildArgv'] = argv
-        subprocess.run([*prefix, *argv], cwd=ROOT, env=environment, check=True)
+        build_log = output / 'cargo-build.jsonl'
+        with build_log.open('w', encoding='utf-8') as stream:
+            subprocess.run([*prefix, *argv], cwd=ROOT, env=environment, check=True, stdout=stream)
+        report['cargoBuildLogSha256'] = digest(build_log)
+        notices.install_tool(rust_target, output / 'license-work')
+        _, tool = notices.tool_spec(rust_target)
+        subprocess.run([*prefix, 'python3' if container else sys.executable, str(HERE / 'notices.py'),
+                        '--target', rust_target, '--cargo', cargo,
+                        '--tool-archive', str(output / 'license-work' / tool['name']),
+                        '--output', str(output), '--build-log', str(build_log),
+                        '--label', args.label, '--commit', commit],
+                       cwd=ROOT, env=environment, check=True)
+        report['thirdPartyNotices'] = json.loads((output / 'third-party-result.json').read_text(encoding='utf-8'))
+        notices.validate_bundle((output / notices.FILES[0]).read_bytes(), (output / notices.FILES[1]).read_bytes(),
+                                report['thirdPartyNotices'], rust_target, label=args.label, commit=commit)
         binary = output / binary_name
         shutil.copy2(target_dir / rust_target / 'release' / binary_name, binary)
         if container:
@@ -243,7 +265,7 @@ def main():
     finally:
         receipt.write_text(json.dumps(report, indent=2) + '\n')
     members = [(binary_name, output / binary_name, 0o755)]
-    members += [(name, output / name, 0o644) for name in (*NOTICE_FILES, 'build-receipt.json')]
+    members += [(name, output / name, 0o644) for name in (*NOTICE_FILES, *notices.FILES, 'build-receipt.json')]
     write_archive(output / report['archive'], members, epoch)
     print(json.dumps({'status': report['status'], 'archive': report['archive'], 'binarySha256': report['binarySha256']}))
 
