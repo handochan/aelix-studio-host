@@ -413,8 +413,9 @@ files, but an additional upstream VCS-root audit found **two original AWS NOTICE
 texts**, referenced by eleven package/version entries. Those exact originals are
 pinned in `license-sources.json` and retained in every target's bundle. The owner
 also approved directly associating the identical smithy-rs NOTICE with every
-locked `aws-smithy-*` package/version: there are **12** such pairs, including both
-aws-smithy-http versions. The review's 18 entries are the entire no-VCS/non-GitHub
+locked `aws-smithy-*` package/version: there are **12** such pairs. The main merge
+for host #23 replaces retired Smithy versions and adds aws-smithy-schema while
+retaining one aws-smithy-http version. The review's historical 18 entries are the entire no-VCS/non-GitHub
 cross-check list, including six unrelated entries. The Smithy associations pin
 the original NOTICE SHA and the distributed `.crate` SHA rather than inventing a
 published VCS revision. This brings the per-target NOTICE references to 23. The audit

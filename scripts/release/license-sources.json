@@ -226,6 +226,62 @@
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
     },
     {
+      "crate": "aws-config",
+      "version": "1.13.0",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-runtime",
+      "version": "1.10.2",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-sdk-bedrock",
+      "version": "1.166.0",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-sdk-sso",
+      "version": "1.119.0",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-sdk-ssooidc",
+      "version": "1.121.0",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-sdk-sts",
+      "version": "1.124.0",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-types",
+      "version": "1.7.0",
+      "repository": "awslabs/aws-sdk-rust",
+      "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
       "crate": "aws-smithy-async",
       "version": "1.3.1",
       "repository": "smithy-lang/smithy-rs",
@@ -235,23 +291,6 @@
       "packageBinding": {
         "method": "registry-archive-sha256",
         "sha256": "de681a9df7ff79823b759ee17061076ec049cd61a8fa28ece4293d89c9f6964e"
-      },
-      "approval": {
-        "status": "approved",
-        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
-        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
-      }
-    },
-    {
-      "crate": "aws-smithy-http",
-      "version": "0.63.6",
-      "repository": "smithy-lang/smithy-rs",
-      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
-      "path": "NOTICE",
-      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
-      "packageBinding": {
-        "method": "registry-archive-sha256",
-        "sha256": "ba1ab2dc1c2c3749ead27180d333c42f11be8b0e934058fb4b2258ee8dbe5231"
       },
       "approval": {
         "status": "approved",
@@ -278,14 +317,14 @@
     },
     {
       "crate": "aws-smithy-http-client",
-      "version": "1.1.12",
+      "version": "1.5.2",
       "repository": "smithy-lang/smithy-rs",
       "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
       "packageBinding": {
         "method": "registry-archive-sha256",
-        "sha256": "6a2f165a7feee6f263028b899d0a181987f4fa7179a6411a32a439fba7c5f769"
+        "sha256": "859a81364f8185349c584fb41cd8765a400cf982f447adada590cf008a9f3b85"
       },
       "approval": {
         "status": "approved",
@@ -295,14 +334,14 @@
     },
     {
       "crate": "aws-smithy-json",
-      "version": "0.62.5",
+      "version": "0.65.1",
       "repository": "smithy-lang/smithy-rs",
       "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
       "packageBinding": {
         "method": "registry-archive-sha256",
-        "sha256": "9648b0bb82a2eedd844052c6ad2a1a822d1f8e3adee5fbf668366717e428856a"
+        "sha256": "b45f9fc77ffe92c92c341165a01a565bd30c39ecf5aa8c0719b41719009604f9"
       },
       "approval": {
         "status": "approved",
@@ -312,14 +351,14 @@
     },
     {
       "crate": "aws-smithy-observability",
-      "version": "0.2.6",
+      "version": "0.3.0",
       "repository": "smithy-lang/smithy-rs",
       "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
       "packageBinding": {
         "method": "registry-archive-sha256",
-        "sha256": "a06c2315d173edbf1920da8ba3a7189695827002e4c0fc961973ab1c54abca9c"
+        "sha256": "8e86338c869539a581bf161247762a6e87f92c5c075060057b5ed6d06632ed0c"
       },
       "approval": {
         "status": "approved",
@@ -329,14 +368,14 @@
     },
     {
       "crate": "aws-smithy-query",
-      "version": "0.60.15",
+      "version": "0.64.0",
       "repository": "smithy-lang/smithy-rs",
       "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
       "packageBinding": {
         "method": "registry-archive-sha256",
-        "sha256": "1a56d79744fb3edb5d722ef79d86081e121d3b9422cb209eb03aea6aa4f21ebd"
+        "sha256": "165f6265342a313ad6f7a1ac17a0cdba30c522039d3f41d8d6871ce8a2b34ecd"
       },
       "approval": {
         "status": "approved",
@@ -346,14 +385,14 @@
     },
     {
       "crate": "aws-smithy-runtime",
-      "version": "1.11.1",
+      "version": "1.16.2",
       "repository": "smithy-lang/smithy-rs",
       "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
       "packageBinding": {
         "method": "registry-archive-sha256",
-        "sha256": "0504b1ab12debb5959e5165ee5fe97dd387e7aa7ea6a477bfd7635dfe769a4f5"
+        "sha256": "4cb80fb19c084da5fca9d797845735e184445e5b958599440d67529bf6ef1b64"
       },
       "approval": {
         "status": "approved",
@@ -396,6 +435,23 @@
       }
     },
     {
+      "crate": "aws-smithy-schema",
+      "version": "1.1.2",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "9543fc722ed4865ab29fb66bd7ed0bef7b029d265ba8c587144511e30006d431"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
       "crate": "aws-smithy-types",
       "version": "1.9.1",
       "repository": "smithy-lang/smithy-rs",
@@ -414,14 +470,14 @@
     },
     {
       "crate": "aws-smithy-xml",
-      "version": "0.60.15",
+      "version": "0.64.1",
       "repository": "smithy-lang/smithy-rs",
       "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
       "packageBinding": {
         "method": "registry-archive-sha256",
-        "sha256": "0ce02add1aa3677d022f8adf81dcbe3046a95f17a1b1e8979c145cd21d3d22b3"
+        "sha256": "590fdc1a70546b2f7f2061c42eaf173fb6f26d935330d069edc04dbd8f01d924"
       },
       "approval": {
         "status": "approved",
@@ -450,6 +506,7 @@
       "anstyle@1.0.14",
       "anyhow@1.0.103",
       "arboard@3.6.1",
+      "arc-swap@1.9.4",
       "async-channel@2.5.0",
       "async-io@2.6.0",
       "async-lock@3.4.2",
@@ -460,31 +517,32 @@
       "atoi_simd@0.18.1",
       "atomic-waker@1.1.2",
       "autocfg@1.5.0",
-      "aws-config@1.8.16",
+      "aws-config@1.13.0",
       "aws-credential-types@1.3.1",
       "aws-lc-rs@1.19.0",
       "aws-lc-sys@0.47.0",
-      "aws-runtime@1.7.3",
-      "aws-sdk-bedrock@1.141.0",
-      "aws-sdk-sso@1.98.0",
-      "aws-sdk-ssooidc@1.100.0",
-      "aws-sdk-sts@1.103.0",
+      "aws-runtime@1.10.2",
+      "aws-sdk-bedrock@1.166.0",
+      "aws-sdk-sso@1.119.0",
+      "aws-sdk-ssooidc@1.121.0",
+      "aws-sdk-sts@1.124.0",
       "aws-sigv4@1.6.4",
       "aws-smithy-async@1.3.1",
-      "aws-smithy-http-client@1.1.12",
-      "aws-smithy-http@0.63.6",
+      "aws-smithy-http-client@1.5.2",
       "aws-smithy-http@0.64.3",
-      "aws-smithy-json@0.62.5",
-      "aws-smithy-observability@0.2.6",
-      "aws-smithy-query@0.60.15",
+      "aws-smithy-json@0.65.1",
+      "aws-smithy-observability@0.3.0",
+      "aws-smithy-query@0.64.0",
       "aws-smithy-runtime-api-macros@1.2.0",
       "aws-smithy-runtime-api@1.19.2",
-      "aws-smithy-runtime@1.11.1",
+      "aws-smithy-runtime@1.16.2",
+      "aws-smithy-schema@1.1.2",
       "aws-smithy-types@1.9.1",
-      "aws-smithy-xml@0.60.15",
-      "aws-types@1.3.15",
+      "aws-smithy-xml@0.64.1",
+      "aws-types@1.7.0",
       "base16ct@1.0.0",
       "base64@0.22.1",
+      "base64@0.23.1",
       "base64ct@1.8.3",
       "bitflags@2.11.1",
       "block-buffer@0.10.4",
@@ -552,7 +610,7 @@
       "equivalent@1.0.2",
       "errno@0.3.14",
       "event-listener-strategy@0.5.4",
-      "event-listener@5.4.1",
+      "event-listener@5.4.2",
       "fallible-iterator@0.3.0",
       "fallible-streaming-iterator@0.1.9",
       "fast-float2@0.2.3",
@@ -594,7 +652,6 @@
       "heck@0.5.0",
       "hex@0.4.3",
       "hmac@0.13.0",
-      "http@0.2.12",
       "http@1.4.0",
       "httparse@1.10.1",
       "httpdate@1.0.3",
@@ -648,7 +705,6 @@
       "pin-project-internal@1.1.13",
       "pin-project-lite@0.2.17",
       "pin-project@1.1.13",
-      "pin-utils@0.1.0",
       "piper@0.2.5",
       "pkcs8@0.11.0",
       "pkg-config@0.3.33",
@@ -678,8 +734,8 @@
       "reqwest@0.12.28",
       "rfc6979@0.6.0",
       "ring@0.17.14",
-      "rmcp-macros@1.7.0",
-      "rmcp@1.7.0",
+      "rmcp-macros@3.9.0",
+      "rmcp@3.9.0",
       "rpassword@7.5.4",
       "rtoolbox@0.0.5",
       "rustc-hash@2.1.2",
@@ -1048,6 +1104,62 @@
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
       },
       {
+        "crate": "aws-config",
+        "version": "1.13.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-runtime",
+        "version": "1.10.2",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-bedrock",
+        "version": "1.166.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-sso",
+        "version": "1.119.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-ssooidc",
+        "version": "1.121.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-sdk-sts",
+        "version": "1.124.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-types",
+        "version": "1.7.0",
+        "repository": "awslabs/aws-sdk-rust",
+        "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
         "crate": "aws-smithy-async",
         "version": "1.3.1",
         "repository": "smithy-lang/smithy-rs",
@@ -1057,23 +1169,6 @@
         "packageBinding": {
           "method": "registry-archive-sha256",
           "sha256": "de681a9df7ff79823b759ee17061076ec049cd61a8fa28ece4293d89c9f6964e"
-        },
-        "approval": {
-          "status": "approved",
-          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
-          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
-        }
-      },
-      {
-        "crate": "aws-smithy-http",
-        "version": "0.63.6",
-        "repository": "smithy-lang/smithy-rs",
-        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
-        "path": "NOTICE",
-        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
-        "packageBinding": {
-          "method": "registry-archive-sha256",
-          "sha256": "ba1ab2dc1c2c3749ead27180d333c42f11be8b0e934058fb4b2258ee8dbe5231"
         },
         "approval": {
           "status": "approved",
@@ -1100,14 +1195,14 @@
       },
       {
         "crate": "aws-smithy-http-client",
-        "version": "1.1.12",
+        "version": "1.5.2",
         "repository": "smithy-lang/smithy-rs",
         "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
         "packageBinding": {
           "method": "registry-archive-sha256",
-          "sha256": "6a2f165a7feee6f263028b899d0a181987f4fa7179a6411a32a439fba7c5f769"
+          "sha256": "859a81364f8185349c584fb41cd8765a400cf982f447adada590cf008a9f3b85"
         },
         "approval": {
           "status": "approved",
@@ -1117,14 +1212,14 @@
       },
       {
         "crate": "aws-smithy-json",
-        "version": "0.62.5",
+        "version": "0.65.1",
         "repository": "smithy-lang/smithy-rs",
         "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
         "packageBinding": {
           "method": "registry-archive-sha256",
-          "sha256": "9648b0bb82a2eedd844052c6ad2a1a822d1f8e3adee5fbf668366717e428856a"
+          "sha256": "b45f9fc77ffe92c92c341165a01a565bd30c39ecf5aa8c0719b41719009604f9"
         },
         "approval": {
           "status": "approved",
@@ -1134,14 +1229,14 @@
       },
       {
         "crate": "aws-smithy-observability",
-        "version": "0.2.6",
+        "version": "0.3.0",
         "repository": "smithy-lang/smithy-rs",
         "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
         "packageBinding": {
           "method": "registry-archive-sha256",
-          "sha256": "a06c2315d173edbf1920da8ba3a7189695827002e4c0fc961973ab1c54abca9c"
+          "sha256": "8e86338c869539a581bf161247762a6e87f92c5c075060057b5ed6d06632ed0c"
         },
         "approval": {
           "status": "approved",
@@ -1151,14 +1246,14 @@
       },
       {
         "crate": "aws-smithy-query",
-        "version": "0.60.15",
+        "version": "0.64.0",
         "repository": "smithy-lang/smithy-rs",
         "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
         "packageBinding": {
           "method": "registry-archive-sha256",
-          "sha256": "1a56d79744fb3edb5d722ef79d86081e121d3b9422cb209eb03aea6aa4f21ebd"
+          "sha256": "165f6265342a313ad6f7a1ac17a0cdba30c522039d3f41d8d6871ce8a2b34ecd"
         },
         "approval": {
           "status": "approved",
@@ -1168,14 +1263,14 @@
       },
       {
         "crate": "aws-smithy-runtime",
-        "version": "1.11.1",
+        "version": "1.16.2",
         "repository": "smithy-lang/smithy-rs",
         "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
         "packageBinding": {
           "method": "registry-archive-sha256",
-          "sha256": "0504b1ab12debb5959e5165ee5fe97dd387e7aa7ea6a477bfd7635dfe769a4f5"
+          "sha256": "4cb80fb19c084da5fca9d797845735e184445e5b958599440d67529bf6ef1b64"
         },
         "approval": {
           "status": "approved",
@@ -1218,6 +1313,23 @@
         }
       },
       {
+        "crate": "aws-smithy-schema",
+        "version": "1.1.2",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "9543fc722ed4865ab29fb66bd7ed0bef7b029d265ba8c587144511e30006d431"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
         "crate": "aws-smithy-types",
         "version": "1.9.1",
         "repository": "smithy-lang/smithy-rs",
@@ -1236,14 +1348,14 @@
       },
       {
         "crate": "aws-smithy-xml",
-        "version": "0.60.15",
+        "version": "0.64.1",
         "repository": "smithy-lang/smithy-rs",
         "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
         "packageBinding": {
           "method": "registry-archive-sha256",
-          "sha256": "0ce02add1aa3677d022f8adf81dcbe3046a95f17a1b1e8979c145cd21d3d22b3"
+          "sha256": "590fdc1a70546b2f7f2061c42eaf173fb6f26d935330d069edc04dbd8f01d924"
         },
         "approval": {
           "status": "approved",
@@ -1256,8 +1368,366 @@
       "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
       "actualLockedPackageVersions": 12,
       "reviewMentionedEntries": 18,
-      "basis": "The 18 no-VCS/non-GitHub cross-check entries contain 12 aws-smithy package/version pairs and 6 unrelated entries. Every locked aws-smithy package/version is associated; unrelated entries are not attributed to Smithy.",
+      "basis": "The original 18 cross-check records contained 12 Smithy pairs and six unrelated entries. After the authorized main merge there remain 12 locked Smithy pairs; aws-smithy-schema replaces retired aws-smithy-http 0.63.6. Every current Smithy pair is bound to the identical NOTICE and its exact distributed archive.",
       "noticeSha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    "mainDependencyRefresh": {
+      "mainCommit": "396eb446c593f832dd7d4e1470785b828ed89525",
+      "reason": "Merge authorized origin/main after host #23 dependency changes invalidated the PR merge-preview NOTICE version test. No Cargo manifest/lock/deny edits beyond the merge.",
+      "auditedNewPackageVersions": [
+        "arc-swap@1.9.4",
+        "aws-config@1.13.0",
+        "aws-runtime@1.10.2",
+        "aws-sdk-bedrock@1.166.0",
+        "aws-sdk-sso@1.119.0",
+        "aws-sdk-ssooidc@1.121.0",
+        "aws-sdk-sts@1.124.0",
+        "aws-smithy-http-client@1.5.2",
+        "aws-smithy-json@0.65.1",
+        "aws-smithy-observability@0.3.0",
+        "aws-smithy-query@0.64.0",
+        "aws-smithy-runtime@1.16.2",
+        "aws-smithy-schema@1.1.2",
+        "aws-smithy-xml@0.64.1",
+        "aws-types@1.7.0",
+        "base64@0.23.1",
+        "event-listener@5.4.2",
+        "rmcp-macros@3.9.0",
+        "rmcp@3.9.0"
+      ],
+      "directoryLookups": 18,
+      "results": [
+        {
+          "crate": "arc-swap",
+          "version": "1.9.4",
+          "repository": "https://github.com/vorner/arc-swap",
+          "vcs": {
+            "git": {
+              "sha1": "3fc4273930e3851a47b9b7f3aaca4f4896220052"
+            },
+            "path_in_vcs": ""
+          },
+          "licensingFiles": [
+            "LICENSE-APACHE",
+            "LICENSE-MIT"
+          ],
+          "verifiedRepository": "vorner/arc-swap",
+          "noticeFiles": []
+        },
+        {
+          "crate": "aws-config",
+          "version": "1.13.0",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": {
+            "git": {
+              "sha1": "b964fc77de60b0a492ff788c40bb66524fd26a44"
+            },
+            "path_in_vcs": "sdk/aws-config"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-config",
+              "version": "1.13.0",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "aws-runtime",
+          "version": "1.10.2",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": {
+            "git": {
+              "sha1": "b964fc77de60b0a492ff788c40bb66524fd26a44"
+            },
+            "path_in_vcs": "sdk/aws-runtime"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-runtime",
+              "version": "1.10.2",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "aws-sdk-bedrock",
+          "version": "1.166.0",
+          "repository": "https://github.com/awslabs/aws-sdk-rust",
+          "vcs": {
+            "git": {
+              "sha1": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7"
+            },
+            "path_in_vcs": "sdk/bedrock"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-sdk-bedrock",
+              "version": "1.166.0",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "aws-sdk-sso",
+          "version": "1.119.0",
+          "repository": "https://github.com/awslabs/aws-sdk-rust",
+          "vcs": {
+            "git": {
+              "sha1": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7"
+            },
+            "path_in_vcs": "sdk/sso"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-sdk-sso",
+              "version": "1.119.0",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "aws-sdk-ssooidc",
+          "version": "1.121.0",
+          "repository": "https://github.com/awslabs/aws-sdk-rust",
+          "vcs": {
+            "git": {
+              "sha1": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7"
+            },
+            "path_in_vcs": "sdk/ssooidc"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-sdk-ssooidc",
+              "version": "1.121.0",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "aws-sdk-sts",
+          "version": "1.124.0",
+          "repository": "https://github.com/awslabs/aws-sdk-rust",
+          "vcs": {
+            "git": {
+              "sha1": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7"
+            },
+            "path_in_vcs": "sdk/sts"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-sdk-sts",
+              "version": "1.124.0",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "44d6380d22c14bd5c89c59ceafcda7bc4da5b6f7",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "aws-smithy-http-client",
+          "version": "1.5.2",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-smithy-json",
+          "version": "0.65.1",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-smithy-observability",
+          "version": "0.3.0",
+          "repository": "https://github.com/awslabs/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-smithy-query",
+          "version": "0.64.0",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-smithy-runtime",
+          "version": "1.16.2",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-smithy-schema",
+          "version": "1.1.2",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-smithy-xml",
+          "version": "0.64.1",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": null,
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "upstream": "no published VCS; approved Smithy NOTICE content association"
+        },
+        {
+          "crate": "aws-types",
+          "version": "1.7.0",
+          "repository": "https://github.com/smithy-lang/smithy-rs",
+          "vcs": {
+            "git": {
+              "sha1": "b964fc77de60b0a492ff788c40bb66524fd26a44"
+            },
+            "path_in_vcs": "sdk/aws-types"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "awslabs/aws-sdk-rust",
+          "noticeFiles": [
+            {
+              "crate": "aws-types",
+              "version": "1.7.0",
+              "repository": "awslabs/aws-sdk-rust",
+              "commit": "b964fc77de60b0a492ff788c40bb66524fd26a44",
+              "path": "NOTICE",
+              "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+            }
+          ]
+        },
+        {
+          "crate": "base64",
+          "version": "0.23.1",
+          "repository": "https://github.com/marshallpierce/rust-base64",
+          "vcs": {
+            "git": {
+              "sha1": "069bf7067b949f5c0a92b6ceb82492920502f2c2"
+            },
+            "path_in_vcs": ""
+          },
+          "licensingFiles": [
+            "LICENSE-APACHE",
+            "LICENSE-MIT"
+          ],
+          "verifiedRepository": "marshallpierce/rust-base64",
+          "noticeFiles": []
+        },
+        {
+          "crate": "event-listener",
+          "version": "5.4.2",
+          "repository": "https://github.com/smol-rs/event-listener",
+          "vcs": {
+            "git": {
+              "sha1": "77004ac77dcef7884bf71a99c276a50f83a7fa4e"
+            },
+            "path_in_vcs": ""
+          },
+          "licensingFiles": [
+            "LICENSE-APACHE",
+            "LICENSE-MIT"
+          ],
+          "verifiedRepository": "smol-rs/event-listener",
+          "noticeFiles": []
+        },
+        {
+          "crate": "rmcp",
+          "version": "3.9.0",
+          "repository": "https://github.com/modelcontextprotocol/rust-sdk/",
+          "vcs": {
+            "git": {
+              "sha1": "5596a8a0bba2a1ec5519cc855cdadf23e4dcecdc"
+            },
+            "path_in_vcs": "crates/rmcp"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "modelcontextprotocol/rust-sdk",
+          "noticeFiles": []
+        },
+        {
+          "crate": "rmcp-macros",
+          "version": "3.9.0",
+          "repository": "https://github.com/modelcontextprotocol/rust-sdk/",
+          "vcs": {
+            "git": {
+              "sha1": "5596a8a0bba2a1ec5519cc855cdadf23e4dcecdc"
+            },
+            "path_in_vcs": "crates/rmcp-macros"
+          },
+          "licensingFiles": [
+            "LICENSE"
+          ],
+          "verifiedRepository": "modelcontextprotocol/rust-sdk",
+          "noticeFiles": []
+        }
+      ],
+      "nativePackagePins": "17 package/archive pins unchanged",
+      "smithyVersionBindings": "all 12 current locked pairs; retired bindings removed"
     }
   },
   "gitRootLicenses": [
