@@ -218,11 +218,11 @@ def main():
             raise ValueError('Compiler differs from the pinned Rust toolchain ' + channel)
         if container:
             report['buildContainer']['osRelease'] = capture(['cat', '/etc/os-release'])
-        # Offline license metadata includes the workspace's target-specific
-        # build/dev manifests, which a package-only build need not download.
-        # Fetch locked inputs first; dev dependencies remain excluded from the
-        # generated distribution notice graph.
-        fetch_argv = [cargo, 'fetch', '--locked', '--target', rust_target]
+        # cargo-about gathers unfiltered metadata before filtering its graph.
+        # Fetch the whole lockfile, including manifests for other platforms;
+        # a target-only fetch leaves offline metadata incomplete on clean CI.
+        # The emitted notice graph still excludes dev/other-target packages.
+        fetch_argv = [cargo, 'fetch', '--locked']
         report['licenseFetchArgv'] = fetch_argv
         subprocess.run([*prefix, *fetch_argv], cwd=ROOT, env=environment, check=True)
         argv = [cargo, 'build', '--locked', '--release', '-p', policy['package'], '--bin', policy['binary'],
