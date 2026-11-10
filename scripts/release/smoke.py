@@ -34,6 +34,7 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from provenance import workspace_version  # noqa: E402
+from mcp_smoke import check_mcp_http  # noqa: E402
 
 AGENT_NAME = 'Host smoke synthetic agent'
 PROMPT = 'HOST_SMOKE_PROMPT'
@@ -200,6 +201,8 @@ def run(binary, python, keep, report):
         code, health = http(host.port, '/health')
         assert code == 200, ('/health', code, health)
         checks.append('health')
+        check_mcp_http(host)
+        checks.append('mcp_http_json_sse_tools_and_rpc_error')
         code, disabled = http(host.port, '/api/system/check-update', 'POST', {'repo': 'iOfficeAI/AionUi'})
         assert code == 400, ('disabled update check', code, disabled)
         assert disabled.get('code') == 'UPDATE_CHECK_DISABLED', disabled
