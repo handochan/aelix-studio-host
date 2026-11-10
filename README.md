@@ -195,6 +195,34 @@ On Linux the smoke can run directly; from macOS, run it inside the build image
 (`docker run ... python3 scripts/release/smoke.py ...`). Native targets need
 the Rust toolchain pinned in `rust-toolchain.toml`.
 
+#### Rebuilding with modified LGPL sources
+
+The notice bundle and release notes identify the actual host release tag and
+commit, the public source tree and that ref's `Cargo.lock`. Dry runs have no
+release tag and identify the exact source commit instead. Check out that ref in
+a separate local checkout before making changes.
+
+Use the pinned Rust toolchain and `cargo fetch --locked` to obtain the original
+dependencies. `cargo metadata --locked --format-version 1` identifies the source
+directory for `libgit2-sys`; copy that whole package to a local dependency fork
+and edit its `libgit2/deps/xdiff` sources. Preserve its original LGPL notices.
+Build the host with a local Cargo patch, for example on a matching native target:
+
+```sh
+cargo --config 'patch.crates-io.libgit2-sys.path="/absolute/path/to/modified-libgit2-sys"' \
+  build --release -p aionui-app --bin aelix-studio-host --target <rust-target>
+```
+
+The local patch intentionally updates the modified checkout's lockfile to the
+local source; the release tag's original `Cargo.lock` remains the reference for
+the unmodified dependency versions and checksums. Use the release policy's Rust
+flags for the selected target (`-C target-feature=+crt-static` on Windows), and
+the pinned Linux build image above for Linux builds. This ordinary Cargo build
+produces the modified host without requiring the release allow list to accept
+changed source hashes. Distributing a new release through the strict packaging
+pipeline requires auditing the modified sources and updating their native-source
+and notice hashes in that fork.
+
 ## Update checks and existing data
 
 `POST /api/system/check-update` is disabled by default, including requests
@@ -310,13 +338,41 @@ files and Windows import libraries are also inventoried, with their package
 licenses; this does not assert they are runtime C implementations.
 
 Discovery scans C/C++/Objective-C, assembly, headers and prebuilt native libraries
-in the resolved package sources, together with `links` declarations. It checks
+in the resolved package sources, together with `links` declarations. This includes
+`.inc`, `.inl`, `.hh`, `.ipp`, `.tcc`, `.sx`, `.nasm`, `.c++`, `.cppm`, `.def`,
+Perl assembly generators (`.pl`), CUDA sources and native `.in` templates, in
+addition to the usual `.c`/`.h`/`.S` and library/object extensions. It checks
 all files of each native package as well as native files and build recipes, so
 new/removed/changed source or templates cannot silently pass. Private workspace
 packages are scanned too. Unknown native packages, versions, hashes, uncovered
 source paths, missing originals or unknown Cargo native-link outputs fail closed.
 The scanner is an inventory of packaged source, not a general static analyzer of
 arbitrary future build scripts or code downloaded by them.
+
+The [2026-11-11 owner decision](https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765)
+explicitly approves xdiff as **LGPL-2.1-or-later**, separately from libgit2's
+linking exception. xdiff is statically linked in the five default-feature release
+builds. The audited winhttp `.def` source superset receives the same corresponding
+source information; these definition files are unused by MSVC. Every affected
+notice preamble and generated release note names the public host repository,
+actual release tag/commit, that ref's Cargo.lock and the rebuild procedure above.
+Missing or altered LGPL preambles and mismatched tag/commit references fail
+archive verification and assembly.
+
+The expanded source inventory changed four existing packages; original package,
+archive, build recipe and notice bytes did not change. `inventoryReview` in the
+native policy records every added path and before/after inventory hash:
+
+| Package | Previous → expanded files | Added source categories |
+| --- | ---: | --- |
+| aws-lc-sys 0.47.0 | 1908 → 1990 | 75 `.pl`, 4 `.inc`, 3 header `.in` |
+| libgit2-sys 0.18.4+1.9.3 | 564 → 569 | 2 winhttp `.def`, 3 header `.in` |
+| libz-sys 1.1.31 | 179 → 186 | 7 zlib-ng header `.in` |
+| ring 0.17.14 | 152 → 193 | 38 `.pl`, 2 `.inl`, 1 `.inc` |
+
+Their existing Apache/ISC/Zlib source notices remain applicable; the newly explicit
+LGPL approval and source guidance are recorded on xdiff/winhttp. No crate version
+or dependency license selection changed.
 
 `cargo build --message-format=json-render-diagnostics` supplies the actual
 `build-script-executed` link evidence for each release binary. Native records
@@ -346,7 +402,13 @@ alone is not treated as their original copyright notice.
 For the current lockfile, the packaged sources contain no separate Apache NOTICE
 files, but an additional upstream VCS-root audit found **two original AWS NOTICE
 texts**, referenced by eleven package/version entries. Those exact originals are
-pinned in `license-sources.json` and retained in every target's bundle. The audit
+pinned in `license-sources.json` and retained in every target's bundle. The owner
+also approved directly associating the identical smithy-rs NOTICE with every
+locked `aws-smithy-*` package/version: there are **12** such pairs, including both
+aws-smithy-http versions. The review's 18 entries are the entire no-VCS/non-GitHub
+cross-check list, including six unrelated entries. The Smithy associations pin
+the original NOTICE SHA and the distributed `.crate` SHA rather than inventing a
+published VCS revision. This brings the per-target NOTICE references to 23. The audit
 checked 490 upstream directories for 361 Apache-licensed package versions, with
 five repository-URL corrections verified by byte-identical published manifests.
 Its scope and unavailable-revision/non-GitHub cross-checks are recorded in the

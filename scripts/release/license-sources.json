@@ -224,6 +224,210 @@
       "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
       "path": "NOTICE",
       "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    {
+      "crate": "aws-smithy-async",
+      "version": "1.3.1",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "de681a9df7ff79823b759ee17061076ec049cd61a8fa28ece4293d89c9f6964e"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-http",
+      "version": "0.63.6",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "ba1ab2dc1c2c3749ead27180d333c42f11be8b0e934058fb4b2258ee8dbe5231"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-http",
+      "version": "0.64.3",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "19af609dd5edf8b056cd0bb001c706c8b3b1458055328b334ec13d7f46f6aaa8"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-http-client",
+      "version": "1.1.12",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "6a2f165a7feee6f263028b899d0a181987f4fa7179a6411a32a439fba7c5f769"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-json",
+      "version": "0.62.5",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "9648b0bb82a2eedd844052c6ad2a1a822d1f8e3adee5fbf668366717e428856a"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-observability",
+      "version": "0.2.6",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "a06c2315d173edbf1920da8ba3a7189695827002e4c0fc961973ab1c54abca9c"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-query",
+      "version": "0.60.15",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "1a56d79744fb3edb5d722ef79d86081e121d3b9422cb209eb03aea6aa4f21ebd"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-runtime",
+      "version": "1.11.1",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "0504b1ab12debb5959e5165ee5fe97dd387e7aa7ea6a477bfd7635dfe769a4f5"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-runtime-api",
+      "version": "1.19.2",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "8c4e85cffe9944b10d576b075432bd8f98dbc081e8681cb37d5b2d87dc27bc84"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-runtime-api-macros",
+      "version": "1.2.0",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "ce237f890a2283c9b328955c3b0918d2d5bf66a1cb6ceccd36a0047246fbc6e6"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-types",
+      "version": "1.9.1",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "cf183d70774ea2cfcc101ca74a8884e4c76be8b9df65cd303f6a1175c88e8f80"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
+    },
+    {
+      "crate": "aws-smithy-xml",
+      "version": "0.60.15",
+      "repository": "smithy-lang/smithy-rs",
+      "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+      "path": "NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+      "packageBinding": {
+        "method": "registry-archive-sha256",
+        "sha256": "0ce02add1aa3677d022f8adf81dcbe3046a95f17a1b1e8979c145cd21d3d22b3"
+      },
+      "approval": {
+        "status": "approved",
+        "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+        "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+      }
     }
   ],
   "apacheAudit": {
@@ -842,8 +1046,219 @@
         "commit": "8cb6f6d0ee1e1d242b0d7a0927b66336228b25d2",
         "path": "NOTICE",
         "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+      },
+      {
+        "crate": "aws-smithy-async",
+        "version": "1.3.1",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "de681a9df7ff79823b759ee17061076ec049cd61a8fa28ece4293d89c9f6964e"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-http",
+        "version": "0.63.6",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "ba1ab2dc1c2c3749ead27180d333c42f11be8b0e934058fb4b2258ee8dbe5231"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-http",
+        "version": "0.64.3",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "19af609dd5edf8b056cd0bb001c706c8b3b1458055328b334ec13d7f46f6aaa8"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-http-client",
+        "version": "1.1.12",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "6a2f165a7feee6f263028b899d0a181987f4fa7179a6411a32a439fba7c5f769"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-json",
+        "version": "0.62.5",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "9648b0bb82a2eedd844052c6ad2a1a822d1f8e3adee5fbf668366717e428856a"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-observability",
+        "version": "0.2.6",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "a06c2315d173edbf1920da8ba3a7189695827002e4c0fc961973ab1c54abca9c"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-query",
+        "version": "0.60.15",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "1a56d79744fb3edb5d722ef79d86081e121d3b9422cb209eb03aea6aa4f21ebd"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-runtime",
+        "version": "1.11.1",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "0504b1ab12debb5959e5165ee5fe97dd387e7aa7ea6a477bfd7635dfe769a4f5"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-runtime-api",
+        "version": "1.19.2",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "8c4e85cffe9944b10d576b075432bd8f98dbc081e8681cb37d5b2d87dc27bc84"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-runtime-api-macros",
+        "version": "1.2.0",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "ce237f890a2283c9b328955c3b0918d2d5bf66a1cb6ceccd36a0047246fbc6e6"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-types",
+        "version": "1.9.1",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "cf183d70774ea2cfcc101ca74a8884e4c76be8b9df65cd303f6a1175c88e8f80"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
+      },
+      {
+        "crate": "aws-smithy-xml",
+        "version": "0.60.15",
+        "repository": "smithy-lang/smithy-rs",
+        "commit": "ae943725d37495c5a6fdd8fc7112cd5e50f014fd",
+        "path": "NOTICE",
+        "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
+        "packageBinding": {
+          "method": "registry-archive-sha256",
+          "sha256": "0ce02add1aa3677d022f8adf81dcbe3046a95f17a1b1e8979c145cd21d3d22b3"
+        },
+        "approval": {
+          "status": "approved",
+          "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+          "basis": "Owner-approved NOTICE association; upstream NOTICE bytes equal the already retained AWS SDK NOTICE. No published crate VCS revision is asserted."
+        }
       }
-    ]
+    ],
+    "smithyNoticeReview": {
+      "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+      "actualLockedPackageVersions": 12,
+      "reviewMentionedEntries": 18,
+      "basis": "The 18 no-VCS/non-GitHub cross-check entries contain 12 aws-smithy package/version pairs and 6 unrelated entries. Every locked aws-smithy package/version is associated; unrelated entries are not attributed to Smithy.",
+      "noticeSha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    }
   },
   "gitRootLicenses": [
     {

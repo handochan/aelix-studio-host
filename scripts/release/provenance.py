@@ -28,6 +28,7 @@ TAG_PATTERN = re.compile(r'^host-v(\d+\.\d+\.\d+)-aelix\.([1-9]\d*)$')
 sys.path.insert(0, str(HERE))
 from build import archive_name, asset_label  # noqa: E402
 import notices  # noqa: E402
+import lgpl_notice  # noqa: E402
 
 CHECKSUMS = 'aelix-studio-host-checksums.txt'
 MEMBERS = ('LICENSE', 'NOTICE', *notices.FILES, 'build-receipt.json')
@@ -141,7 +142,7 @@ def assemble(label, source, output, commit, environment):
             if read_member(archive, notice) != (ROOT / notice).read_bytes():
                 raise ValueError(name + ': archived ' + notice + ' differs from the checkout')
         notices.validate_bundle(read_member(archive, notices.FILES[0]), read_member(archive, notices.FILES[1]),
-                                receipt['thirdPartyNotices'], spec['rustTarget'])
+                                receipt['thirdPartyNotices'], spec['rustTarget'], label=label, commit=commit)
         if smoke.get('status') != 'passed' or smoke.get('binarySha256') != receipt['binarySha256']:
             raise ValueError(name + ': host smoke did not pass for this binary')
         expected_version = policy['binary'] + ' ' + workspace_version()
@@ -203,6 +204,12 @@ def notes(provenance):
     upstream = provenance['upstream']
     rows = '\n'.join('| ' + name + ' | `' + target['archive'] + '` | `' + target['archiveSha256'] + '` |'
                      for name, target in provenance['targets'].items())
+    required = {name for target in provenance['targets'].values()
+                for name in target['thirdPartyNotices'].get('lgplComponents', [])}
+    components = [c for p in notices.load('native-sources.json')['packages'] for c in p['components']
+                  if c['component'] in required and c.get('license') == 'LGPL-2.1-or-later']
+    corresponding_source = lgpl_notice.render(
+        lgpl_notice.source_context(provenance['label'], provenance['commit']), components)
     return f"""Aelix Studio host `{provenance['label']}`: a modified build of
 [{upstream['repository']}](https://github.com/{upstream['repository']}) for Aelix Studio.
 
@@ -210,6 +217,8 @@ def notes(provenance):
 - Upstream base: `{upstream['tag']}` (`{upstream['commit']}`), {upstream['commitsSinceUpstream']} commits since
 - `aelix-studio-host --version` reports the upstream workspace version `{provenance['workspaceVersion']}`
 - Rust {provenance['rustToolchain']}; every archive passed the host smoke on its own runner
+
+{corresponding_source}
 
 | Target | Archive | SHA-256 |
 | --- | --- | --- |

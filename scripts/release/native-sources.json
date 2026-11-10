@@ -1,5 +1,190 @@
 {
   "decision": "https://github.com/handochan/aelix-studio-host/issues/20",
+  "inventoryReview": {
+    "changes": [
+      {
+        "added": [
+          "aws-lc/cmake/rust_wrapper.h.in",
+          "aws-lc/crypto/chacha/asm/chacha-armv4.pl",
+          "aws-lc/crypto/chacha/asm/chacha-armv8.pl",
+          "aws-lc/crypto/chacha/asm/chacha-x86.pl",
+          "aws-lc/crypto/chacha/asm/chacha-x86_64.pl",
+          "aws-lc/crypto/cipher_extra/asm/aes128gcmsiv-x86_64.pl",
+          "aws-lc/crypto/cipher_extra/asm/aesni-sha1-x86_64.pl",
+          "aws-lc/crypto/cipher_extra/asm/aesni-sha256-x86_64.pl",
+          "aws-lc/crypto/cipher_extra/asm/chacha20_poly1305_armv8.pl",
+          "aws-lc/crypto/cipher_extra/asm/chacha20_poly1305_x86_64.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/aesni-x86.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/aesni-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/aesni-xts-avx512.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/aesp8-ppc.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/aesv8-armx.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/bsaes-armv7.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/vpaes-armv7.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/vpaes-armv8.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/vpaes-x86.pl",
+          "aws-lc/crypto/fipsmodule/aes/asm/vpaes-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/armv4-mont.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/armv8-mont.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/bn-586.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/bn-armv8.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/co-586.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/rsaz-2k-avx512.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/rsaz-3k-avx512.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/rsaz-4k-avx512.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/rsaz-avx2.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/x86-mont.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/x86_64-mont.pl",
+          "aws-lc/crypto/fipsmodule/bn/asm/x86_64-mont5.pl",
+          "aws-lc/crypto/fipsmodule/ec/asm/p256-armv8-asm.pl",
+          "aws-lc/crypto/fipsmodule/ec/asm/p256-x86_64-asm.pl",
+          "aws-lc/crypto/fipsmodule/ec/asm/p256_beeu-armv8-asm.pl",
+          "aws-lc/crypto/fipsmodule/ec/asm/p256_beeu-x86_64-asm.pl",
+          "aws-lc/crypto/fipsmodule/md5/asm/md5-586.pl",
+          "aws-lc/crypto/fipsmodule/md5/asm/md5-armv8.pl",
+          "aws-lc/crypto/fipsmodule/md5/asm/md5-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/ml_dsa/mldsa/zetas.inc",
+          "aws-lc/crypto/fipsmodule/ml_kem/mlkem/zetas.inc",
+          "aws-lc/crypto/fipsmodule/modes/asm/aesni-gcm-avx512.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/aesni-gcm-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/aesv8-gcm-armv8-unroll8.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/aesv8-gcm-armv8.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghash-armv4.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghash-neon-armv8.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghash-ssse3-x86.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghash-ssse3-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghash-x86.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghash-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghashp8-ppc.pl",
+          "aws-lc/crypto/fipsmodule/modes/asm/ghashv8-armx.pl",
+          "aws-lc/crypto/fipsmodule/rand/asm/rdrand-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/rand/asm/rndr-armv8.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/keccak1600-armv8.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha1-586.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha1-armv4-large.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha1-armv8.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha1-x86_64.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha256-586.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha256-armv4.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha512-586.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha512-armv4.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha512-armv8.pl",
+          "aws-lc/crypto/fipsmodule/sha/asm/sha512-x86_64.pl",
+          "aws-lc/crypto/perlasm/arm-xlate.pl",
+          "aws-lc/crypto/perlasm/ppc-xlate.pl",
+          "aws-lc/crypto/perlasm/x86_64-xlate.pl",
+          "aws-lc/crypto/perlasm/x86asm.pl",
+          "aws-lc/crypto/perlasm/x86gas.pl",
+          "aws-lc/crypto/perlasm/x86masm.pl",
+          "aws-lc/crypto/perlasm/x86nasm.pl",
+          "aws-lc/crypto/test/asm/trampoline-armv4.pl",
+          "aws-lc/crypto/test/asm/trampoline-armv8.pl",
+          "aws-lc/crypto/test/asm/trampoline-ppc.pl",
+          "aws-lc/crypto/test/asm/trampoline-x86.pl",
+          "aws-lc/crypto/test/asm/trampoline-x86_64.pl",
+          "aws-lc/include/openssl/base.h.in",
+          "aws-lc/include/openssl/boringssl_prefix_symbols_nasm.inc",
+          "aws-lc/include/openssl/opensslv.h.in",
+          "generated-include/openssl/boringssl_prefix_symbols_nasm.inc"
+        ],
+        "crate": "aws-lc-sys",
+        "newCount": 1990,
+        "newPackage": false,
+        "newSha256": "ac1301689ce3faef6c7c90164054ba6ba13bfe13627bdf54a258112050ccf5c1",
+        "oldCount": 1908,
+        "oldSha256": "f109ca50dd66b555899664eb487f681e3ac5ad479acfc7a318bccc094416e692",
+        "version": "0.47.0"
+      },
+      {
+        "added": [
+          "libgit2/deps/pcre/config.h.in",
+          "libgit2/deps/winhttp/winhttp.def",
+          "libgit2/deps/winhttp/winhttp64.def",
+          "libgit2/src/libgit2/experimental.h.in",
+          "libgit2/src/util/git2_features.h.in"
+        ],
+        "crate": "libgit2-sys",
+        "newCount": 569,
+        "newPackage": false,
+        "newSha256": "872584ce0196658eccf66eb5aab532ee217a3b3bdc12dfe8cbc4f77044234d51",
+        "oldCount": 564,
+        "oldSha256": "1d5a6baa51c3c0209bd37f807c4a1d95b8854e26e759eca53442f26f5e266b59",
+        "version": "0.18.4+1.9.3"
+      },
+      {
+        "added": [
+          "src/zlib-ng/gzread_mangle.h.in",
+          "src/zlib-ng/zconf-ng.h.in",
+          "src/zlib-ng/zconf.h.in",
+          "src/zlib-ng/zlib-ng.h.in",
+          "src/zlib-ng/zlib.h.in",
+          "src/zlib-ng/zlib_name_mangling-ng.h.in",
+          "src/zlib-ng/zlib_name_mangling.h.in"
+        ],
+        "crate": "libz-sys",
+        "newCount": 186,
+        "newPackage": false,
+        "newSha256": "2722c1cd72ad482201359675d458654f715694e01db77820b27254496d944918",
+        "oldCount": 179,
+        "oldSha256": "b4b214bf567f193108cf165be6988537a1abccc0d503e53bfef0a260a5fbebd2",
+        "version": "1.1.31"
+      },
+      {
+        "added": [
+          "crypto/chacha/asm/chacha-armv4.pl",
+          "crypto/chacha/asm/chacha-armv8.pl",
+          "crypto/chacha/asm/chacha-x86.pl",
+          "crypto/chacha/asm/chacha-x86_64.pl",
+          "crypto/cipher/asm/chacha20_poly1305_armv8.pl",
+          "crypto/cipher/asm/chacha20_poly1305_x86_64.pl",
+          "crypto/fipsmodule/aes/asm/aes-gcm-avx2-x86_64.pl",
+          "crypto/fipsmodule/aes/asm/aesni-gcm-x86_64.pl",
+          "crypto/fipsmodule/aes/asm/aesni-x86.pl",
+          "crypto/fipsmodule/aes/asm/aesni-x86_64.pl",
+          "crypto/fipsmodule/aes/asm/aesv8-armx.pl",
+          "crypto/fipsmodule/aes/asm/aesv8-gcm-armv8.pl",
+          "crypto/fipsmodule/aes/asm/bsaes-armv7.pl",
+          "crypto/fipsmodule/aes/asm/ghash-armv4.pl",
+          "crypto/fipsmodule/aes/asm/ghash-neon-armv8.pl",
+          "crypto/fipsmodule/aes/asm/ghash-x86.pl",
+          "crypto/fipsmodule/aes/asm/ghash-x86_64.pl",
+          "crypto/fipsmodule/aes/asm/ghashv8-armx.pl",
+          "crypto/fipsmodule/aes/asm/vpaes-armv7.pl",
+          "crypto/fipsmodule/aes/asm/vpaes-armv8.pl",
+          "crypto/fipsmodule/aes/asm/vpaes-x86.pl",
+          "crypto/fipsmodule/aes/asm/vpaes-x86_64.pl",
+          "crypto/fipsmodule/bn/asm/armv4-mont.pl",
+          "crypto/fipsmodule/bn/asm/armv8-mont.pl",
+          "crypto/fipsmodule/bn/asm/x86-mont.pl",
+          "crypto/fipsmodule/bn/asm/x86_64-mont.pl",
+          "crypto/fipsmodule/bn/asm/x86_64-mont5.pl",
+          "crypto/fipsmodule/ec/asm/p256-armv8-asm.pl",
+          "crypto/fipsmodule/ec/asm/p256-x86_64-asm.pl",
+          "crypto/fipsmodule/ec/ecp_nistz384.inl",
+          "crypto/fipsmodule/sha/asm/sha256-armv4.pl",
+          "crypto/fipsmodule/sha/asm/sha512-armv4.pl",
+          "crypto/fipsmodule/sha/asm/sha512-armv8.pl",
+          "crypto/fipsmodule/sha/asm/sha512-x86_64.pl",
+          "crypto/limbs/limbs.inl",
+          "crypto/perlasm/arm-xlate.pl",
+          "crypto/perlasm/x86_64-xlate.pl",
+          "crypto/perlasm/x86asm.pl",
+          "crypto/perlasm/x86gas.pl",
+          "crypto/perlasm/x86nasm.pl",
+          "pregenerated/ring_core_generated/prefix_symbols_nasm.inc"
+        ],
+        "crate": "ring",
+        "newCount": 193,
+        "newPackage": false,
+        "newSha256": "7b11f2953ecc4fe9a4796a004f2d11ac0ab6db31ed9014b6c1a0335aca494024",
+        "oldCount": 152,
+        "oldSha256": "247ba1a228f7127d174665d1081788361b0f165f3103ee2d9940fc4018519410",
+        "version": "0.17.14"
+      }
+    ],
+    "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+    "result": "Only inventory coverage changed. Package/archive bytes, original notice hashes and existing license selections are unchanged; xdiff and winhttp now have explicit owner-approved LGPL treatment."
+  },
   "packages": [
     {
       "buildScriptsSha256": "24ba3525a4e90473586a5837027da43d42ebe210fc7049657135e4056b2229ce",
@@ -47,7 +232,7 @@
           "sourcePrefixes": [
             ""
           ],
-          "sourceSha256": "f109ca50dd66b555899664eb487f681e3ac5ad479acfc7a318bccc094416e692",
+          "sourceSha256": "ac1301689ce3faef6c7c90164054ba6ba13bfe13627bdf54a258112050ccf5c1",
           "version": "packaged snapshot in aws-lc-sys 0.47.0"
         },
         {
@@ -102,8 +287,8 @@
       ],
       "crate": "aws-lc-sys",
       "links": "aws_lc_0_47_0",
-      "nativeFileCount": 1908,
-      "nativeFilesSha256": "f109ca50dd66b555899664eb487f681e3ac5ad479acfc7a318bccc094416e692",
+      "nativeFileCount": 1990,
+      "nativeFilesSha256": "ac1301689ce3faef6c7c90164054ba6ba13bfe13627bdf54a258112050ccf5c1",
       "packagedFilesSha256": "191a53d19572e012512c8ff6b713fd2887c5e1473da3f4e80c8f545adc495a9b",
       "sourceArchiveSha256": "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52",
       "version": "0.47.0"
@@ -191,7 +376,7 @@
           "sourcePrefixes": [
             ""
           ],
-          "sourceSha256": "1d5a6baa51c3c0209bd37f807c4a1d95b8854e26e759eca53442f26f5e266b59",
+          "sourceSha256": "872584ce0196658eccf66eb5aab532ee217a3b3bdc12dfe8cbc4f77044234d51",
           "version": "1.9.3",
           "versionEvidence": {
             "path": "libgit2/include/git2/version.h",
@@ -218,8 +403,16 @@
           }
         },
         {
+          "approval": {
+            "basis": "Owner decision 2026-11-11: preserve LGPL-2.1-or-later terms and publish exact tag/commit, Cargo.lock and rebuild instructions. The libgit2 linking exception does not replace xdiff terms.",
+            "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+            "evidence": "libgit2/deps/xdiff/xdiffi.c:1-21 and build.rs:161-163",
+            "status": "approved"
+          },
           "component": "xdiff",
-          "licenseConditions": "LGPL 2.1 or later source headers; retain the full LGPL text in libgit2/COPYING",
+          "distribution": "static",
+          "license": "LGPL-2.1-or-later",
+          "licenseConditions": "LGPL-2.1-or-later; corresponding source and rebuild guidance are mandatory in the bundle preamble and release notes. Statically linked through bundled libgit2.",
           "notices": [
             {
               "endLine": 21,
@@ -250,7 +443,7 @@
           "sourcePrefixes": [
             "libgit2/deps/pcre/"
           ],
-          "sourceSha256": "9ab705a95e7ff37ac96d37dc2768e3c7e04ee001ccf01558db54f27d4bb28061",
+          "sourceSha256": "e62aae2b48a7adffff4b8e33c3d749d9bff4994f869cd94c7e9c039950577b18",
           "version": "8.45",
           "versionEvidence": {
             "path": "libgit2/deps/pcre/pcre.h",
@@ -277,8 +470,16 @@
           }
         },
         {
+          "approval": {
+            "basis": "Owner decision 2026-11-11: preserve LGPL-2.1-or-later terms and publish exact tag/commit, Cargo.lock and rebuild instructions. The libgit2 linking exception does not replace xdiff terms.",
+            "decision": "https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6771825765",
+            "evidence": "libgit2/deps/winhttp/winhttp.h:1-18 and libgit2/deps/winhttp/COPYING.LGPL; .def files are not compiled by the MSVC build script",
+            "status": "approved"
+          },
           "component": "libgit2 winhttp definitions",
-          "licenseConditions": "LGPL; retained as packaged source superset; actual Windows HTTPS backend depends on selected features",
+          "distribution": "source-superset",
+          "license": "LGPL-2.1-or-later",
+          "licenseConditions": "LGPL-2.1-or-later; corresponding source and rebuild guidance are mandatory in the bundle preamble and release notes. Audited .def source superset; unused by MSVC. Retain the original LGPL text.",
           "notices": [
             {
               "path": "libgit2/deps/winhttp/COPYING.LGPL",
@@ -288,14 +489,14 @@
           "sourcePrefixes": [
             "libgit2/deps/winhttp/"
           ],
-          "sourceSha256": "04d785bfe4254fe57f215b2a15b17a5beb5b9c8a49d16b8bbc2fb4570fc8208f",
+          "sourceSha256": "ee0b61fc1ac00fa5ec77413b0444e58924f92e2ad0de5bca3f6f21f05de2903b",
           "version": "packaged snapshot in libgit2-sys 0.18.4+1.9.3"
         }
       ],
       "crate": "libgit2-sys",
       "links": "git2",
-      "nativeFileCount": 564,
-      "nativeFilesSha256": "1d5a6baa51c3c0209bd37f807c4a1d95b8854e26e759eca53442f26f5e266b59",
+      "nativeFileCount": 569,
+      "nativeFilesSha256": "872584ce0196658eccf66eb5aab532ee217a3b3bdc12dfe8cbc4f77044234d51",
       "packagedFilesSha256": "a4ec79aeaadc92ee167b3bff653b84eb0a337b3495f2ff26c98b892695d81f5d",
       "sourceArchiveSha256": "9b26f66f35e1871b22efcf7191564123d2a446ca0538cde63c23adfefa9b15b7",
       "version": "0.18.4+1.9.3",
@@ -371,7 +572,7 @@
           "sourcePrefixes": [
             ""
           ],
-          "sourceSha256": "b4b214bf567f193108cf165be6988537a1abccc0d503e53bfef0a260a5fbebd2",
+          "sourceSha256": "2722c1cd72ad482201359675d458654f715694e01db77820b27254496d944918",
           "version": "1.3.2",
           "versionEvidence": {
             "path": "src/zlib/zlib.h",
@@ -390,7 +591,7 @@
           "sourcePrefixes": [
             "src/zlib-ng/"
           ],
-          "sourceSha256": "6779c931e585925fb1eedc49599bcc87b726a795a3c33a98cd1e277ad6889355",
+          "sourceSha256": "bbee6f2b078c148f36c51bfa6afc55170c58ed4d32c7763e095f5b445193dc14",
           "version": "2.3.3",
           "versionEvidence": {
             "path": "src/zlib-ng/zlib-ng.h.in",
@@ -400,8 +601,8 @@
       ],
       "crate": "libz-sys",
       "links": "z",
-      "nativeFileCount": 179,
-      "nativeFilesSha256": "b4b214bf567f193108cf165be6988537a1abccc0d503e53bfef0a260a5fbebd2",
+      "nativeFileCount": 186,
+      "nativeFilesSha256": "2722c1cd72ad482201359675d458654f715694e01db77820b27254496d944918",
       "packagedFilesSha256": "f5febcf13c66ec420a6c67ae2bd26f8f34cd97e1e41abca474c81018794c5c83",
       "sourceArchiveSha256": "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2",
       "version": "1.1.31"
@@ -468,14 +669,14 @@
           "sourcePrefixes": [
             ""
           ],
-          "sourceSha256": "247ba1a228f7127d174665d1081788361b0f165f3103ee2d9940fc4018519410",
+          "sourceSha256": "7b11f2953ecc4fe9a4796a004f2d11ac0ab6db31ed9014b6c1a0335aca494024",
           "version": "packaged snapshot in ring 0.17.14"
         }
       ],
       "crate": "ring",
       "links": "ring_core_0_17_14_",
-      "nativeFileCount": 152,
-      "nativeFilesSha256": "247ba1a228f7127d174665d1081788361b0f165f3103ee2d9940fc4018519410",
+      "nativeFileCount": 193,
+      "nativeFilesSha256": "7b11f2953ecc4fe9a4796a004f2d11ac0ab6db31ed9014b6c1a0335aca494024",
       "packagedFilesSha256": "e0644b8d7663dccbe7063d5f8d1186678459e6258d7a86a9405c35adc707ab09",
       "sourceArchiveSha256": "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7",
       "version": "0.17.14"

@@ -18,10 +18,12 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from license_policy import ROOT, HERE, canonical, sha256, license_policy, check_crate
-from native_sources import check_native, copyright_comments, is_notice, source_files
+from native_sources import check_native, copyright_comments, is_notice, is_native_text_file, source_files
+import lgpl_notice
 
 FILES = ('THIRD-PARTY-NOTICES.txt', 'third-party-licenses.json')
 POLICIES = ('native-sources.json', 'license-sources.json', 'license-tools.json')
+HELPERS = ('license_policy.py', 'native_sources.py', 'lgpl_notice.py')
 
 
 def load(name):
@@ -148,7 +150,7 @@ def package_originals(package, supplements):
         relative = path.relative_to(root)
         if is_notice(relative):
             originals.append(original(relative.as_posix(), path.read_bytes()))
-        elif path.suffix.lower() in ('.rs', '.c', '.h', '.cc', '.cpp', '.s', '.asm'):
+        elif path.suffix.lower() == '.rs' or is_native_text_file(path):
             # Latin-1 is a byte-preserving intermediate for comment matching;
             # original bytes are kept even for legacy non-UTF8 source credits.
             text = path.read_bytes().decode('latin-1')
@@ -176,14 +178,28 @@ def package_originals(package, supplements):
     for entry in supplements['files']:
         if entry['crate'] != package['name'] or entry['version'] != package['version']:
             continue
-        vcs = json.loads((root / '.cargo_vcs_info.json').read_text())
-        if vcs['git']['sha1'] != entry['commit']:
-            raise ValueError('Supplemental license source revision differs: ' + package['name'])
+        binding = entry.get('packageBinding')
+        if binding:
+            # Owner-approved NOTICE-content association for published Smithy
+            # packages without VCS metadata. Pin the exact distributed crate;
+            # the upstream commit identifies NOTICE, not the crate's code.
+            if binding.get('method') != 'registry-archive-sha256' or entry.get('approval', {}).get('status') != 'approved':
+                raise ValueError('Supplemental NOTICE association is not approved')
+            archive = root.parents[2] / 'cache' / root.parent.name / (package['name'] + '-' + package['version'] + '.crate')
+            if not (package.get('source') or '').startswith('registry+') or sha256(archive.read_bytes()) != binding['sha256']:
+                raise ValueError('Supplemental NOTICE package hash differs: ' + package['name'])
+        else:
+            vcs = json.loads((root / '.cargo_vcs_info.json').read_text())
+            if vcs['git']['sha1'] != entry['commit']:
+                raise ValueError('Supplemental license source revision differs: ' + package['name'])
         data = (HERE / 'licenses' / entry['sha256']).read_bytes()
         if sha256(data) != entry['sha256']:
             raise ValueError('Supplemental license checksum differs')
         item = original('upstream/' + entry['path'], data, kind='pinned-upstream-original')
         item['source'] = {k: entry[k] for k in ('repository', 'commit', 'path')}
+        if binding:
+            item['source']['packageBinding'] = binding
+            item['source']['approval'] = entry['approval']
         originals.append(item)
     if not any(item['kind'] != 'copyright-comment' for item in originals):
         raise ValueError('Missing original license file: ' + package['name'] + ' ' + package['version'])
@@ -195,6 +211,9 @@ def render(bundle):
     parts = ['THIRD-PARTY LICENSES AND NOTICES', 'Target: ' + bundle['rustTarget'],
              'Package: aionui-app; default features; target-filtered graph including build tools.',
              'Original alternative/test-source notices are retained conservatively.', '']
+    components = lgpl_notice.required_components(bundle['nativeSources'], load('native-sources.json'))
+    if components:
+        parts.append(lgpl_notice.render(bundle.get('sourceRelease'), components))
     for entry in bundle['crates']:
         parts += ['=' * 72, entry['name'] + ' ' + entry['version'],
                   'Source: ' + entry['source'], 'License metadata: ' + entry['license'],
@@ -222,7 +241,9 @@ def render(bundle):
     return ('\n\n'.join(parts) + '\n').encode('utf-8')
 
 
-def generate(rust_target, cargo, archive, output, build_log=None):
+def generate(rust_target, cargo, archive, output, build_log=None, *, label=None, commit=None):
+    commit = commit or subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    source_release = lgpl_notice.source_context(label or 'dryrun-' + commit[:12], commit)
     work = output / 'license-work'
     work.mkdir(parents=True, exist_ok=True)
     about = extract_tool(archive, rust_target, work)
@@ -266,6 +287,7 @@ def generate(rust_target, cargo, archive, output, build_log=None):
             check_native(package, Path(package['manifest_path']).parent, native_policy)
     supplements = load('license-sources.json')
     bundle = {'schema': 'aelix-studio-host.third-party-notices/1', 'rustTarget': rust_target,
+              'sourceRelease': source_release,
               'scope': 'aionui-app default features; target graph; includes build dependencies',
               'denySha256': sha256((ROOT / 'deny.toml').read_bytes()),
               'policySha256': {p: sha256((HERE / p).read_bytes()) for p in POLICIES},
@@ -312,6 +334,7 @@ def generate(rust_target, cargo, archive, output, build_log=None):
                 raise ValueError('Compiled third-party package missing from license graph: ' + package['name'])
     bundle['crates'].sort(key=lambda x: (x['name'], x['version']))
     bundle['nativeSources'].sort(key=lambda x: x['crate'])
+    lgpl_components = lgpl_notice.required_components(bundle['nativeSources'], native_policy)
     json_bytes = canonical(bundle)
     text_bytes = render(bundle)
     for name, data in zip(FILES, (text_bytes, json_bytes)):
@@ -324,7 +347,8 @@ def generate(rust_target, cargo, archive, output, build_log=None):
         'configSha256': sha256(config.encode()), 'rawResultSha256': sha256(raw.encode()),
         'generatorSha256': sha256(Path(__file__).read_bytes()),
         'helperSha256': {name: sha256((HERE / name).read_bytes())
-                         for name in ('license_policy.py', 'native_sources.py')},
+                         for name in HELPERS},
+        'sourceRelease': source_release, 'lgplComponents': [c['component'] for c in lgpl_components],
         'denySha256': bundle['denySha256'], 'policySha256': bundle['policySha256'],
         'crateCount': len(bundle['crates']), 'nativePackageCount': len(bundle['nativeSources']),
         'apacheNoticeFiles': bundle['apacheNoticeFiles'], 'missingNotices': [],
@@ -334,7 +358,7 @@ def generate(rust_target, cargo, archive, output, build_log=None):
     return result
 
 
-def validate_bundle(text_bytes, json_bytes, result, rust_target):
+def validate_bundle(text_bytes, json_bytes, result, rust_target, *, label=None, commit=None):
     bundle = json.loads(json_bytes)
     if result.get('status') != 'passed' or result.get('exitCode') != 0 or result.get('errorDiagnostics') != 0:
         raise ValueError('Third-party notice generation did not pass')
@@ -345,9 +369,15 @@ def validate_bundle(text_bytes, json_bytes, result, rust_target):
         raise ValueError('Third-party license tool differs from pin')
     if result.get('generatorSha256') != sha256(Path(__file__).read_bytes()):
         raise ValueError('Third-party notice generator differs')
-    for name in ('license_policy.py', 'native_sources.py'):
+    for name in HELPERS:
         if result.get('helperSha256', {}).get(name) != sha256((HERE / name).read_bytes()):
             raise ValueError('Third-party notice helper differs: ' + name)
+    context = bundle.get('sourceRelease')
+    if not context or context != result.get('sourceRelease') or context != lgpl_notice.source_context(
+            context.get('label'), context.get('commit')):
+        raise ValueError('Third-party corresponding-source context differs')
+    if (label is not None or commit is not None) and context != lgpl_notice.source_context(label, commit):
+        raise ValueError('Third-party source notice does not match build tag/commit')
     for name in POLICIES:
         expected = sha256((HERE / name).read_bytes())
         if bundle['policySha256'].get(name) != expected or result['policySha256'].get(name) != expected:
@@ -385,6 +415,9 @@ def validate_bundle(text_bytes, json_bytes, result, rust_target):
             decode_original(item)
         check_required_originals(package, package['originals'], supplements)
     native_policy = load('native-sources.json')
+    components = lgpl_notice.required_components(bundle['nativeSources'], native_policy)
+    if result.get('lgplComponents') != [c['component'] for c in components]:
+        raise ValueError('LGPL component notice inventory differs')
     names = {(p['name'], p['version']) for p in bundle['crates']}
     expected_native = {(p['crate'], p['version']) for p in native_policy['packages']
                        if (p['crate'], p['version']) in names}
@@ -414,7 +447,7 @@ def verify_output(directory):
     if json.loads(read_member(archive, 'build-receipt.json')) != receipt:
         raise ValueError('Archived third-party receipt differs')
     validate_bundle(read_member(archive, FILES[0]), read_member(archive, FILES[1]),
-                    receipt['thirdPartyNotices'], receipt['rustTarget'])
+                    receipt['thirdPartyNotices'], receipt['rustTarget'], label=receipt['label'], commit=receipt['commit'])
 
 
 def main():
@@ -425,6 +458,8 @@ def main():
     parser.add_argument('--tool-archive', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--build-log', type=Path)
+    parser.add_argument('--label')
+    parser.add_argument('--commit')
     args = parser.parse_args()
     if args.verify_output:
         verify_output(args.verify_output)
@@ -433,7 +468,8 @@ def main():
     if not all((args.target, args.cargo, args.tool_archive, args.output)):
         parser.error('Generation requires --target, --cargo, --tool-archive and --output')
     try:
-        result = generate(args.target, args.cargo, args.tool_archive, args.output, args.build_log)
+        result = generate(args.target, args.cargo, args.tool_archive, args.output, args.build_log,
+                          label=args.label, commit=args.commit)
     except Exception as error:
         (args.output / 'third-party-result.json').write_bytes(canonical({'status': 'failed', 'error': str(error)}))
         raise

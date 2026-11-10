@@ -162,7 +162,7 @@ class AssembleTests(unittest.TestCase):
             'policySha256': 'f' * 64, 'buildRecipeSha256': '0' * 64, 'checkoutFilesVerified': 1440,
             'archive': archive_filename or build.archive_name(label, spec['rustTarget']), 'version': version,
         }
-        text, inventory, result = fixture_bundle(spec['rustTarget'])
+        text, inventory, result = fixture_bundle(spec['rustTarget'], label=label, commit=COMMIT)
         receipt['thirdPartyNotices'] = result
         for filename, data in zip(notices.FILES, (text, inventory)):
             (directory / filename).write_bytes(data)

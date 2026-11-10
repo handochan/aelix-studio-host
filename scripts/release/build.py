@@ -237,11 +237,12 @@ def main():
         subprocess.run([*prefix, 'python3' if container else sys.executable, str(HERE / 'notices.py'),
                         '--target', rust_target, '--cargo', cargo,
                         '--tool-archive', str(output / 'license-work' / tool['name']),
-                        '--output', str(output), '--build-log', str(build_log)],
+                        '--output', str(output), '--build-log', str(build_log),
+                        '--label', args.label, '--commit', commit],
                        cwd=ROOT, env=environment, check=True)
         report['thirdPartyNotices'] = json.loads((output / 'third-party-result.json').read_text(encoding='utf-8'))
         notices.validate_bundle((output / notices.FILES[0]).read_bytes(), (output / notices.FILES[1]).read_bytes(),
-                                report['thirdPartyNotices'], rust_target)
+                                report['thirdPartyNotices'], rust_target, label=args.label, commit=commit)
         binary = output / binary_name
         shutil.copy2(target_dir / rust_target / 'release' / binary_name, binary)
         if container:

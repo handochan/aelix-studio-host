@@ -11,8 +11,11 @@ import re
 from license_policy import canonical, sha256
 
 NATIVE_EXTENSIONS = {'.c', '.h', '.cc', '.cpp', '.cxx', '.hpp', '.hxx', '.s', '.asm',
-                     '.m', '.mm', '.a', '.lib', '.o', '.obj', '.so', '.dylib', '.dll'}
+                     '.m', '.mm', '.inc', '.inl', '.hh', '.ipp', '.tcc', '.sx', '.nasm',
+                     '.c++', '.h++', '.cppm', '.ixx', '.def', '.pl', '.i', '.ii', '.cu', '.cuh',
+                     '.a', '.lib', '.o', '.obj', '.so', '.dylib', '.dll'}
 NOTICE_NAME = re.compile(r'(?i)^(licen[cs]es?|copying|copyright|notice|authors)(?:$|[._-])')
+NATIVE_BINARY_EXTENSIONS = {'.a', '.lib', '.o', '.obj', '.so', '.dylib', '.dll'}
 
 
 def source_files(root):
@@ -31,7 +34,16 @@ def is_notice(path):
 
 def native_inventory(root):
     return [[p.relative_to(root).as_posix(), sha256(p.read_bytes())]
-            for p in source_files(root) if p.suffix.lower() in NATIVE_EXTENSIONS]
+            for p in source_files(root) if is_native_file(p)]
+
+
+def is_native_file(path):
+    return path.suffix.lower() in NATIVE_EXTENSIONS or (
+        path.suffix.lower() == '.in' and Path(path.stem).suffix.lower() in NATIVE_EXTENSIONS)
+
+
+def is_native_text_file(path):
+    return is_native_file(path) and path.suffix.lower() not in NATIVE_BINARY_EXTENSIONS
 
 
 def read_notice(root, entry):
@@ -82,7 +94,9 @@ def check_native(package, root, policy, linked=None):
         for notice in component['notices']:
             key = (notice['path'], notice.get('startLine'), notice.get('endLine'))
             originals[key] = (notice, read_notice(root, notice))
-        components.append({key: component[key] for key in ('component', 'version', 'licenseConditions', 'sourceSha256')})
+        components.append({key: component[key] for key in
+                           ('component', 'version', 'licenseConditions', 'sourceSha256', 'license', 'approval', 'distribution')
+                           if key in component})
     if covered != {p[0] for p in inventory}:
         raise ValueError('Unlisted native source files in ' + package['name'])
     linked = linked or []

@@ -11,14 +11,16 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import notices
+import lgpl_notice
 from license_policy import canonical, sha256, license_policy, check_crate, satisfies
 from native_sources import check_native, native_inventory, package_hash
 
 
-def fixture_bundle(target):
+def fixture_bundle(target, *, label='host-v0.2.2-aelix.2', commit='a' * 40):
     """A synthetic permitted crate for archive tests, not dependency evidence."""
     bundle = {
         'schema': 'aelix-studio-host.third-party-notices/1', 'rustTarget': target,
+        'sourceRelease': lgpl_notice.source_context(label, commit),
         'denySha256': sha256((HERE.parents[1] / 'deny.toml').read_bytes()),
         'policySha256': {p: sha256((HERE / p).read_bytes()) for p in notices.POLICIES},
         'crates': [{'name': 'release-test-fixture', 'version': '1.0.0', 'source': 'synthetic fixture',
@@ -32,7 +34,8 @@ def fixture_bundle(target):
     result = {'status': 'passed', 'rustTarget': target, 'exitCode': 0, 'errorDiagnostics': 0,
               'tool': {'name': 'cargo-about', 'version': version, 'archiveSha256': spec['sha256']},
               'generatorSha256': sha256((HERE / 'notices.py').read_bytes()),
-              'helperSha256': {p: sha256((HERE / p).read_bytes()) for p in ('license_policy.py', 'native_sources.py')},
+              'helperSha256': {p: sha256((HERE / p).read_bytes()) for p in notices.HELPERS},
+              'sourceRelease': bundle['sourceRelease'], 'lgplComponents': [],
               'policySha256': bundle['policySha256'], 'denySha256': bundle['denySha256'],
               'crateCount': 1, 'nativePackageCount': 0, 'missingNotices': [],
               'files': {name: sha256(data) for name, data in zip(notices.FILES, (text, raw))}}
@@ -89,6 +92,14 @@ class LicensePolicyTests(unittest.TestCase):
 
 
 class NativeSourceTests(unittest.TestCase):
+    def test_unlisted_include_and_native_source_extensions_fail(self):
+        for suffix in ('.inc', '.inl', '.hh', '.ipp', '.tcc', '.sx', '.nasm', '.c++', '.cppm', '.def', '.pl', '.h.in'):
+            with self.subTest(suffix), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / ('unlisted' + suffix)).write_text('/* native source fixture */')
+                with self.assertRaisesRegex(ValueError, 'Unlisted native source/links package: unlisted'):
+                    check_native({'name': 'unlisted', 'version': '1.0.0', 'links': None}, root, {'packages': []})
+
     def fixture(self, temporary):
         root = Path(temporary) / 'registry/src/index/native-fixture-1.0.0'
         root.mkdir(parents=True)
@@ -188,6 +199,124 @@ class NativeSourceTests(unittest.TestCase):
         policy = {'gitRootLicenses': [{'source': 'git+fixture', 'path': 'LICENSE', 'sha256': item['sha256']}]}
         with self.assertRaisesRegex(ValueError, 'Missing or changed git root license'):
             notices.check_required_originals(package, [item], policy)
+
+    def test_smithy_notice_binds_every_locked_version_and_original_bytes(self):
+        sources = notices.load('license-sources.json')
+        import re
+        locked = set()
+        for block in (HERE.parents[1] / 'Cargo.lock').read_text().split('[[package]]')[1:]:
+            fields = dict(re.findall(r'(?m)^(name|version) = "([^"]+)"$', block))
+            if fields.get('name', '').startswith('aws-smithy-'):
+                locked.add((fields['name'], fields['version']))
+        entries = [x for x in sources['apacheAudit']['requiredNotices'] if x['crate'].startswith('aws-smithy-')]
+        self.assertEqual({(x['crate'], x['version']) for x in entries}, locked)
+        self.assertEqual(len(entries), 12)
+        for entry in entries:
+            self.assertEqual(sha256((HERE / 'licenses' / entry['sha256']).read_bytes()), entry['sha256'])
+            self.assertEqual(entry['sha256'], 'd4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287')
+
+    def test_approved_no_vcs_notice_requires_exact_package_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'registry/src/index/aws-smithy-fixture-1.0.0'
+            root.mkdir(parents=True)
+            (root / 'LICENSE').write_text('Original Apache license\n')
+            archive = root.parents[2] / 'cache/index/aws-smithy-fixture-1.0.0.crate'
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b'locked package source')
+            entry = copy.deepcopy(next(x for x in notices.load('license-sources.json')['files']
+                                       if x['crate'].startswith('aws-smithy-')))
+            entry.update(crate='aws-smithy-fixture', version='1.0.0')
+            entry['packageBinding']['sha256'] = sha256(archive.read_bytes())
+            policy = {'files': [entry], 'apacheAudit': {'packageVersions': ['aws-smithy-fixture@1.0.0'],
+                                                      'requiredNotices': [entry]}}
+            package = {'name': 'aws-smithy-fixture', 'version': '1.0.0', 'source': 'registry+fixture',
+                       'license': 'Apache-2.0', 'manifest_path': str(root / 'Cargo.toml')}
+            originals = notices.package_originals(package, policy)
+            self.assertTrue(any(x['path'] == 'upstream/NOTICE' and x['sha256'] == entry['sha256'] for x in originals))
+            archive.write_bytes(b'changed source')
+            with self.assertRaisesRegex(ValueError, 'Supplemental NOTICE package hash differs'):
+                notices.package_originals(package, policy)
+
+
+class LGPLNoticeTests(unittest.TestCase):
+    def component_policy(self):
+        def component(name, distribution):
+            return {'component': name, 'version': '1.0.0', 'license': 'LGPL-2.1-or-later',
+                    'licenseConditions': 'LGPL-2.1-or-later', 'sourceSha256': '0' * 64,
+                    'approval': {'status': 'approved', 'decision': lgpl_notice.DECISION}, 'distribution': distribution,
+                    'notices': [{'path': 'COPYING.LGPL', 'sha256': sha256(b'Original LGPL copy\n')}]}
+        return {'packages': [{'crate': 'release-test-fixture', 'version': '1.0.0', 'nativeFilesSha256': '0' * 64,
+                              'components': [component('xdiff', 'static'),
+                                             component('libgit2 winhttp definitions', 'source-superset')]}]}
+
+    def fixture(self, label):
+        target = 'x86_64-unknown-linux-gnu'
+        text, raw, result = fixture_bundle(target, label=label)
+        bundle = json.loads(raw)
+        policy = self.component_policy()
+        bundle['nativeSources'] = [{'crate': 'release-test-fixture', 'version': '1.0.0',
+                                    'nativeFilesSha256': '0' * 64, 'linkage': 'static', 'linkedLibraries': ['static=fixture'],
+                                    'components': policy['packages'][0]['components'],
+                                    'notices': [{'path': 'COPYING.LGPL', 'text': 'Original LGPL copy\n'}]}]
+        result.update(nativePackageCount=1, lgplComponents=['xdiff', 'libgit2 winhttp definitions'])
+        return target, bundle, result, policy
+
+    def mocked_policy(self, policy):
+        original_load = notices.load
+        return mock.patch.object(notices, 'load', side_effect=lambda name: policy if name == 'native-sources.json' else original_load(name))
+
+    def encoded(self, bundle, result):
+        text, raw = notices.render(bundle), canonical(bundle)
+        result['files'] = {p: sha256(data) for p, data in zip(notices.FILES, (text, raw))}
+        return text, raw
+
+    def test_release_and_dry_run_preambles_use_real_ref_and_commit(self):
+        for label in ('host-v0.2.2-aelix.2', 'dryrun-' + 'a' * 12):
+            target, bundle, result, policy = self.fixture(label)
+            with self.subTest(label), self.mocked_policy(policy):
+                text, raw = self.encoded(bundle, result)
+                context = bundle['sourceRelease']
+                self.assertEqual(context['releaseTag'], label if label.startswith('host-v') else None)
+                ref = label if label.startswith('host-v') else 'a' * 40
+                self.assertIn((lgpl_notice.PUBLIC_SOURCE + '/tree/' + ref).encode(), text)
+                self.assertIn(('/blob/' + ref + '/Cargo.lock').encode(), text)
+                self.assertIn(('Source commit: ' + 'a' * 40).encode(), text)
+                self.assertIn(b'xdiff is licensed under LGPL-2.1-or-later and is statically linked', text)
+                self.assertIn(b'these definition files are not used by the MSVC build', text)
+                self.assertLess(text.index(b'LGPL-2.1-or-later components'), text.index(b'=' * 72))
+                notices.validate_bundle(text, raw, result, target, label=label, commit='a' * 40)
+
+    def test_missing_preamble_fails_even_with_rewritten_text_hash(self):
+        target, bundle, result, policy = self.fixture('dryrun-' + 'a' * 12)
+        with self.mocked_policy(policy):
+            text, raw = self.encoded(bundle, result)
+            guide = lgpl_notice.render(bundle['sourceRelease'], policy['packages'][0]['components']).encode()
+            text = text.replace(guide, b'')
+            result['files'][notices.FILES[0]] = sha256(text)
+            with self.assertRaisesRegex(ValueError, 'Readable notices do not match inventory'):
+                notices.validate_bundle(text, raw, result, target)
+
+    def test_source_context_cannot_be_rewritten_to_another_build(self):
+        target, bundle, result, policy = self.fixture('host-v0.2.2-aelix.2')
+        with self.mocked_policy(policy):
+            bundle['sourceRelease'] = lgpl_notice.source_context('host-v0.2.2-aelix.3', 'b' * 40)
+            result['sourceRelease'] = bundle['sourceRelease']
+            text, raw = self.encoded(bundle, result)
+            with self.assertRaisesRegex(ValueError, 'does not match build tag/commit'):
+                notices.validate_bundle(text, raw, result, target, label='host-v0.2.2-aelix.2', commit='a' * 40)
+
+    def test_generated_release_notes_share_corresponding_source_guidance(self):
+        import provenance
+        policy = self.component_policy()
+        for label in ('host-v0.2.2-aelix.2', 'dryrun-' + 'a' * 12):
+            record = {'label': label, 'commit': 'a' * 40, 'workspaceVersion': '0.2.2', 'rustToolchain': '1.95.0',
+                      'upstream': {'repository': 'example/upstream', 'tag': 'v0.2.2', 'commit': 'b' * 40, 'commitsSinceUpstream': 1},
+                      'targets': {'fixture': {'archive': 'fixture.tar.gz', 'archiveSha256': '0' * 64,
+                                              'thirdPartyNotices': {'lgplComponents': ['xdiff', 'libgit2 winhttp definitions']}}}}
+            with self.subTest(label), self.mocked_policy(policy):
+                text = provenance.notes(record)
+                guide = lgpl_notice.render(lgpl_notice.source_context(label, 'a' * 40), policy['packages'][0]['components'])
+                self.assertIn(guide, text)
 
 
 class BundleValidationTests(unittest.TestCase):
