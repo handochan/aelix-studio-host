@@ -94,6 +94,12 @@ pub enum ExtensionError {
     #[error("Invalid skill import source: {0}")]
     SkillImportInvalidSource(String),
 
+    #[error("Skill name '{skill_name}' starts with reserved host staging prefix '{reserved_prefix}'")]
+    SkillImportReservedName {
+        skill_name: String,
+        reserved_prefix: &'static str,
+    },
+
     #[error("Skill import does not allow symlink entries: {0}")]
     SkillImportSymlinkEntry(String),
 
@@ -102,6 +108,7 @@ pub enum ExtensionError {
         file_path: Option<String>,
         file_bytes: u64,
         limit_bytes: u64,
+        actual_bytes_is_lower_bound: bool,
     },
 
     #[error("Skill import is too large: {total_bytes} bytes, limit {limit_bytes} bytes")]

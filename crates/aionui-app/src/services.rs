@@ -300,7 +300,7 @@ impl AppServices {
         if let Err(error) = aionui_extension::skill_service::cleanup_skill_import_staging(&skill_paths).await {
             // Disk discovery excludes staging even if an IO failure prevents
             // removal. Cleanup failure must not expose abandoned skills.
-            tracing::warn!(error = %error, "abandoned skill zip staging cleanup failed");
+            tracing::warn!(error = %error, "abandoned skill import staging cleanup failed");
         }
         if identity_mode.is_local() {
             aionui_extension::sync_skill_catalog_into_repo(skill_paths.as_ref(), skill_repo.as_ref())

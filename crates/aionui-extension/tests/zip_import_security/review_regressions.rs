@@ -256,6 +256,7 @@ async fn http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill
     assert_eq!(failure["actual_bytes"], 50 * MIB + 1);
     assert_eq!(failure["limit_bytes"], 50 * MIB);
     assert_eq!(failure["error_path"], "data.bin");
+    assert_eq!(failure["details"]["actual_bytes_is_lower_bound"], true);
     assert!(
         repo.find_by_name_for_user("system_default_user", "good-skill")
             .await
@@ -282,7 +283,9 @@ async fn http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill
 
 #[tokio::test]
 async fn recursive_scans_disk_lists_and_backfill_skip_import_temporary_trees() {
-    use aionui_extension::skill_service::{list_available_skills, scan_for_skills, sync_skill_catalog_into_repo};
+    use aionui_extension::skill_service::{
+        list_available_skills, scan_for_skills_with_paths, sync_skill_catalog_into_repo,
+    };
     let tmp = TempDir::new().unwrap();
     let paths = paths(tmp.path());
     let hidden = paths.user_skills_dir.join(".import-tmp/leased-abandoned/private");
@@ -291,8 +294,15 @@ async fn recursive_scans_disk_lists_and_backfill_skip_import_temporary_trees() {
         std::fs::create_dir_all(directory).unwrap();
         std::fs::write(directory.join("SKILL.md"), MANIFEST.replace("archive-skill", name)).unwrap();
     }
+    let ended = owner_fixture::ended_pid().await;
+    owner_fixture::write_owner(&paths.user_skills_dir.join(".import-tmp"), "container", ended);
+    owner_fixture::write_owner(
+        &paths.user_skills_dir.join(".import-tmp/leased-abandoned"),
+        "zip",
+        ended,
+    );
     assert_eq!(
-        scan_for_skills(&paths.user_skills_dir)
+        scan_for_skills_with_paths(&paths, &paths.user_skills_dir)
             .await
             .unwrap()
             .iter()
@@ -300,7 +310,7 @@ async fn recursive_scans_disk_lists_and_backfill_skip_import_temporary_trees() {
             .collect::<Vec<_>>(),
         ["visible"]
     );
-    assert!(scan_for_skills(&hidden).await.unwrap().is_empty());
+    assert!(scan_for_skills_with_paths(&paths, &hidden).await.unwrap().is_empty());
     assert_eq!(
         list_available_skills(&paths)
             .await
@@ -340,6 +350,9 @@ async fn database_lists_hide_old_staging_rows_before_builtin_precedence() {
     })
     .await
     .unwrap();
+    let ended = owner_fixture::ended_pid().await;
+    owner_fixture::write_owner(&paths.user_skills_dir.join(".import-tmp"), "container", ended);
+    owner_fixture::write_owner(&paths.user_skills_dir.join(".import-tmp/skills-123-0"), "zip", ended);
     for name in ["shared", "hidden-only"] {
         let abandoned = paths.user_skills_dir.join(".import-tmp/skills-123-0").join(name);
         // The file has already been removed by startup cleanup; the old row remains.

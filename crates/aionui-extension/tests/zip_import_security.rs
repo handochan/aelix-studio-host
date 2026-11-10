@@ -1,5 +1,9 @@
 //! Exercise archive input through the public import service after the zip upgrade.
 
+#[path = "zip_import_security/final_regressions.rs"]
+mod final_regressions;
+#[path = "zip_import_security/owner_fixture.rs"]
+mod owner_fixture;
 #[path = "zip_import_security/review_regressions.rs"]
 mod review_regressions;
 
@@ -406,7 +410,7 @@ async fn zip_rejects_high_compression_ratio_and_cleans_partial_extraction() {
 
     assert!(matches!(error, ExtensionError::SkillImportZipCompressionRatio {
         expanded_bytes, compressed_bytes: actual_compressed, limit_ratio: 200, ..
-    } if actual_compressed == compressed_bytes && expanded_bytes == compressed_bytes * 200 + 1));
+    } if actual_compressed == compressed_bytes && expanded_bytes == (compressed_bytes * 200).max(MIB) + 1));
     assert!(repo.find_by_name("archive-skill").await.unwrap().is_none());
     assert_clean(&paths);
 }

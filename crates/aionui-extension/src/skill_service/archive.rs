@@ -15,6 +15,11 @@ use super::{MAX_SKILL_IMPORT_FILE_BYTES, MAX_SKILL_IMPORT_TOTAL_BYTES};
 // budget. ZIP-wide bytes intentionally include all skills and ignored files.
 const MAX_ZIP_ENTRIES: usize = 4096;
 const MAX_ZIP_COMPRESSION_RATIO: u64 = 200;
+// Issue #21 decision, 2026-11-11: a legitimate 30 KB repeated-text file
+// (~441:1) must not be rejected. Apply the ratio policy only AFTER 1 MiB of
+// actual output; 50 MiB/file, 200 MiB/ZIP and 4,096-entry/path caps still bound
+// disk usage for small highly repetitive files. Header sizes do not qualify it.
+const MIN_RATIO_CHECK_BYTES: u64 = 1024 * 1024;
 
 pub(super) struct OversizedZipFile {
     pub relative_path: PathBuf,
@@ -90,6 +95,7 @@ fn copy_entry(
     total_bytes: &mut u64,
 ) -> Result<(), ExtensionError> {
     let ratio_limit_bytes = compressed_bytes.saturating_mul(MAX_ZIP_COMPRESSION_RATIO);
+    let ratio_budget_bytes = ratio_limit_bytes.max(MIN_RATIO_CHECK_BYTES);
     let mut file_bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -97,7 +103,7 @@ fn copy_entry(
         // writing it. Never use the declared uncompressed size as a budget.
         let remaining = (MAX_SKILL_IMPORT_FILE_BYTES - file_bytes)
             .min(MAX_SKILL_IMPORT_TOTAL_BYTES - *total_bytes)
-            .min(ratio_limit_bytes - file_bytes);
+            .min(ratio_budget_bytes - file_bytes);
         let read_len = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
         let count = match input.read(&mut buffer[..read_len]) {
             Ok(0) => return Ok(()),
@@ -118,7 +124,7 @@ fn copy_entry(
                 limit_bytes: MAX_SKILL_IMPORT_TOTAL_BYTES,
             });
         }
-        if next_file_bytes > ratio_limit_bytes {
+        if next_file_bytes > MIN_RATIO_CHECK_BYTES && next_file_bytes > ratio_limit_bytes {
             return Err(ExtensionError::SkillImportZipCompressionRatio {
                 file_path: name.to_owned(),
                 expanded_bytes: next_file_bytes,
@@ -131,6 +137,7 @@ fn copy_entry(
                 file_path: Some(name.to_owned()),
                 file_bytes: next_file_bytes,
                 limit_bytes: MAX_SKILL_IMPORT_FILE_BYTES,
+                actual_bytes_is_lower_bound: true,
             });
         }
         output.write_all(&buffer[..count])?;
@@ -234,27 +241,27 @@ mod tests {
 
     #[test]
     fn compression_ratio_boundary_and_overflow() {
-        for (size, succeeds) in [(200, true), (201, false)] {
+        for (size, succeeds) in [(MIN_RATIO_CHECK_BYTES, true), (MIN_RATIO_CHECK_BYTES + 1, false)] {
             let mut input = io::repeat(0).take(size);
             let mut output = CountingWriter::default();
             let mut total = 0;
             let result = copy_entry(&mut input, &mut output, "data", 1, &mut total);
             if succeeds {
                 result.unwrap();
-                assert_eq!(output.0, 200);
-                assert_eq!(total, 200);
+                assert_eq!(output.0, MIN_RATIO_CHECK_BYTES);
+                assert_eq!(total, MIN_RATIO_CHECK_BYTES);
             } else {
                 assert!(matches!(
                     result,
                     Err(ExtensionError::SkillImportZipCompressionRatio {
-                        expanded_bytes: 201,
+                        expanded_bytes,
                         compressed_bytes: 1,
                         limit_ratio: 200,
                         ..
-                    })
+                    }) if expanded_bytes == MIN_RATIO_CHECK_BYTES + 1
                 ));
-                assert_eq!(output.0, 0);
-                assert_eq!(total, 201);
+                assert_eq!(output.0, MIN_RATIO_CHECK_BYTES);
+                assert_eq!(total, MIN_RATIO_CHECK_BYTES + 1);
             }
         }
     }
