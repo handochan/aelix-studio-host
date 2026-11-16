@@ -50,9 +50,9 @@ files. `git log 47e66d0d151123e973b3fd1e77afcb5671b3f8c5..main` lists all of
 them, and each release's provenance file names the base and release commits.
 Categories so far:
 
-- Repository tooling: CI and release workflows, release scripts
-  (`scripts/release/`), `deny.toml`, this README, `NOTICE`, and the
-  repository rules in `AGENTS.md`.
+- Repository tooling: CI, advisory and release workflows, release scripts
+  (`scripts/release/`), dependency-check scripts (`scripts/deny/`),
+  `deny.toml`, this README, `NOTICE`, and the repository rules in `AGENTS.md`.
 - Removed upstream automation: `release-please.yml`, `build-manual.yml` and the
   test that asserted their contents. `release-please-config.json`,
   `.release-please-manifest.json`, `Cross.toml` and `CHANGELOG.md` are kept
@@ -236,12 +236,59 @@ remain PR ② of [#2](https://github.com/handochan/aelix-studio-host/issues/2).
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs migration
 immutability, `cargo fmt`, `cargo clippy -D warnings`, `cargo nextest`, the
-release-script tests, a linux-x64 host smoke, and `cargo deny --locked check`
-([`deny.toml`](deny.toml)): advisories, licenses, bans and sources.
+release-script tests, a linux-x64 host smoke, and cargo-deny
+([`deny.toml`](deny.toml)): licenses, bans and sources on every run, and
+RustSec advisories as described below.
 The dependency policy covers the five release targets with default features
 and workspace development dependencies. The release PR workflow also builds
 the default-feature application and runs its smoke on all five targets,
 including Windows and the Linux GLIBC ceilings.
+
+### When each check runs
+
+The RustSec database changes outside this repository, so a newly published
+advisory used to fail `main` and every open pull request at once. Since
+decision D18 ([#30](https://github.com/handochan/aelix-studio-host/issues/30),
+2026-11-16) the advisory check holds only a change that can itself bring an
+advisory into the checked graph:
+
+| Run | cargo-deny checks |
+| --- | --- |
+| Every push and pull request (`ci.yml`, "Dependency policy") | `cargo deny --locked check bans licenses sources` |
+| A push or pull request that changes a dependency input (`ci.yml`, "RustSec advisories") | also `cargo deny --locked check advisories` |
+| Mondays 00:17 UTC and manual runs ([`advisories.yml`](.github/workflows/advisories.yml)) | `cargo deny --locked check advisories` |
+
+- **Dependency inputs** are `Cargo.lock`, `deny.toml`, every `Cargo.toml`
+  (features and targets select the checked graph without changing the
+  lockfile) and the cargo-deny action. A pull request is judged by its own
+  commits since the merge base, a branch push or manual CI run by all commits
+  not on `origin/main`, and a push to `main` by the commits of that push. When
+  that cannot be determined, the advisory check runs
+  ([`changed_inputs.py`](scripts/deny/changed_inputs.py)). On other runs the
+  "RustSec advisories" job is shown as skipped.
+- **Weekly run:** a new advisory is noticed up to a week after publication. A
+  failing run on `main` creates one tracking Issue, "[Host] RustSec advisory
+  check fails on main", or reopens and rewrites the existing one; it comments
+  only when the reported advisories change, and a passing run closes it. The
+  Issue is recognised by a marker in its text and by its author, the Actions
+  bot, so a run never opens a second one
+  ([`advisory_issue.py`](scripts/deny/advisory_issue.py)). Only that job has
+  `issues: write`. A manual run on another branch reports its result and
+  leaves the Issue alone.
+- **Releases:** the release workflow does not check advisories yet. The gate
+  that stops a `host-v*` release before its assets are published is the
+  remaining part of #30; until it lands, an unresolved advisory does not stop
+  a release.
+- Every run uses [the cargo-deny action](.github/actions/cargo-deny/action.yml),
+  the one place that pins the cargo-deny version and runs it.
+
+```sh
+cargo deny --locked check bans licenses sources
+cargo deny --locked check advisories
+python3 -I -B -m unittest discover -s scripts/deny -p 'test_*.py' -v
+```
+
+### Policy and exceptions
 
 - **Licenses:** crates must use a license on the allow list. Every crate
   marked `publish = false` is skipped, including third-party ones: our
@@ -253,9 +300,9 @@ including Windows and the Linux GLIBC ceilings.
 - **Advisories:** dependency updates resolve 19 of the 20 inherited RustSec
   advisories, including all four zip notices, in
   [#7](https://github.com/handochan/aelix-studio-host/issues/7). Calamine 0.38
-  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail CI,
-  including transitive unsound notices (`unsound = "all"`), except for the
-  documented baseline and approved exception below. Host #23 upgrades rmcp to
+  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail
+  the advisory check, including transitive unsound notices (`unsound = "all"`),
+  except for the documented baseline and approved exception below. Host #23 upgrades rmcp to
   3.9.0 (0462), removes pin-utils through AWS updates (0441), and updates
   event-listener to 5.4.2 (0221) and lru to 0.18.2 (0253).
   [The dependency change record](docs/host-23-dependencies.md) lists every

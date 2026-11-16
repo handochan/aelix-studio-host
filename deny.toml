@@ -1,5 +1,6 @@
-# cargo-deny policy for the Aelix Studio host. CI runs every check on each
-# push and pull request; see README.md "Dependency checks".
+# cargo-deny policy for the Aelix Studio host. CI runs bans, licenses and
+# sources on each push and pull request; advisories run when a dependency
+# input changes and weekly on main. See README.md "Dependency checks".
 
 [graph]
 # The five release targets (README.md "Releases").
@@ -13,8 +14,8 @@ targets = [
 
 [advisories]
 unsound = "all"
-# New advisories fail CI across the configured target graph, including
-# transitive unsound notices, except for the entries documented below.
+# New advisories fail the advisory check across the configured target graph,
+# including transitive unsound notices, except for the entries documented below.
 ignore = [
     # User-approved exception, distinct from an unresolved advisory baseline.
     # The other 19 inherited advisories were resolved in host #7.
