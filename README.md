@@ -166,7 +166,9 @@ checks do not establish that Studio launches it.
 4. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
    every receipt, archive member and smoke report, then writes the checksums
    and provenance. It also rechecks the archived third-party notices against the
-   current crate/native policies and their original-notice hashes.
+   current crate/native policies and their original-notice hashes. It downloads
+   the unmodified LGPL corresponding-source `.crate` asset, checks its Cargo.lock
+   checksum before saving it, and includes it in provenance and checksums.
 5. **Publish** (tag runs only) creates the GitHub release. This workflow
    refuses an existing release and never replaces its assets; that is a
    property of this workflow, not of the repository.
@@ -201,6 +203,17 @@ The notice bundle and release notes identify the actual host release tag and
 commit, the public source tree and that ref's `Cargo.lock`. Dry runs have no
 release tag and identify the exact source commit instead. Check out that ref in
 a separate local checkout before making changes.
+
+The same release (or dry-run artifact) also supplies the unmodified
+`libgit2-sys-0.18.4+1.9.3.crate`, which contains `libgit2/deps/xdiff`. Its direct
+crates.io URL is
+https://static.crates.io/crates/libgit2-sys/libgit2-sys-0.18.4+1.9.3.crate
+and its Cargo.lock SHA-256 is
+`9b26f66f35e1871b22efcf7191564123d2a446ca0538cde63c23adfefa9b15b7`.
+The asset is checked when downloaded, during final assembly and immediately
+before attachment. A missing, altered or differently advertised source asset
+fails the release. This follows the
+[2026-11-16 owner decision](https://github.com/handochan/aelix-studio-host/issues/20#issuecomment-6918262228).
 
 Use the pinned Rust toolchain and `cargo fetch --locked` to obtain the original
 dependencies. `cargo metadata --locked --format-version 1` identifies the source
@@ -365,6 +378,9 @@ builds. The audited winhttp `.def` source superset receives the same correspondi
 source information; these definition files are unused by MSVC. Every affected
 notice preamble and generated release note names the public host repository,
 actual release tag/commit, that ref's Cargo.lock and the rebuild procedure above.
+They also name the corresponding-source `.crate` release asset, direct crates.io
+URL and original checksum. The source asset record is bound to every target's
+notice context and the final provenance; it is included in dry runs as well.
 Missing or altered LGPL preambles and mismatched tag/commit references fail
 archive verification and assembly.
 
@@ -423,6 +439,11 @@ checked 490 upstream directories for 361 Apache-licensed package versions, with
 five repository-URL corrections verified by byte-identical published manifests.
 Its scope and unavailable-revision/non-GitHub cross-checks are recorded in the
 same file; upstream absence is not asserted where a revision is unavailable.
+The four active supplement/audit lists contain only versions in the current
+Cargo.lock. The 26 retired records from the main dependency update were removed;
+current AWS repository corrections and no-revision Smithy records were refreshed.
+The lookup totals describe the cumulative audit. A regression test checks each
+active crate/version against Cargo.lock.
 All published package files are scanned regardless. New Apache package versions
 require an updated NOTICE audit, and any discovered NOTICE is retained verbatim.
 The original host `NOTICE` remains a separate archive member.

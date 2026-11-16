@@ -1,5 +1,6 @@
 """Unit tests for the release scripts (stdlib unittest; no Rust toolchain needed)."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ import identity  # noqa: E402
 import provenance  # noqa: E402
 import smoke  # noqa: E402
 import notices  # noqa: E402
+import lgpl_notice  # noqa: E402
 from test_notices import fixture_bundle  # noqa: E402
 
 ROOT = HERE.parents[1]
@@ -146,6 +148,19 @@ class LabelTests(unittest.TestCase):
 
 
 class AssembleTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise real download/write/recheck code with deterministic source bytes;
+        # the actual lock/policy checksum is asserted separately in test_notices.
+        self.source_bytes = b'synthetic corresponding-source fixture'
+        self.source_asset = dict(lgpl_notice.source_asset(), sha256=hashlib.sha256(self.source_bytes).hexdigest())
+        source_pin = mock.patch.object(lgpl_notice, 'source_asset', return_value=self.source_asset)
+        source_pin.start()
+        self.addCleanup(source_pin.stop)
+        download = mock.patch.object(lgpl_notice.urllib.request, 'urlopen',
+                                     side_effect=lambda *a, **k: io.BytesIO(self.source_bytes))
+        download.start()
+        self.addCleanup(download.stop)
+
     def make_target(self, source, name, spec, label, binary_bytes=b'host', smoke_status='passed',
                     version='aelix-studio-host 0.2.2', binary_name=None, archive_filename=None):
         directory = source / ('release-' + name)
@@ -199,11 +214,50 @@ class AssembleTests(unittest.TestCase):
             self.assertEqual(result['upstream']['commitsSinceUpstream'], 3)
             self.assertTrue(result['build']['runUrl'].endswith('/actions/runs/42'))
             lines = (output / provenance.CHECKSUMS).read_text().splitlines()
-            self.assertEqual(len(lines), len(POLICY['targets']) + 1)
+            self.assertEqual(len(lines), len(POLICY['targets']) + 2)
+            self.assertEqual(result['sourceAssets'], [self.source_asset])
+            self.assertEqual((output / self.source_asset['name']).read_bytes(), self.source_bytes)
+            provenance.verify_assets(output, result['label'], COMMIT)
             for line in lines:
                 expected, name = line.split('  ')
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), expected)
             self.assertIn('host-v0.2.2-aelix.2', provenance.notes(result))
+
+    def test_dry_run_includes_source_and_rejects_attachment_or_guide_mismatch(self):
+        label = 'dryrun-' + COMMIT[:12]
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = Path(temporary) / 'in', Path(temporary) / 'out'
+            for name, spec in POLICY['targets'].items():
+                self.make_target(source, name, spec, label)
+            result = self.assemble(source, output, label)
+            self.assertEqual(result['kind'], 'dry-run')
+            self.assertEqual(result['sourceAssets'], [self.source_asset])
+            for target in result['targets'].values():
+                context = target['thirdPartyNotices']['sourceRelease']
+                self.assertEqual(context['sourceAsset'], self.source_asset)
+                self.assertIsNone(context['releaseTag'])
+            source_path = output / self.source_asset['name']
+            source_path.write_bytes(b'changed after assembly')
+            with self.assertRaisesRegex(ValueError, 'source asset checksum mismatch'):
+                provenance.verify_assets(output, label, COMMIT)
+            source_path.unlink()
+            with self.assertRaises(FileNotFoundError):
+                provenance.verify_assets(output, label, COMMIT)
+            source_path.write_bytes(self.source_bytes)
+            for field in ('name', 'url', 'sha256'):
+                changed = json.loads(json.dumps(result))
+                changed['sourceAssets'][0][field] = 'mismatched'
+                with self.subTest(field), self.assertRaisesRegex(ValueError, 'source asset differs'):
+                    provenance.notes(changed)
+                (output / provenance.provenance_filename(label)).write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, 'source assets differ'):
+                    provenance.verify_assets(output, label, COMMIT)
+            (output / provenance.provenance_filename(label)).write_text(json.dumps(result, indent=2) + '\n')
+            checksum_path = output / provenance.CHECKSUMS
+            checksum_path.write_text('\n'.join(line for line in checksum_path.read_text().splitlines()
+                                               if not line.endswith(self.source_asset['name'])) + '\n')
+            with self.assertRaisesRegex(ValueError, 'checksums omit or duplicate'):
+                provenance.verify_assets(output, label, COMMIT)
 
     def test_refuses_a_failed_smoke_a_missing_target_or_a_tampered_archive(self):
         cases = {

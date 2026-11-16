@@ -190,17 +190,48 @@ def assemble(label, source, output, commit, environment):
         'cargoLockSha256': first['cargoLockSha256'],
         'licenseSha256': first['licenseSha256'],
         'noticeSha256': first['noticeSha256'],
+        'sourceAssets': [lgpl_notice.download_source_asset(output)],
         'targets': targets,
     }
     provenance_name = provenance_filename(label)
     (output / provenance_name).write_text(json.dumps(provenance, indent=2) + '\n')
-    names = sorted([target['archive'] for target in targets.values()] + [provenance_name])
+    names = sorted([target['archive'] for target in targets.values()] + [provenance_name]
+                   + [asset['name'] for asset in provenance['sourceAssets']])
     lines = [digest_bytes((output / name).read_bytes()) + '  ' + name for name in names]
     (output / CHECKSUMS).write_text('\n'.join(lines) + '\n')
+    verify_assets(output, label, commit)
     return provenance
 
 
+def verify_assets(directory, label, commit):
+    """Recheck the source bytes and their notice binding immediately before attachment."""
+    record = json.loads((directory / provenance_filename(label)).read_text(encoding='utf-8'))
+    context = lgpl_notice.source_context(label, commit)
+    if record.get('label') != label or record.get('commit') != commit:
+        raise ValueError('Release assets differ from the checked-out build')
+    if record.get('sourceAssets') != [context['sourceAsset']]:
+        raise ValueError('LGPL source assets differ from notice/Cargo.lock')
+    lgpl_notice.verify_source_asset(directory, record['sourceAssets'][0])
+    if set(record['targets']) != set(load_policy()['targets']):
+        raise ValueError('Release asset targets are incomplete')
+    for target in record['targets'].values():
+        if target['thirdPartyNotices'].get('sourceRelease') != context:
+            raise ValueError('LGPL source asset differs from target notice')
+    expected_names = {t['archive'] for t in record['targets'].values()}
+    expected_names.update([provenance_filename(label), context['sourceAsset']['name']])
+    entries = [line.split('  ') for line in (directory / CHECKSUMS).read_text().splitlines()]
+    if len(entries) != len(expected_names) or any(len(entry) != 2 for entry in entries) or \
+            {entry[1] for entry in entries} != expected_names:
+        raise ValueError('Release checksums omit or duplicate an asset')
+    for expected_hash, name in entries:
+        if digest_bytes((directory / name).read_bytes()) != expected_hash:
+            raise ValueError('Release asset checksum mismatch: ' + name)
+    return record
+
+
 def notes(provenance):
+    if provenance.get('sourceAssets') != [lgpl_notice.source_asset()]:
+        raise ValueError('Release note source asset differs from notice/Cargo.lock')
     upstream = provenance['upstream']
     rows = '\n'.join('| ' + name + ' | `' + target['archive'] + '` | `' + target['archiveSha256'] + '` |'
                      for name, target in provenance['targets'].items())
@@ -243,6 +274,9 @@ def main():
     combine.add_argument('--input', type=Path, required=True)
     combine.add_argument('--output', type=Path, required=True, help='New directory for the release assets only')
     combine.add_argument('--notes', type=Path, required=True, help='Release notes path, outside --output')
+    verify = commands.add_parser('verify-assets')
+    verify.add_argument('--label', required=True)
+    verify.add_argument('--input', type=Path, required=True)
     args = parser.parse_args()
     commit = git('rev-parse', 'HEAD').stdout.strip()
     if args.command == 'prepare':
@@ -250,6 +284,10 @@ def main():
         label, publish = release_label(args.event, args.ref, commit, args.main_ref)
         print('label=' + label)
         print('publish=' + ('true' if publish else 'false'))
+        return
+    if args.command == 'verify-assets':
+        verify_assets(args.input.resolve(), args.label, commit)
+        print('Release assets and LGPL source checksum verified')
         return
     provenance = assemble(args.label, args.input.resolve(), args.output.resolve(), commit, os.environ)
     args.notes.write_text(notes(provenance))

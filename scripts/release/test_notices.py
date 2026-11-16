@@ -2,6 +2,7 @@
 import copy
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -92,6 +93,21 @@ class LicensePolicyTests(unittest.TestCase):
 
 
 class NativeSourceTests(unittest.TestCase):
+    def test_supplement_and_audit_versions_exist_in_current_lockfile(self):
+        import re
+        locked = set()
+        for block in (HERE.parents[1] / 'Cargo.lock').read_text().split('[[package]]')[1:]:
+            fields = dict(re.findall(r'(?m)^(name|version) = "([^"]+)"$', block))
+            locked.add((fields['name'], fields['version']))
+        sources = notices.load('license-sources.json')
+        lists = {'files': sources['files']}
+        lists.update({key: sources['apacheAudit'][key] for key in
+                      ('repositoryCorrections', 'withoutPublishedRevisionOrGitHub', 'requiredNotices')})
+        for name, entries in lists.items():
+            for entry in entries:
+                with self.subTest(list=name, crate=entry['crate'], version=entry['version']):
+                    self.assertIn((entry['crate'], entry['version']), locked)
+
     def test_unlisted_include_and_native_source_extensions_fail(self):
         for suffix in ('.inc', '.inl', '.hh', '.ipp', '.tcc', '.sx', '.nasm', '.c++', '.cppm', '.def', '.pl', '.h.in'):
             with self.subTest(suffix), tempfile.TemporaryDirectory() as temporary:
@@ -239,6 +255,61 @@ class NativeSourceTests(unittest.TestCase):
 
 
 class LGPLNoticeTests(unittest.TestCase):
+    def test_real_policy_preserves_approved_lgpl_classification_and_distribution(self):
+        policy = notices.load('native-sources.json')
+        package = next(p for p in policy['packages'] if p['crate'] == 'libgit2-sys')
+        self.assertEqual(package['version'], '0.18.4+1.9.3')
+        for name, distribution in [('xdiff', 'static'), ('libgit2 winhttp definitions', 'source-superset')]:
+            with self.subTest(name):
+                component = next(c for c in package['components'] if c['component'] == name)
+                self.assertEqual(component['license'], 'LGPL-2.1-or-later')
+                self.assertEqual(component['approval']['status'], 'approved')
+                self.assertEqual(component['approval']['decision'], lgpl_notice.DECISION)
+                self.assertEqual(component['distribution'], distribution)
+
+    def test_source_asset_binds_reviewed_archive_to_lock_and_rebuild_anchor(self):
+        import provenance
+        spec = lgpl_notice.source_asset()
+        self.assertEqual(spec['name'], 'libgit2-sys-0.18.4+1.9.3.crate')
+        self.assertEqual(spec['sha256'], '9b26f66f35e1871b22efcf7191564123d2a446ca0538cde63c23adfefa9b15b7')
+        self.assertEqual(spec['url'], 'https://static.crates.io/crates/libgit2-sys/' + spec['name'])
+        context = lgpl_notice.source_context('dryrun-' + 'a' * 12, 'a' * 40)
+        self.assertTrue(context['buildUrl'].endswith('#rebuilding-with-modified-lgpl-sources'))
+        self.assertEqual(context['releaseTag'], None)
+        self.assertEqual(context['sourceAsset'], spec)
+        # The single release-tag definition also governs source-context labels.
+        with mock.patch.object(provenance, 'TAG_PATTERN', re.compile(r'^test-tag$')):
+            self.assertEqual(lgpl_notice.source_context('test-tag', 'a' * 40)['releaseTag'], 'test-tag')
+
+    def test_source_asset_rejects_policy_lock_checksum_mismatch(self):
+        spec = lgpl_notice.source_asset()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            here = root / 'scripts/release'
+            here.mkdir(parents=True)
+            (here / 'native-sources.json').write_bytes((HERE / 'native-sources.json').read_bytes())
+            lock = (HERE.parents[1] / 'Cargo.lock').read_text()
+            (root / 'Cargo.lock').write_text(lock.replace(spec['sha256'], '0' * 64))
+            with mock.patch.object(lgpl_notice, 'HERE', here), \
+                    self.assertRaisesRegex(ValueError, 'policy differs from Cargo.lock'):
+                lgpl_notice.source_asset()
+
+    def test_corrupt_source_download_or_notice_asset_fails(self):
+        import io
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(lgpl_notice.urllib.request, 'urlopen', return_value=io.BytesIO(b'corrupt')):
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'download checksum mismatch'):
+                lgpl_notice.download_source_asset(root)
+            self.assertEqual(list(root.iterdir()), [])
+        target, bundle, result, policy = self.fixture('dryrun-' + 'a' * 12)
+        with self.mocked_policy(policy):
+            for field in ('name', 'url', 'sha256'):
+                changed = copy.deepcopy(bundle)
+                changed['sourceRelease']['sourceAsset'][field] = 'mismatched'
+                with self.subTest(field), self.assertRaisesRegex(ValueError, 'inconsistent LGPL'):
+                    notices.render(changed)
+
     def component_policy(self):
         def component(name, distribution):
             return {'component': name, 'version': '1.0.0', 'license': 'LGPL-2.1-or-later',
@@ -281,6 +352,8 @@ class LGPLNoticeTests(unittest.TestCase):
                 self.assertIn((lgpl_notice.PUBLIC_SOURCE + '/tree/' + ref).encode(), text)
                 self.assertIn(('/blob/' + ref + '/Cargo.lock').encode(), text)
                 self.assertIn(('Source commit: ' + 'a' * 40).encode(), text)
+                for field in ('name', 'url', 'sha256'):
+                    self.assertIn(context['sourceAsset'][field].encode(), text)
                 self.assertIn(b'xdiff is licensed under LGPL-2.1-or-later and is statically linked', text)
                 self.assertIn(b'these definition files are not used by the MSVC build', text)
                 self.assertLess(text.index(b'LGPL-2.1-or-later components'), text.index(b'=' * 72))
@@ -310,6 +383,7 @@ class LGPLNoticeTests(unittest.TestCase):
         policy = self.component_policy()
         for label in ('host-v0.2.2-aelix.2', 'dryrun-' + 'a' * 12):
             record = {'label': label, 'commit': 'a' * 40, 'workspaceVersion': '0.2.2', 'rustToolchain': '1.95.0',
+                      'sourceAssets': [lgpl_notice.source_asset()],
                       'upstream': {'repository': 'example/upstream', 'tag': 'v0.2.2', 'commit': 'b' * 40, 'commitsSinceUpstream': 1},
                       'targets': {'fixture': {'archive': 'fixture.tar.gz', 'archiveSha256': '0' * 64,
                                               'thirdPartyNotices': {'lgplComponents': ['xdiff', 'libgit2 winhttp definitions']}}}}
@@ -317,6 +391,8 @@ class LGPLNoticeTests(unittest.TestCase):
                 text = provenance.notes(record)
                 guide = lgpl_notice.render(lgpl_notice.source_context(label, 'a' * 40), policy['packages'][0]['components'])
                 self.assertIn(guide, text)
+                for field in ('name', 'url', 'sha256'):
+                    self.assertIn(record['sourceAssets'][0][field], text)
 
 
 class BundleValidationTests(unittest.TestCase):
