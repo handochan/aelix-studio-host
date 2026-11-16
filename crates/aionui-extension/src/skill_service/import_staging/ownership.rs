@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) const SUFFIX: &str = ".aelix-staging-owner";
 const SCHEMA: &str = "aelix.skill-staging/1";
 const MAX_RECORD_BYTES: u64 = 4096;
@@ -98,18 +101,50 @@ impl OwnerLease {
         self.record.kind
     }
 
-    pub fn try_exclusive(&self) -> bool {
-        FileExt::try_lock_exclusive(&self.file).is_ok()
+    pub fn try_exclusive(&mut self) -> bool {
+        self.try_exclusive_with(|| {})
+    }
+
+    fn try_exclusive_with<F>(&mut self, unlocked: F) -> bool
+    where
+        F: FnOnce(),
+    {
+        // LockFileEx does not upgrade an existing shared lock. Release it on
+        // every platform, then open/lock the CURRENT marker path and compare
+        // its full identity. A replacement during the gap is not our owner.
+        if FileExt::unlock(&self.file).is_err() {
+            return false;
+        }
+        unlocked();
+        let Ok(metadata) = fs::symlink_metadata(&self.marker) else {
+            return false;
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_RECORD_BYTES {
+            return false;
+        }
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&self.marker) else {
+            return false;
+        };
+        if FileExt::try_lock_exclusive(&file).is_err() {
+            return false;
+        }
+        if read_record(&file).as_ref() != Some(&self.record) {
+            return false;
+        }
+        self.file = file;
+        true
     }
 
     pub fn inactive(path: &Path) -> Option<Self> {
-        let owner = Self::open_verified(path)?;
+        let mut owner = Self::open_verified(path)?;
         // A live owner, including EPERM/unknown PID state, is never reclaimed
         // or hidden. The exclusive nonblocking lease also protects PID races.
         if aionui_runtime::process_may_exist(owner.record.pid) {
             return None;
         }
-        FileExt::try_lock_exclusive(&owner.file).ok()?;
+        if !owner.try_exclusive() || aionui_runtime::process_may_exist(owner.record.pid) {
+            return None;
+        }
         Some(owner)
     }
 

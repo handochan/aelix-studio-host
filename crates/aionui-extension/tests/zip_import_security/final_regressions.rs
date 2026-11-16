@@ -89,6 +89,13 @@ async fn exact_directory_file_sizes_are_not_marked_as_lower_bounds() {
     assert_eq!(outcome.failed[0].actual_bytes, Some((50 * MIB + 9) as i64));
     assert_eq!(outcome.failed[0].limit_bytes, Some((50 * MIB) as i64));
     assert!(outcome.failed[0].details.is_none());
+    let records = repo
+        .list_import_records_for_user("system_default_user", 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].actual_bytes, Some((50 * MIB + 9) as i64));
+    assert_eq!(records[0].limit_bytes, Some((50 * MIB) as i64));
     assert_clean(&paths);
 }
 
@@ -353,6 +360,8 @@ async fn reserved_names_use_coded_single_errors_and_zip_per_skill_failures() {
         (".import-staging-demo", ".import-staging-"),
         (".import-tmp", ".import-tmp"),
         (".import-tmp-custom", ".import-tmp"),
+        (".Import-Tmp", ".import-tmp"),
+        (".IMPORT-STAGING-x", ".import-staging-"),
     ]
     .into_iter()
     .enumerate()
@@ -413,6 +422,8 @@ async fn reserved_names_use_coded_single_errors_and_zip_per_skill_failures() {
     for (directory, name) in [
         ("bad0", ".import-staging-any"),
         ("bad1", ".import-tmp-hidden"),
+        ("bad2", ".Import-Tmp"),
+        ("bad3", ".IMPORT-STAGING-x"),
         ("good", "good"),
     ] {
         writer
@@ -437,8 +448,11 @@ async fn reserved_names_use_coded_single_errors_and_zip_per_skill_failures() {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(json["data"]["skill_names"], serde_json::json!(["good"]));
     let failed = json["data"]["failed"].as_array().unwrap();
-    assert_eq!(failed.len(), 2);
-    for (failure, prefix) in failed.iter().zip([".import-staging-", ".import-tmp"]) {
+    assert_eq!(failed.len(), 4);
+    for (failure, prefix) in failed
+        .iter()
+        .zip([".import-staging-", ".import-tmp", ".import-tmp", ".import-staging-"])
+    {
         assert_eq!(failure["code"], "SKILL_IMPORT_RESERVED_NAME");
         assert_eq!(failure["details"]["reason"], "reserved_skill_name");
         assert_eq!(failure["details"]["reserved_prefix"], prefix);

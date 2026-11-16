@@ -48,6 +48,27 @@ async fn dropping_extraction_result_removes_staging_after_success() {
     assert!(!root.join(TEMP_DIR_NAME).exists());
 }
 
+#[test]
+fn dropping_last_zip_lease_removes_the_shared_container_and_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("skills");
+    let first = ZipStaging::create(&root).unwrap();
+    let second = ZipStaging::create(&root).unwrap();
+    let container = first.temp_root.clone();
+    let marker = ownership::marker_path(&container).unwrap();
+    assert_eq!(second.temp_root, container);
+    fs::write(second.path().join("SKILL.md"), "active peer").unwrap();
+    drop(first);
+    assert!(marker.exists());
+    assert_eq!(
+        fs::read_to_string(second.path().join("SKILL.md")).unwrap(),
+        "active peer"
+    );
+    drop(second);
+    assert!(!container.exists());
+    assert!(!marker.exists());
+}
+
 #[tokio::test]
 async fn child_hold_import_lease() {
     let Some(root) = std::env::var_os("AELIX_STAGING_TEST_CHILD_ROOT") else {
@@ -177,7 +198,6 @@ fn startup_cleanup_retains_unknown_owners() {
     assert!(unknown.join("SKILL.md").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn startup_cleanup_preserves_unmarked_staging_symlinks() {
     let tmp = tempfile::tempdir().unwrap();
@@ -186,7 +206,7 @@ fn startup_cleanup_preserves_unmarked_staging_symlinks() {
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("keep"), "unchanged").unwrap();
     fs::create_dir_all(root.join(TEMP_DIR_NAME)).unwrap();
-    std::os::unix::fs::symlink(&outside, root.join(TEMP_DIR_NAME).join("leased-link")).unwrap();
+    directory_alias(&outside, &root.join(TEMP_DIR_NAME).join("leased-link"));
     assert!(!cleanup_abandoned(&root).unwrap());
     assert!(
         root.join(TEMP_DIR_NAME)
@@ -364,7 +384,6 @@ async fn an_owner_record_with_an_active_marker_lease_is_preserved() {
     assert!(!stage.exists());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn owned_abandoned_symlink_is_unlinked_without_following_it() {
     let tmp = tempfile::tempdir().unwrap();
@@ -378,7 +397,7 @@ async fn owned_abandoned_symlink_is_unlinked_without_following_it() {
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("keep"), "unchanged").unwrap();
     fs::remove_dir_all(&stage).unwrap();
-    std::os::unix::fs::symlink(&outside, &stage).unwrap();
+    directory_alias(&outside, &stage);
     assert!(cleanup_abandoned(&root).unwrap());
     assert!(stage.symlink_metadata().is_err());
     assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "unchanged");
@@ -492,7 +511,6 @@ fn startup_install_sweep_preserves_unknown_names() {
     assert!(unknown.join("SKILL.md").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn startup_install_sweep_does_not_follow_symlinked_user_roots() {
     let tmp = tempfile::tempdir().unwrap();
@@ -502,7 +520,16 @@ fn startup_install_sweep_does_not_follow_symlinked_user_roots() {
     fs::create_dir_all(preserved.parent().unwrap()).unwrap();
     fs::write(&preserved, "not owned by this storage root").unwrap();
     fs::create_dir_all(root.join("users")).unwrap();
-    std::os::unix::fs::symlink(&outside, root.join("users/linked-owner")).unwrap();
+    directory_alias(&outside, &root.join("users/linked-owner"));
     assert!(!cleanup_abandoned(&root).unwrap());
     assert_eq!(fs::read_to_string(preserved).unwrap(), "not owned by this storage root");
+}
+
+// Junctions exercise Windows directory reparse points without requiring
+// Developer Mode or the symbolic-link privilege on the CI runner.
+fn directory_alias(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    junction::create(target, link).unwrap();
 }

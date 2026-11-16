@@ -276,7 +276,9 @@ async fn http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill
     assert_eq!(records.len(), 2);
     let failed = records.iter().find(|record| record.status == "failed").unwrap();
     assert_eq!(failed.error_code.as_deref(), Some("SKILL_IMPORT_FILE_TOO_LARGE"));
-    assert_eq!(failed.actual_bytes, Some((50 * MIB + 1) as i64));
+    // The HTTP response retains the probe and its lower-bound flag, while
+    // history must not present that probe as the exact source-file size.
+    assert_eq!(failed.actual_bytes, None);
     assert_eq!(failed.limit_bytes, Some((50 * MIB) as i64));
     assert!(!paths.user_skills_dir.join(".import-tmp").exists());
 }

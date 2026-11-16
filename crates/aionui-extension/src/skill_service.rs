@@ -986,6 +986,20 @@ async fn import_skill_dirs_batch_with_repo(
             }
             Err(err) => {
                 let failure = skill_import_failure_from_error(&source_name, &err);
+                // A ZIP probe is only a lower bound, not the full source-file
+                // size. Keep it in the response details, but never persist it
+                // as an exact measured size in the nullable history column.
+                let recorded_bytes = if matches!(
+                    &err,
+                    ExtensionError::SkillImportFileTooLarge {
+                        actual_bytes_is_lower_bound: true,
+                        ..
+                    }
+                ) {
+                    None
+                } else {
+                    failure.actual_bytes
+                };
                 repo.create_import_record_for_user(
                     user_id,
                     CreateSkillImportRecordParams {
@@ -998,7 +1012,7 @@ async fn import_skill_dirs_batch_with_repo(
                         status: "failed",
                         error_code: Some(&failure.code),
                         error_path: failure.error_path.as_deref(),
-                        actual_bytes: failure.actual_bytes,
+                        actual_bytes: recorded_bytes,
                         limit_bytes: failure.limit_bytes,
                         line: failure.line,
                         column: failure.column,
@@ -1965,7 +1979,11 @@ fn validate_import_skill_name(name: &str) -> Result<(), ExtensionError> {
 
 fn validate_reserved_skill_name(name: &str) -> Result<(), ExtensionError> {
     for prefix in [IMPORT_STAGING_PREFIX, import_staging::TEMP_DIR_NAME] {
-        if name.starts_with(prefix) {
+        if name
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+        {
             return Err(ExtensionError::SkillImportReservedName {
                 skill_name: name.to_owned(),
                 reserved_prefix: prefix,

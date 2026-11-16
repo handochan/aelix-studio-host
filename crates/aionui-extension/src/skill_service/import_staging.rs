@@ -144,7 +144,7 @@ impl Drop for ZipStaging {
         // The worker/result owns both record and root leases until all writes
         // stop. A cancelled handler cannot schedule cleanup ahead of its writer.
         cleanup_owned_leaf(&self.path, &mut self.owner);
-        if let Some(owner) = self.container_owner.take() {
+        if let Some(mut owner) = self.container_owner.take() {
             // Only an empty, verified control container may be removed. Never
             // recurse through unmarked children, including legacy user data.
             if owner.try_exclusive() {
@@ -230,6 +230,15 @@ fn remove_leaf(path: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        // Directory reparse points (including junctions) must be unlinked as
+        // directories on Windows, without recursing through their target.
+        if metadata.file_type().is_symlink_dir() {
+            return fs::remove_dir(path);
+        }
+    }
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)
     } else {
