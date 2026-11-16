@@ -70,11 +70,46 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      # The checks this repository decides alone; policy in deny.toml. Advisories
+      # also depend on the RustSec database: see the two jobs below and
+      # advisories.yml (README.md "Dependency checks").
+      - uses: ./.github/actions/cargo-deny
         with:
-          tool: cargo-deny@0.20.2
-      # advisories, bans, licenses and sources; policy and baseline in deny.toml.
-      - run: cargo deny --locked check
+          checks: bans licenses sources
+
+  advisory-inputs:
+    name: Advisory inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: python3 -I -B -m unittest discover -s scripts/deny -p 'test_*.py' -v
+      - id: detect
+        # Explicit bash adds pipefail, so a failed detection is not masked by tee.
+        shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          python3 -I -B scripts/deny/changed_inputs.py --event "${GITHUB_EVENT_NAME}" --ref "${GITHUB_REF}" \
+            --pr-base "${PR_BASE}" --pr-head "${PR_HEAD}" --before "${PUSH_BEFORE}" | tee -a "${GITHUB_OUTPUT}"
+
+  advisories:
+    name: RustSec advisories (dependency inputs changed)
+    needs: advisory-inputs
+    # Skipped unless this change touches a file that decides the result.
+    if: needs.advisory-inputs.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+      - uses: ./.github/actions/cargo-deny
+        with:
+          checks: advisories
 
   release-scripts:
     name: Release scripts
