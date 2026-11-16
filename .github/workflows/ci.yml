@@ -102,11 +102,14 @@ jobs:
       # Includes real child-process leases/hard exits, unlock/relock races,
       # guard Drop/container removal and preservation of unmarked user data.
       - name: Staging ownership and lifecycle
-        run: cargo test --locked -p aionui-extension --lib skill_service::import_staging:: -- --test-threads=1
+        run: |
+          cargo test --locked -p aionui-extension --lib skill_service::import_staging:: -- --test-threads=1
       - name: Import names, existing skills and ordinary ZIP regressions
-        run: cargo test --locked -p aionui-extension --test zip_import_security final_regressions:: -- --test-threads=1
+        run: |
+          cargo test --locked -p aionui-extension --test zip_import_security final_regressions:: -- --test-threads=1
       - name: Partial-file response and nullable history
-        run: cargo test --locked -p aionui-extension --test zip_import_security review_regressions::http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill -- --exact --test-threads=1
+        run: |
+          cargo test --locked -p aionui-extension --test zip_import_security review_regressions::http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill -- --exact --test-threads=1
 
   release-scripts:
     name: Release scripts
