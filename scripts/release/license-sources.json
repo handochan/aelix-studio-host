@@ -668,7 +668,7 @@
       "rtoolbox@0.0.5",
       "rustc-hash@2.1.2",
       "rustc_version@0.4.1",
-      "rustix@1.1.4",
+      "rustix@1.1.6",
       "rustls-native-certs@0.8.3",
       "rustls-pki-types@1.14.1",
       "rustls@0.23.46",
