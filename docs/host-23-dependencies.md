@@ -90,3 +90,5 @@ JSON/error bodies with declared length or chunked responses held open past the
 limit. These are synthetic loopback transport checks, not real provider/CLI or
 field acceptance. Full CI and five-target build results belong in the PR and
 Issue handoff for the exact tested SHA.
+
+- 2026-11-16: RUSTSEC-2026-0486 — rustix 1.1.4 → 1.1.6 (lockfile only) to fix unsound initialization in xattr calls with zero-length buffers.
