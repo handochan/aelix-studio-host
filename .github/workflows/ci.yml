@@ -76,6 +76,41 @@ jobs:
       # advisories, bans, licenses and sources; policy and baseline in deny.toml.
       - run: cargo deny --locked check
 
+  windows-staging:
+    name: Windows staging and leases
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Preserve repository bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+      - name: Use the MSVC linker
+        shell: pwsh
+        run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v1-rust-windows-staging
+      # Includes real child-process leases/hard exits, unlock/relock races,
+      # guard Drop/container removal and preservation of unmarked user data.
+      - name: Staging ownership and lifecycle
+        run: |
+          cargo test --locked -p aionui-extension --lib skill_service::import_staging:: -- --test-threads=1
+      - name: Import names, existing skills and ordinary ZIP regressions
+        run: |
+          cargo test --locked -p aionui-extension --test zip_import_security final_regressions:: -- --test-threads=1
+      - name: Partial-file response and nullable history
+        run: |
+          cargo test --locked -p aionui-extension --test zip_import_security review_regressions::http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill -- --exact --test-threads=1
+
   release-scripts:
     name: Release scripts
     runs-on: ubuntu-24.04

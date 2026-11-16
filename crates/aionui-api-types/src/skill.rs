@@ -89,6 +89,9 @@ pub struct ImportSkillFailureResponse {
     pub line: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column: Option<i64>,
+    /// Additional error metadata, following the standard optional details object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 /// One row in the skill import history.
@@ -492,6 +495,7 @@ mod tests {
                 limit_bytes: Some(10),
                 line: None,
                 column: None,
+                details: None,
             }],
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -508,6 +512,22 @@ mod tests {
             }])
         );
         assert!(json.get("skillName").is_none());
+    }
+
+    #[test]
+    fn import_failure_lower_bound_details_are_additive_and_optional() {
+        let mut raw = json!({
+            "source_name": "large-skill", "code": "SKILL_IMPORT_FILE_TOO_LARGE",
+            "actual_bytes": 52428801, "limit_bytes": 52428800,
+            "details": {"actual_bytes_is_lower_bound": true}
+        });
+        let failure: ImportSkillFailureResponse = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(failure.details.as_ref().unwrap()["actual_bytes_is_lower_bound"], true);
+        assert_eq!(serde_json::to_value(failure).unwrap(), raw);
+        raw.as_object_mut().unwrap().remove("details");
+        let legacy: ImportSkillFailureResponse = serde_json::from_value(raw.clone()).unwrap();
+        assert!(legacy.details.is_none());
+        assert_eq!(serde_json::to_value(legacy).unwrap(), raw);
     }
 
     #[test]
