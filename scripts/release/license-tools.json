@@ -1,0 +1,25 @@
+{
+  "archives": [
+    {
+      "name": "cargo-about-0.8.4-aarch64-apple-darwin.tar.gz",
+      "sha256": "d5255ead3ac861a11c785bf19d4f70f16e59ac8b9519c312da61213d3d57351d"
+    },
+    {
+      "name": "cargo-about-0.8.4-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "33e0d54c0366308095fdb9101642d281b224131299e1c62001f43aa02bb3573e"
+    },
+    {
+      "name": "cargo-about-0.8.4-x86_64-apple-darwin.tar.gz",
+      "sha256": "e918d49c481f43eb17da92c406839d5c01d480261d8026a017f3d23706009d0d"
+    },
+    {
+      "name": "cargo-about-0.8.4-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "d5c38fb914bbad57c6a7d58c4847315bc3fe11efbe4fb51b3c515f997a56ceb7"
+    },
+    {
+      "name": "cargo-about-0.8.4-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "c7381aa0cdc41fc0ee662cec8daa260da7817ad8ddea04cd4ddad425460adf14"
+    }
+  ],
+  "version": "0.8.4"
+}

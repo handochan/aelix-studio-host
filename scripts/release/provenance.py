@@ -27,9 +27,11 @@ ROOT = HERE.parents[1]
 TAG_PATTERN = re.compile(r'^host-v(\d+\.\d+\.\d+)-aelix\.([1-9]\d*)$')
 sys.path.insert(0, str(HERE))
 from build import archive_name, asset_label  # noqa: E402
+import notices  # noqa: E402
+import lgpl_notice  # noqa: E402
 
 CHECKSUMS = 'aelix-studio-host-checksums.txt'
-MEMBERS = ('LICENSE', 'NOTICE', 'build-receipt.json')
+MEMBERS = ('LICENSE', 'NOTICE', *notices.FILES, 'build-receipt.json')
 
 
 def provenance_filename(label):
@@ -139,6 +141,8 @@ def assemble(label, source, output, commit, environment):
         for notice in ('LICENSE', 'NOTICE'):
             if read_member(archive, notice) != (ROOT / notice).read_bytes():
                 raise ValueError(name + ': archived ' + notice + ' differs from the checkout')
+        notices.validate_bundle(read_member(archive, notices.FILES[0]), read_member(archive, notices.FILES[1]),
+                                receipt['thirdPartyNotices'], spec['rustTarget'], label=label, commit=commit)
         if smoke.get('status') != 'passed' or smoke.get('binarySha256') != receipt['binarySha256']:
             raise ValueError(name + ': host smoke did not pass for this binary')
         expected_version = policy['binary'] + ' ' + workspace_version()
@@ -155,6 +159,7 @@ def assemble(label, source, output, commit, environment):
             'buildContainer': receipt.get('buildContainer'),
             'maximumGlibcVersionNeeded': receipt.get('maximumGlibcVersionNeeded'),
             'glibcCeiling': receipt.get('glibcCeiling'),
+            'thirdPartyNotices': receipt['thirdPartyNotices'],
             'smoke': {key: smoke.get(key) for key in ('status', 'checks', 'version')},
         }
     for key in ('tree', 'cargoLockSha256', 'licenseSha256', 'noticeSha256', 'rustToolchain', 'policySha256',
@@ -185,20 +190,57 @@ def assemble(label, source, output, commit, environment):
         'cargoLockSha256': first['cargoLockSha256'],
         'licenseSha256': first['licenseSha256'],
         'noticeSha256': first['noticeSha256'],
+        'sourceAssets': [lgpl_notice.download_source_asset(output)],
         'targets': targets,
     }
     provenance_name = provenance_filename(label)
     (output / provenance_name).write_text(json.dumps(provenance, indent=2) + '\n')
-    names = sorted([target['archive'] for target in targets.values()] + [provenance_name])
+    names = sorted([target['archive'] for target in targets.values()] + [provenance_name]
+                   + [asset['name'] for asset in provenance['sourceAssets']])
     lines = [digest_bytes((output / name).read_bytes()) + '  ' + name for name in names]
     (output / CHECKSUMS).write_text('\n'.join(lines) + '\n')
+    verify_assets(output, label, commit)
     return provenance
 
 
+def verify_assets(directory, label, commit):
+    """Recheck the source bytes and their notice binding immediately before attachment."""
+    record = json.loads((directory / provenance_filename(label)).read_text(encoding='utf-8'))
+    context = lgpl_notice.source_context(label, commit)
+    if record.get('label') != label or record.get('commit') != commit:
+        raise ValueError('Release assets differ from the checked-out build')
+    if record.get('sourceAssets') != [context['sourceAsset']]:
+        raise ValueError('LGPL source assets differ from notice/Cargo.lock')
+    lgpl_notice.verify_source_asset(directory, record['sourceAssets'][0])
+    if set(record['targets']) != set(load_policy()['targets']):
+        raise ValueError('Release asset targets are incomplete')
+    for target in record['targets'].values():
+        if target['thirdPartyNotices'].get('sourceRelease') != context:
+            raise ValueError('LGPL source asset differs from target notice')
+    expected_names = {t['archive'] for t in record['targets'].values()}
+    expected_names.update([provenance_filename(label), context['sourceAsset']['name']])
+    entries = [line.split('  ') for line in (directory / CHECKSUMS).read_text().splitlines()]
+    if len(entries) != len(expected_names) or any(len(entry) != 2 for entry in entries) or \
+            {entry[1] for entry in entries} != expected_names:
+        raise ValueError('Release checksums omit or duplicate an asset')
+    for expected_hash, name in entries:
+        if digest_bytes((directory / name).read_bytes()) != expected_hash:
+            raise ValueError('Release asset checksum mismatch: ' + name)
+    return record
+
+
 def notes(provenance):
+    if provenance.get('sourceAssets') != [lgpl_notice.source_asset()]:
+        raise ValueError('Release note source asset differs from notice/Cargo.lock')
     upstream = provenance['upstream']
     rows = '\n'.join('| ' + name + ' | `' + target['archive'] + '` | `' + target['archiveSha256'] + '` |'
                      for name, target in provenance['targets'].items())
+    required = {name for target in provenance['targets'].values()
+                for name in target['thirdPartyNotices'].get('lgplComponents', [])}
+    components = [c for p in notices.load('native-sources.json')['packages'] for c in p['components']
+                  if c['component'] in required and c.get('license') == 'LGPL-2.1-or-later']
+    corresponding_source = lgpl_notice.render(
+        lgpl_notice.source_context(provenance['label'], provenance['commit']), components)
     return f"""Aelix Studio host `{provenance['label']}`: a modified build of
 [{upstream['repository']}](https://github.com/{upstream['repository']}) for Aelix Studio.
 
@@ -207,12 +249,15 @@ def notes(provenance):
 - `aelix-studio-host --version` reports the upstream workspace version `{provenance['workspaceVersion']}`
 - Rust {provenance['rustToolchain']}; every archive passed the host smoke on its own runner
 
+{corresponding_source}
+
 | Target | Archive | SHA-256 |
 | --- | --- | --- |
 {rows}
 
 Verify with `sha256sum -c {CHECKSUMS}`. `{provenance_filename(provenance['label'])}`
-records the build receipts. Each archive contains `LICENSE` and `NOTICE`; see the
+records the build receipts. Each archive contains `LICENSE`, `NOTICE`,
+`THIRD-PARTY-NOTICES.txt` and `third-party-licenses.json`; see the
 repository README for the upstream license notice and the list of modifications.
 """
 
@@ -229,6 +274,9 @@ def main():
     combine.add_argument('--input', type=Path, required=True)
     combine.add_argument('--output', type=Path, required=True, help='New directory for the release assets only')
     combine.add_argument('--notes', type=Path, required=True, help='Release notes path, outside --output')
+    verify = commands.add_parser('verify-assets')
+    verify.add_argument('--label', required=True)
+    verify.add_argument('--input', type=Path, required=True)
     args = parser.parse_args()
     commit = git('rev-parse', 'HEAD').stdout.strip()
     if args.command == 'prepare':
@@ -236,6 +284,10 @@ def main():
         label, publish = release_label(args.event, args.ref, commit, args.main_ref)
         print('label=' + label)
         print('publish=' + ('true' if publish else 'false'))
+        return
+    if args.command == 'verify-assets':
+        verify_assets(args.input.resolve(), args.label, commit)
+        print('Release assets and LGPL source checksum verified')
         return
     provenance = assemble(args.label, args.input.resolve(), args.output.resolve(), commit, os.environ)
     args.notes.write_text(notes(provenance))

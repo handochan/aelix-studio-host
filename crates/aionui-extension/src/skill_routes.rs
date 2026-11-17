@@ -215,6 +215,7 @@ async fn import_skill(
             limit_bytes: failure.limit_bytes,
             line: failure.line,
             column: failure.column,
+            details: failure.details,
         })
         .collect();
     Ok(Json(ApiResponse::ok(ImportSkillResponse {
@@ -288,10 +289,11 @@ async fn list_import_history(
 
 /// `POST /api/skills/scan` — scan a directory for skills.
 async fn scan_for_skills(
+    State(state): State<SkillRouterState>,
     body: Result<Json<ScanForSkillsRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ScanForSkillsResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let skills = skill_service::scan_for_skills(Path::new(&req.folder_path)).await?;
+    let skills = skill_service::scan_for_skills_with_paths(&state.skill_paths, Path::new(&req.folder_path)).await?;
     let resp = ScanForSkillsResponse {
         skills: skills
             .into_iter()
@@ -323,7 +325,7 @@ async fn detect_external(
     State(state): State<SkillRouterState>,
 ) -> Result<Json<ApiResponse<Vec<ExternalSkillSourceResponse>>>, ApiError> {
     let custom = state.external_paths_manager.get_custom_external_paths().await;
-    let sources = skill_service::detect_and_count_external_skills(&custom).await;
+    let sources = skill_service::detect_and_count_external_skills_with_paths(&state.skill_paths, &custom).await;
     let resp: Vec<ExternalSkillSourceResponse> = sources
         .into_iter()
         .map(|s| ExternalSkillSourceResponse {

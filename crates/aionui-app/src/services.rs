@@ -297,6 +297,11 @@ impl AppServices {
             .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let skill_paths = Arc::new(aionui_extension::resolve_skill_paths(&app_resource_dir, &data_dir));
+        if let Err(error) = aionui_extension::skill_service::cleanup_skill_import_staging(&skill_paths).await {
+            // Disk discovery excludes staging even if an IO failure prevents
+            // removal. Cleanup failure must not expose abandoned skills.
+            tracing::warn!(error = %error, "abandoned skill import staging cleanup failed");
+        }
         if identity_mode.is_local() {
             aionui_extension::sync_skill_catalog_into_repo(skill_paths.as_ref(), skill_repo.as_ref())
                 .await

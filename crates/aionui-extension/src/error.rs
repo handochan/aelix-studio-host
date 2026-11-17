@@ -94,6 +94,12 @@ pub enum ExtensionError {
     #[error("Invalid skill import source: {0}")]
     SkillImportInvalidSource(String),
 
+    #[error("Skill name '{skill_name}' starts with reserved host staging prefix '{reserved_prefix}'")]
+    SkillImportReservedName {
+        skill_name: String,
+        reserved_prefix: &'static str,
+    },
+
     #[error("Skill import does not allow symlink entries: {0}")]
     SkillImportSymlinkEntry(String),
 
@@ -102,10 +108,27 @@ pub enum ExtensionError {
         file_path: Option<String>,
         file_bytes: u64,
         limit_bytes: u64,
+        actual_bytes_is_lower_bound: bool,
     },
 
     #[error("Skill import is too large: {total_bytes} bytes, limit {limit_bytes} bytes")]
     SkillImportTotalTooLarge { total_bytes: u64, limit_bytes: u64 },
+
+    #[error("Skill zip archive is too large across all skills: {total_bytes} bytes, limit {limit_bytes} bytes")]
+    SkillImportZipTooLarge { total_bytes: u64, limit_bytes: u64 },
+
+    #[error("Skill zip has too many entries or output paths: {entry_count}, limit {limit_entries}")]
+    SkillImportZipTooManyEntries { entry_count: usize, limit_entries: usize },
+
+    #[error(
+        "Skill zip entry exceeds the {limit_ratio}:1 compression ratio limit: {expanded_bytes} expanded bytes from {compressed_bytes} compressed bytes"
+    )]
+    SkillImportZipCompressionRatio {
+        file_path: String,
+        expanded_bytes: u64,
+        compressed_bytes: u64,
+        limit_ratio: u64,
+    },
 
     #[error("Invalid skill zip archive: {0}")]
     SkillImportInvalidZip(String),
