@@ -128,8 +128,8 @@ def render_body(passing, report, context):
             lines += ['The run failed with an error that names no RustSec advisory, for example because the advisory '
                       'database could not be fetched or an earlier step failed. Read the run log.', '']
         lines += ['Resolve each advisory by updating or removing the dependency. A `deny.toml` entry needs the '
-                  "repository owner's decision. README.md \"Dependency checks\" describes which runs check advisories.",
-                  '']
+                  "repository owner's decision. A release tag on a commit that fails this check is not published. "
+                  'README.md "Dependency checks" describes which runs check advisories.', '']
     lines += ['The Advisories workflow maintains this Issue: each run on `%s` rewrites this text, a failing run '
               'reopens the Issue and a passing run closes it. Keep the first line of this text (an HTML comment); '
               'without it the workflow opens a new Issue.' % context['branch']]

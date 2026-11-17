@@ -150,6 +150,7 @@ class BodyTest(unittest.TestCase):
         self.assertIn(
             '| [RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486) | unsound | rustix 1.1.4 |', body)
         self.assertNotIn('names no RustSec advisory', body)
+        self.assertIn('A release tag on a commit that fails this check is not published.', body)
         self.assertEqual(tracking.recorded_ids(body), ['RUSTSEC-2026-0459', 'RUSTSEC-2026-0486'])
 
     def test_failure_without_an_identified_advisory_points_to_the_log(self):

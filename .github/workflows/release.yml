@@ -7,6 +7,8 @@ name: Release
 # host-v<version>-aelix.<n> on a commit already on main; upstream AionCore
 # tags (v*) never match. Pull requests and manual runs are dry runs: they
 # upload the same assets as workflow artifacts and publish nothing.
+# A tag publishes only if the RustSec advisory check passes on its commit
+# (the advisories job; README.md "Dependency checks").
 # A tag runs the workflow file from its own commit, so this gate is a
 # consistency check. Push access, the AGENTS.md rules, the
 # block-upstream-v-tags ruleset and Studio's SHA-256 pin are the controls
@@ -65,6 +67,25 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" | tee -a "${GITHUB_OUTPUT}"
           python3 -I -B scripts/release/provenance.py prepare --event "${GITHUB_EVENT_NAME}" --ref "${GITHUB_REF}" \
             | tee -a "${GITHUB_OUTPUT}"
+
+  advisories:
+    name: RustSec advisories (release gate)
+    needs: prepare
+    # Tag and manual runs check the release commit. A pull request's dry run
+    # does not: the advisory database changes outside this repository and must
+    # not fail a pull request by itself (ci.yml checks the pull requests that
+    # change a dependency input). publish needs this job, so a failed or
+    # skipped check publishes nothing.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+      - uses: ./.github/actions/cargo-deny
+        with:
+          checks: advisories
 
   build:
     name: Build ${{ matrix.target }}
@@ -165,8 +186,11 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: [prepare, assemble]
-    if: needs.prepare.outputs.publish == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/host-v')
+    needs: [prepare, assemble, advisories]
+    # No always() or other status function: every needed job must have
+    # succeeded. The advisory result is also named so that stays true if this
+    # condition is edited.
+    if: needs.advisories.result == 'success' && needs.prepare.outputs.publish == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/host-v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
