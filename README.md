@@ -51,9 +51,9 @@ files. `git log 47e66d0d151123e973b3fd1e77afcb5671b3f8c5..main` lists all of
 them, and each release's provenance file names the base and release commits.
 Categories so far:
 
-- Repository tooling: CI and release workflows, release scripts
-  (`scripts/release/`), `deny.toml`, this README, `NOTICE`, and the
-  repository rules in `AGENTS.md`.
+- Repository tooling: CI, advisory and release workflows, release scripts
+  (`scripts/release/`), dependency-check scripts (`scripts/deny/`),
+  `deny.toml`, this README, `NOTICE`, and the repository rules in `AGENTS.md`.
 - Removed upstream automation: `release-please.yml`, `build-manual.yml` and the
   test that asserted their contents. `release-please-config.json`,
   `.release-please-manifest.json`, `Cross.toml` and `CHANGELOG.md` are kept
@@ -146,7 +146,15 @@ checks do not establish that Studio launches it.
    runs from the tagged commit's own workflow file, so a `host-v*` tag on a
    commit with an edited `release.yml` would not be held by it; see
    [What actually controls releases](#what-actually-controls-releases).
-2. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
+2. **Advisory gate.** Tag and manual runs check the release commit with
+   `cargo deny --locked check advisories` in a job of its own while the
+   targets build, so an unresolved advisory is reported within minutes. The
+   publish job needs this job, so a failed or skipped check publishes nothing;
+   the builds and the assembled assets are still uploaded as workflow
+   artifacts. A pull request's dry run skips the check, because the RustSec
+   database must not fail a pull request by itself (see
+   [When each check runs](#when-each-check-runs)).
+3. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
    Ubuntu 24.04 arm64 and x64, Windows Server 2022.
    [`build.py`](scripts/release/build.py) checks the pinned Rust toolchain and a
    clean checkout whose files equal their git blobs byte for byte (Windows
@@ -156,32 +164,46 @@ checks do not establish that Studio launches it.
    (Debian 11, pinned image digest and apt snapshot) and must stay within the
    upstream GLIBC ceilings (x64 2.34, arm64 2.30). Windows uses
    `-C target-feature=+crt-static`.
-3. **Host smoke** ([`smoke.py`](scripts/release/smoke.py)) runs each built
+4. **Host smoke** ([`smoke.py`](scripts/release/smoke.py)) runs each built
    binary on its runner: startup and listening event, `/health`,
    `update_check_disabled_by_default` (HTTP 400 / `UPDATE_CHECK_DISABLED`), custom ACP
    agent registration with a synthetic agent, ACP client identity, conversation,
    runtime warm-up,
    launch-only model selector, unavailable-model rejection, a prompt/reply
    turn, idle state and graceful shutdown.
-4. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
+5. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
    every receipt, archive member and smoke report, then writes the checksums
    and provenance. It also rechecks the archived third-party notices against the
    current crate/native policies and their original-notice hashes. It downloads
    the unmodified LGPL corresponding-source `.crate` asset, checks its Cargo.lock
    checksum before saving it, and includes it in provenance and checksums.
-5. **Publish** (tag runs only) creates the GitHub release. This workflow
-   refuses an existing release and never replaces its assets; that is a
-   property of this workflow, not of the repository.
+6. **Publish** (tag runs only, after the advisory gate passed) runs the
+   advisory check once more and then creates the GitHub release. The second
+   check covers what the gate job cannot: an advisory published while the
+   targets were built, and a re-run of failed jobs, which keeps the gate job's
+   earlier success instead of checking again. Because that check runs
+   dependency tooling in the job whose token can write, the checkout does not
+   keep the token and the cargo-deny installer is not given it; only the step
+   that creates the release receives it. This workflow refuses an existing
+   release and never replaces its assets; that is a property of this workflow,
+   not of the repository.
 
 Creating a release tag requires the repository owner's approval (see
 `AGENTS.md`). Dry-run assets are available as workflow artifacts for 30 days.
 
+Run the Advisories workflow on `main` before tagging. The
+`protect-host-release-tags` ruleset forbids moving or deleting a `host-v*`
+tag, so a tag whose advisory gate fails stays without a release: resolve the
+advisory on `main` and tag the next `<n>`.
+
 ### What actually controls releases
 
-The workflow gate is a consistency check, not an access control. What keeps a
-release trustworthy is: push access to this repository, the push/tag rules in
-`AGENTS.md`, the `block-upstream-v-tags` ruleset (no creation, update or
-deletion of `refs/tags/v*`), and Studio pinning each archive by SHA-256.
+The workflow gate is a consistency check, not an access control. The advisory
+gate is the same: it runs from the tagged commit's own `release.yml`, so a tag
+on a commit that predates it or edits the workflow is not held by it. What
+keeps a release trustworthy is: push access to this repository, the push/tag
+rules in `AGENTS.md`, the `block-upstream-v-tags` ruleset (no creation, update
+or deletion of `refs/tags/v*`), and Studio pinning each archive by SHA-256.
 
 ### Building locally
 
@@ -285,12 +307,71 @@ remain PR ② of [#2](https://github.com/handochan/aelix-studio-host/issues/2).
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs migration
 immutability, `cargo fmt`, `cargo clippy -D warnings`, `cargo nextest`, the
-release-script tests, a linux-x64 host smoke, and `cargo deny --locked check`
-([`deny.toml`](deny.toml)): advisories, licenses, bans and sources.
+release-script tests, a linux-x64 host smoke, and cargo-deny
+([`deny.toml`](deny.toml)): licenses, bans and sources on every run, and
+RustSec advisories as described below.
 The dependency policy covers the five release targets with default features
 and workspace development dependencies. The release PR workflow also builds
 the default-feature application and runs its smoke on all five targets,
 including Windows and the Linux GLIBC ceilings.
+
+### When each check runs
+
+The RustSec database changes outside this repository, so a newly published
+advisory used to fail `main` and every open pull request at once. Since
+decision D18 ([#30](https://github.com/handochan/aelix-studio-host/issues/30),
+2026-11-16) the advisory check holds only a change that can itself bring an
+advisory into the checked graph, and a release:
+
+| Run | cargo-deny checks |
+| --- | --- |
+| Every push and pull request (`ci.yml`, "Dependency policy") | `cargo deny --locked check bans licenses sources` |
+| A push or pull request that changes a dependency input (`ci.yml`, "RustSec advisories") | also `cargo deny --locked check advisories` |
+| Mondays 00:17 UTC and manual runs ([`advisories.yml`](.github/workflows/advisories.yml)) | `cargo deny --locked check advisories` |
+| A `host-v*` release tag (`release.yml`, "RustSec advisories (release gate)" and again in "Publish GitHub release") | `cargo deny --locked check advisories` on the release commit, twice |
+| A manual release run (`release.yml`, "RustSec advisories (release gate)") | `cargo deny --locked check advisories` on that commit |
+
+- **Dependency inputs** are `Cargo.lock`, `deny.toml`, every `Cargo.toml`
+  (features and targets select the checked graph without changing the
+  lockfile) and the cargo-deny action. A pull request is judged by its own
+  commits since the merge base, a branch push or manual CI run by all commits
+  not on `origin/main`, and a push to `main` by the commits of that push. When
+  that cannot be determined, the advisory check runs
+  ([`changed_inputs.py`](scripts/deny/changed_inputs.py)). On other runs the
+  "RustSec advisories" job is shown as skipped.
+- **Weekly run:** a new advisory is noticed up to a week after publication. A
+  failing run on `main` creates one tracking Issue, "[Host] RustSec advisory
+  check fails on main", or reopens and rewrites the existing one; it comments
+  only when the reported advisories change, and a passing run closes it. The
+  Issue is recognised by a marker in its text and by its author, the Actions
+  bot, so a run never opens a second one
+  ([`advisory_issue.py`](scripts/deny/advisory_issue.py)). Only that job has
+  `issues: write`. A manual run on another branch reports its result and
+  leaves the Issue alone.
+- **Releases:** a `host-v*` tag publishes only if the advisory check passes on
+  the tagged commit, in the gate job and again immediately before the GitHub
+  release is created ([How a release is built](#how-a-release-is-built)).
+  A manual release run is a dry run of the gate job only. It shows whether
+  the check passes on that commit, that the builds and the assembly still
+  complete, and that nothing is published. It cannot show the publish job
+  being stopped, because a manual run never reaches that job whatever the
+  check says. That part is the workflow's structure, which
+  [`test_workflow.py`](scripts/release/test_workflow.py) checks on the parsed
+  workflow: the publish job needs the gate job, its whole condition requires
+  the gate's success, and its own check is the last step before the release
+  is created. A pull request's release dry run skips the gate.
+- Every run uses [the cargo-deny action](.github/actions/cargo-deny/action.yml),
+  the one place that pins the cargo-deny version and runs it. It installs
+  only the checksummed binary from the installer's manifest
+  (`fallback: none`); the installer then receives no GitHub token.
+
+```sh
+cargo deny --locked check bans licenses sources
+cargo deny --locked check advisories
+python3 -I -B -m unittest discover -s scripts/deny -p 'test_*.py' -v
+```
+
+### Policy and exceptions
 
 - **Licenses:** crates must use a license on the allow list. Every crate
   marked `publish = false` is skipped, including third-party ones: our
@@ -302,9 +383,9 @@ including Windows and the Linux GLIBC ceilings.
 - **Advisories:** dependency updates resolve 19 of the 20 inherited RustSec
   advisories, including all four zip notices, in
   [#7](https://github.com/handochan/aelix-studio-host/issues/7). Calamine 0.38
-  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail CI,
-  including transitive unsound notices (`unsound = "all"`), except for the
-  documented baseline and approved exception below. Host #23 upgrades rmcp to
+  also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail
+  the advisory check, including transitive unsound notices (`unsound = "all"`),
+  except for the documented baseline and approved exception below. Host #23 upgrades rmcp to
   3.9.0 (0462), removes pin-utils through AWS updates (0441), and updates
   event-listener to 5.4.2 (0221) and lru to 0.18.2 (0253).
   [The dependency change record](docs/host-23-dependencies.md) lists every

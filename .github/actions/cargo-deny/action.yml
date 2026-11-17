@@ -1,0 +1,45 @@
+name: cargo-deny
+description: >-
+  Install the pinned cargo-deny and run the named checks on the checked-out
+  workspace. Every workflow that runs cargo-deny goes through this action, so
+  the version and the invocation are defined once. The caller checks out the
+  commit and installs the Rust toolchain first. See README.md "Dependency checks".
+
+inputs:
+  checks:
+    description: >-
+      Space-separated checks to run: advisories, bans, licenses, sources. At
+      least one is required; "advisories" also depends on the RustSec
+      database, which changes outside this repository.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      with:
+        tool: cargo-deny@0.20.2
+        # Only the checksummed binary from the installer's manifest. Without a
+        # fallback the installer is also given no GitHub token, which matters
+        # in the release workflow's publish job: its token can write.
+        fallback: none
+    - shell: bash
+      env:
+        CHECKS: ${{ inputs.checks }}
+      run: |
+        read -r -a checks <<< "${CHECKS}"
+        # No argument means every check; refuse that so a caller names its scope.
+        if [[ "${#checks[@]}" -eq 0 ]]; then
+          echo "::error::cargo-deny: no check named"
+          exit 2
+        fi
+        for check in "${checks[@]}"; do
+          case "${check}" in
+            advisories | bans | licenses | sources) ;;
+            *)
+              echo "::error::cargo-deny: unknown check '${check}'"
+              exit 2
+              ;;
+          esac
+        done
+        cargo deny --locked check "${checks[@]}"
