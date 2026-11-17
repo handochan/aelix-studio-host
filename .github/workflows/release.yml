@@ -7,8 +7,9 @@ name: Release
 # host-v<version>-aelix.<n> on a commit already on main; upstream AionCore
 # tags (v*) never match. Pull requests and manual runs are dry runs: they
 # upload the same assets as workflow artifacts and publish nothing.
-# A tag publishes only if the RustSec advisory check passes on its commit
-# (the advisories job; README.md "Dependency checks").
+# A tag publishes only if the RustSec advisory check passes on its commit:
+# in the advisories job, and again in the publish job immediately before the
+# release is created (README.md "Dependency checks").
 # A tag runs the workflow file from its own commit, so this gate is a
 # consistency check. Push access, the AGENTS.md rules, the
 # block-upstream-v-tags ruleset and Studio's SHA-256 pin are the controls
@@ -71,11 +72,12 @@ jobs:
   advisories:
     name: RustSec advisories (release gate)
     needs: prepare
-    # Tag and manual runs check the release commit. A pull request's dry run
-    # does not: the advisory database changes outside this repository and must
-    # not fail a pull request by itself (ci.yml checks the pull requests that
+    # Tag and manual runs check the release commit while the targets build, so
+    # an unresolved advisory is reported early. A pull request's dry run does
+    # not: the advisory database changes outside this repository and must not
+    # fail a pull request by itself (ci.yml checks the pull requests that
     # change a dependency input). publish needs this job, so a failed or
-    # skipped check publishes nothing.
+    # skipped check publishes nothing, and publish checks once more itself.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     steps:
@@ -198,10 +200,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+          # The check below runs dependency tooling in this job; keep the
+          # write token out of the checkout. Only the last step is given it.
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: assets-${{ needs.prepare.outputs.label }}
           path: dist
+      - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+      # Checked again immediately before the release is created. The advisories
+      # job ran when this run started: the database may have changed while the
+      # targets were built, and a re-run of failed jobs keeps that job's
+      # earlier success instead of checking again.
+      - uses: ./.github/actions/cargo-deny
+        with:
+          checks: advisories
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.label }}
