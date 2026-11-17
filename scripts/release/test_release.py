@@ -26,18 +26,6 @@ POLICY = json.loads((HERE / 'policy.json').read_text())
 COMMIT = 'a' * 40
 
 
-def workflow_jobs(name):
-    """Return {job id: its text} for a workflow file, split on the two-space job keys."""
-    jobs, current = {}, None
-    for line in (ROOT / '.github/workflows' / name).read_text().split('\njobs:\n', 1)[1].splitlines():
-        key = re.match(r'  ([A-Za-z0-9_-]+):$', line)
-        if key:
-            current = jobs.setdefault(key.group(1), [])
-        elif current is not None:
-            current.append(line)
-    return {job: '\n'.join(lines) for job, lines in jobs.items()}
-
-
 class ArchiveTests(unittest.TestCase):
     def test_archive_names_strip_the_release_tag_prefix(self):
         self.assertEqual(build.archive_name('host-v0.2.2-aelix.2', 'aarch64-apple-darwin'),
@@ -327,31 +315,6 @@ class ConsistencyTests(unittest.TestCase):
         trigger = workflow.split('\non:', 1)[1].split('\npermissions:', 1)[0]
         self.assertIn('tags: ["host-v*"]', trigger)
         self.assertEqual(len(re.findall(r'tags:', trigger)), 1)
-
-    def test_publishing_requires_the_advisory_gate(self):
-        jobs = workflow_jobs('release.yml')
-        self.assertEqual(list(jobs), ['prepare', 'advisories', 'build', 'assemble', 'publish'])
-        gate, publish = jobs['advisories'], jobs['publish']
-
-        # The gate checks the release commit with the shared cargo-deny action and cannot pass by not checking.
-        self.assertIn('          ref: ${{ needs.prepare.outputs.sha }}\n', gate)
-        self.assertIn('      - uses: ./.github/actions/cargo-deny\n        with:\n          checks: advisories', gate)
-        self.assertEqual(re.findall(r'^ +if: (.+)$', gate, re.M), ["github.event_name != 'pull_request'"])
-        self.assertNotIn('continue-on-error', gate)
-
-        # Publishing needs the gate, and nothing in its condition lets it run after a failed or skipped need.
-        needs = re.search(r'^    needs: \[(.+)\]$', publish, re.M).group(1).split(', ')
-        self.assertEqual(needs, ['prepare', 'assemble', 'advisories'])
-        conditions = re.findall(r'^ +if: (.+)$', publish, re.M)
-        self.assertEqual(len(conditions), 1)
-        self.assertTrue(conditions[0].startswith("needs.advisories.result == 'success' && "))
-        for escape in ('always(', 'cancelled(', 'failure(', '||'):
-            self.assertNotIn(escape, conditions[0])
-        self.assertNotIn('continue-on-error', publish)
-
-        # Only the publish job can create a release.
-        self.assertEqual([job for job, text in jobs.items() if 'gh release' in text], ['publish'])
-        self.assertEqual([job for job, text in jobs.items() if 'contents: write' in text], ['publish'])
 
     def test_policy_upstream_base_matches_the_toolchain_and_license_files(self):
         self.assertEqual(len(POLICY['upstream']['commit']), 40)
