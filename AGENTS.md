@@ -37,7 +37,7 @@ gh project item-list 9 --owner handochan --format json --limit 100
 
 - Push only when the user authorized it, only your own branch (`git push -u origin <branch>`). Never push `main`, never force-push shared branches, never merge without approval.
 - Never push tags unless the user approved that specific release. Release tags are `host-v<workspace version>-aelix.<n>` on a commit already on `main` (README.md "Releases").
-- Before pushing an approved release tag, run the Advisories workflow on `main` and tag only if it passes. A release tag publishes only when the advisory check passes on its commit, and a `host-v*` tag cannot be moved or deleted, so a tag that fails the check is spent.
+- Before pushing an approved release tag, run the Advisories workflow on `main` and tag only if it passes. A release tag publishes only when the advisory check passes on its commit, in the gate job and again immediately before the release is created, and a `host-v*` tag cannot be moved or deleted, so a tag that fails the check is spent. Keep both checks when editing the release workflow; its structure test must still pass.
 - Never push upstream tags (`v*`) to origin, and never use `git push --tags`, `--follow-tags` or `--mirror`. Upstream tag commits carry upstream's release workflow; the `block-upstream-v-tags` ruleset also rejects `refs/tags/v*`.
 - The `upstream` remote is fetch-only and must have `remote.upstream.tagOpt --no-tags`. Never open issues, PRs or comments on iOfficeAI repositories without the user's approval.
 - `.github/workflows/` belongs to this repository; do not adopt upstream workflow changes. Keep CI green: fmt, clippy, tests, cargo-deny and the host smoke.

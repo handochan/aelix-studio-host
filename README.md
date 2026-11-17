@@ -146,12 +146,13 @@ checks do not establish that Studio launches it.
    runs from the tagged commit's own workflow file, so a `host-v*` tag on a
    commit with an edited `release.yml` would not be held by it; see
    [What actually controls releases](#what-actually-controls-releases).
-2. **Advisory gate.** While the targets build, tag and manual runs check the
-   release commit with `cargo deny --locked check advisories`. The publish job
-   needs this job, so a failed or skipped check publishes nothing; the builds
-   and the assembled assets are still uploaded as workflow artifacts. A pull
-   request's dry run skips the check, because the RustSec database must not
-   fail a pull request by itself (see
+2. **Advisory gate.** Tag and manual runs check the release commit with
+   `cargo deny --locked check advisories` in a job of its own while the
+   targets build, so an unresolved advisory is reported within minutes. The
+   publish job needs this job, so a failed or skipped check publishes nothing;
+   the builds and the assembled assets are still uploaded as workflow
+   artifacts. A pull request's dry run skips the check, because the RustSec
+   database must not fail a pull request by itself (see
    [When each check runs](#when-each-check-runs)).
 3. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
    Ubuntu 24.04 arm64 and x64, Windows Server 2022.
@@ -176,10 +177,16 @@ checks do not establish that Studio launches it.
    current crate/native policies and their original-notice hashes. It downloads
    the unmodified LGPL corresponding-source `.crate` asset, checks its Cargo.lock
    checksum before saving it, and includes it in provenance and checksums.
-6. **Publish** (tag runs only, after the advisory gate passed) creates the
-   GitHub release. This workflow refuses an existing release and never
-   replaces its assets; that is a property of this workflow, not of the
-   repository.
+6. **Publish** (tag runs only, after the advisory gate passed) runs the
+   advisory check once more and then creates the GitHub release. The second
+   check covers what the gate job cannot: an advisory published while the
+   targets were built, and a re-run of failed jobs, which keeps the gate job's
+   earlier success instead of checking again. Because that check runs
+   dependency tooling in the job whose token can write, the checkout does not
+   keep the token and the cargo-deny installer is not given it; only the step
+   that creates the release receives it. This workflow refuses an existing
+   release and never replaces its assets; that is a property of this workflow,
+   not of the repository.
 
 Creating a release tag requires the repository owner's approval (see
 `AGENTS.md`). Dry-run assets are available as workflow artifacts for 30 days.
@@ -321,7 +328,8 @@ advisory into the checked graph, and a release:
 | Every push and pull request (`ci.yml`, "Dependency policy") | `cargo deny --locked check bans licenses sources` |
 | A push or pull request that changes a dependency input (`ci.yml`, "RustSec advisories") | also `cargo deny --locked check advisories` |
 | Mondays 00:17 UTC and manual runs ([`advisories.yml`](.github/workflows/advisories.yml)) | `cargo deny --locked check advisories` |
-| A `host-v*` release tag and a manual release run (`release.yml`, "RustSec advisories (release gate)") | `cargo deny --locked check advisories` on the release commit |
+| A `host-v*` release tag (`release.yml`, "RustSec advisories (release gate)" and again in "Publish GitHub release") | `cargo deny --locked check advisories` on the release commit, twice |
+| A manual release run (`release.yml`, "RustSec advisories (release gate)") | `cargo deny --locked check advisories` on that commit |
 
 - **Dependency inputs** are `Cargo.lock`, `deny.toml`, every `Cargo.toml`
   (features and targets select the checked graph without changing the
@@ -341,12 +349,21 @@ advisory into the checked graph, and a release:
   `issues: write`. A manual run on another branch reports its result and
   leaves the Issue alone.
 - **Releases:** a `host-v*` tag publishes only if the advisory check passes on
-  the tagged commit; with an unresolved advisory the release stops before the
-  GitHub release is created. A manual release run makes the same check as a
-  dry run. A pull request's release dry run does not
-  ([How a release is built](#how-a-release-is-built)).
+  the tagged commit, in the gate job and again immediately before the GitHub
+  release is created ([How a release is built](#how-a-release-is-built)).
+  A manual release run is a dry run of the gate job only. It shows whether
+  the check passes on that commit, that the builds and the assembly still
+  complete, and that nothing is published. It cannot show the publish job
+  being stopped, because a manual run never reaches that job whatever the
+  check says. That part is the workflow's structure, which
+  [`test_workflow.py`](scripts/release/test_workflow.py) checks on the parsed
+  workflow: the publish job needs the gate job, its whole condition requires
+  the gate's success, and its own check is the last step before the release
+  is created. A pull request's release dry run skips the gate.
 - Every run uses [the cargo-deny action](.github/actions/cargo-deny/action.yml),
-  the one place that pins the cargo-deny version and runs it.
+  the one place that pins the cargo-deny version and runs it. It installs
+  only the checksummed binary from the installer's manifest
+  (`fallback: none`); the installer then receives no GitHub token.
 
 ```sh
 cargo deny --locked check bans licenses sources
