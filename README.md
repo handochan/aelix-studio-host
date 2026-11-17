@@ -146,7 +146,14 @@ checks do not establish that Studio launches it.
    runs from the tagged commit's own workflow file, so a `host-v*` tag on a
    commit with an edited `release.yml` would not be held by it; see
    [What actually controls releases](#what-actually-controls-releases).
-2. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
+2. **Advisory gate.** While the targets build, tag and manual runs check the
+   release commit with `cargo deny --locked check advisories`. The publish job
+   needs this job, so a failed or skipped check publishes nothing; the builds
+   and the assembled assets are still uploaded as workflow artifacts. A pull
+   request's dry run skips the check, because the RustSec database must not
+   fail a pull request by itself (see
+   [When each check runs](#when-each-check-runs)).
+3. **Build** each target on its own runner: macOS 15 (arm64), macOS 15 Intel,
    Ubuntu 24.04 arm64 and x64, Windows Server 2022.
    [`build.py`](scripts/release/build.py) checks the pinned Rust toolchain and a
    clean checkout whose files equal their git blobs byte for byte (Windows
@@ -156,32 +163,40 @@ checks do not establish that Studio launches it.
    (Debian 11, pinned image digest and apt snapshot) and must stay within the
    upstream GLIBC ceilings (x64 2.34, arm64 2.30). Windows uses
    `-C target-feature=+crt-static`.
-3. **Host smoke** ([`smoke.py`](scripts/release/smoke.py)) runs each built
+4. **Host smoke** ([`smoke.py`](scripts/release/smoke.py)) runs each built
    binary on its runner: startup and listening event, `/health`,
    `update_check_disabled_by_default` (HTTP 400 / `UPDATE_CHECK_DISABLED`), custom ACP
    agent registration with a synthetic agent, ACP client identity, conversation,
    runtime warm-up,
    launch-only model selector, unavailable-model rejection, a prompt/reply
    turn, idle state and graceful shutdown.
-4. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
+5. **Assemble** ([`provenance.py`](scripts/release/provenance.py)) cross-checks
    every receipt, archive member and smoke report, then writes the checksums
    and provenance. It also rechecks the archived third-party notices against the
    current crate/native policies and their original-notice hashes. It downloads
    the unmodified LGPL corresponding-source `.crate` asset, checks its Cargo.lock
    checksum before saving it, and includes it in provenance and checksums.
-5. **Publish** (tag runs only) creates the GitHub release. This workflow
-   refuses an existing release and never replaces its assets; that is a
-   property of this workflow, not of the repository.
+6. **Publish** (tag runs only, after the advisory gate passed) creates the
+   GitHub release. This workflow refuses an existing release and never
+   replaces its assets; that is a property of this workflow, not of the
+   repository.
 
 Creating a release tag requires the repository owner's approval (see
 `AGENTS.md`). Dry-run assets are available as workflow artifacts for 30 days.
 
+Run the Advisories workflow on `main` before tagging. The
+`protect-host-release-tags` ruleset forbids moving or deleting a `host-v*`
+tag, so a tag whose advisory gate fails stays without a release: resolve the
+advisory on `main` and tag the next `<n>`.
+
 ### What actually controls releases
 
-The workflow gate is a consistency check, not an access control. What keeps a
-release trustworthy is: push access to this repository, the push/tag rules in
-`AGENTS.md`, the `block-upstream-v-tags` ruleset (no creation, update or
-deletion of `refs/tags/v*`), and Studio pinning each archive by SHA-256.
+The workflow gate is a consistency check, not an access control. The advisory
+gate is the same: it runs from the tagged commit's own `release.yml`, so a tag
+on a commit that predates it or edits the workflow is not held by it. What
+keeps a release trustworthy is: push access to this repository, the push/tag
+rules in `AGENTS.md`, the `block-upstream-v-tags` ruleset (no creation, update
+or deletion of `refs/tags/v*`), and Studio pinning each archive by SHA-256.
 
 ### Building locally
 
@@ -299,13 +314,14 @@ The RustSec database changes outside this repository, so a newly published
 advisory used to fail `main` and every open pull request at once. Since
 decision D18 ([#30](https://github.com/handochan/aelix-studio-host/issues/30),
 2026-11-16) the advisory check holds only a change that can itself bring an
-advisory into the checked graph:
+advisory into the checked graph, and a release:
 
 | Run | cargo-deny checks |
 | --- | --- |
 | Every push and pull request (`ci.yml`, "Dependency policy") | `cargo deny --locked check bans licenses sources` |
 | A push or pull request that changes a dependency input (`ci.yml`, "RustSec advisories") | also `cargo deny --locked check advisories` |
 | Mondays 00:17 UTC and manual runs ([`advisories.yml`](.github/workflows/advisories.yml)) | `cargo deny --locked check advisories` |
+| A `host-v*` release tag and a manual release run (`release.yml`, "RustSec advisories (release gate)") | `cargo deny --locked check advisories` on the release commit |
 
 - **Dependency inputs** are `Cargo.lock`, `deny.toml`, every `Cargo.toml`
   (features and targets select the checked graph without changing the
@@ -324,10 +340,11 @@ advisory into the checked graph:
   ([`advisory_issue.py`](scripts/deny/advisory_issue.py)). Only that job has
   `issues: write`. A manual run on another branch reports its result and
   leaves the Issue alone.
-- **Releases:** the release workflow does not check advisories yet. The gate
-  that stops a `host-v*` release before its assets are published is the
-  remaining part of #30; until it lands, an unresolved advisory does not stop
-  a release.
+- **Releases:** a `host-v*` tag publishes only if the advisory check passes on
+  the tagged commit; with an unresolved advisory the release stops before the
+  GitHub release is created. A manual release run makes the same check as a
+  dry run. A pull request's release dry run does not
+  ([How a release is built](#how-a-release-is-built)).
 - Every run uses [the cargo-deny action](.github/actions/cargo-deny/action.yml),
   the one place that pins the cargo-deny version and runs it.
 

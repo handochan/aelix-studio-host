@@ -1,6 +1,7 @@
 # cargo-deny policy for the Aelix Studio host. CI runs bans, licenses and
 # sources on each push and pull request; advisories run when a dependency
-# input changes and weekly on main. See README.md "Dependency checks".
+# input changes, weekly on main and before a release is published. See
+# README.md "Dependency checks".
 
 [graph]
 # The five release targets (README.md "Releases").
