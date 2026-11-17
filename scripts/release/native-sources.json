@@ -572,11 +572,11 @@
           "sourcePrefixes": [
             ""
           ],
-          "sourceSha256": "2722c1cd72ad482201359675d458654f715694e01db77820b27254496d944918",
-          "version": "1.3.2",
+          "sourceSha256": "99a74ee1c97f6675650c1d3c46359c0d4fabe19c088ad6ca9d00448929db9e08",
+          "version": "1.4",
           "versionEvidence": {
             "path": "src/zlib/zlib.h",
-            "sha256": "818667d6ab6a37fe7469cb06a7f0cb2c2cb2f2c948a03e5accf1a4a74bf3020a"
+            "sha256": "2c404dcaa08709c2a129aea18f3dad4fb5acc5cb52ef12b6223bf8e78c195801"
           }
         },
         {
@@ -602,10 +602,10 @@
       "crate": "libz-sys",
       "links": "z",
       "nativeFileCount": 186,
-      "nativeFilesSha256": "2722c1cd72ad482201359675d458654f715694e01db77820b27254496d944918",
-      "packagedFilesSha256": "f5febcf13c66ec420a6c67ae2bd26f8f34cd97e1e41abca474c81018794c5c83",
-      "sourceArchiveSha256": "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2",
-      "version": "1.1.31"
+      "nativeFilesSha256": "99a74ee1c97f6675650c1d3c46359c0d4fabe19c088ad6ca9d00448929db9e08",
+      "packagedFilesSha256": "09db34673f986ef8e10cdf757e34dd88346b697b244609bbd2d7fb73a7fa4dee",
+      "sourceArchiveSha256": "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045",
+      "version": "1.1.33"
     },
     {
       "buildScriptsSha256": "d9cc39934a6e7cc3b8fa7e9845c461cf0922423d4fdd5f8de4dc4feb3f2b159e",
