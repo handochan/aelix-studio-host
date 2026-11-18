@@ -193,10 +193,20 @@ impl AcpAgentManager {
 
             {
                 let mut session = self.session.write().await;
-                if let Some(models) = legacy_models
+                let legacy_models = legacy_models
                     .as_ref()
-                    .and_then(LegacySessionModelState::from_state_value)
+                    .and_then(LegacySessionModelState::from_state_value);
+                if self
+                    .protocol
+                    .initialize_response()
+                    .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"))
                 {
+                    session.adopt_aelix_restored_selections(
+                        legacy_models.as_ref(),
+                        load_response.config_options.as_deref().unwrap_or_default(),
+                    );
+                }
+                if let Some(models) = legacy_models {
                     session.apply_advertised_models(models);
                 }
                 session.apply_restored_configuration(load_response.modes, load_response.config_options);
