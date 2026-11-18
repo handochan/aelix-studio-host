@@ -3405,6 +3405,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl aionui_db::IAcpSessionRepository for StubAcpSessionRepo {
+        async fn set_team_permission_mode(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _mode: &str,
+        ) -> Result<bool, aionui_db::DbError> {
+            Ok(false)
+        }
+
         async fn get_for_user(
             &self,
             _user_id: &str,
