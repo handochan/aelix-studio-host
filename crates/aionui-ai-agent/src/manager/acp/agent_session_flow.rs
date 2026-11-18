@@ -91,6 +91,17 @@ impl AcpAgentManager {
     /// Emits a `warn!` so ops can still see the original failure that
     /// triggered the rebuild.
     async fn rebuild_after_session_not_found(&self, stale_sid: &str, err: &AcpError) -> Result<String, AgentError> {
+        if self
+            .params
+            .config
+            .fork
+            .as_ref()
+            .is_some_and(|fork| fork.expected_native_head.is_some())
+        {
+            return Err(AgentError::conflict(
+                "FORK_BINDING_LOST: the guarded fork's ACP session cannot be replaced with a fresh session",
+            ));
+        }
         warn!(
             conversation_id = %self.params.conversation_id,
             stale_session_id = %stale_sid,

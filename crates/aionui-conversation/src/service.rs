@@ -2337,7 +2337,9 @@ impl ConversationService {
         let merged_extra = if let Some(new_extra) = &req.extra {
             let mut existing_extra: serde_json::Value =
                 serde_json::from_str(&existing.extra).unwrap_or_else(|_| serde_json::json!({}));
-            merge_json(&mut existing_extra, new_extra);
+            let mut patch = new_extra.clone();
+            strip_request_fork_spec(&mut patch);
+            merge_json(&mut existing_extra, &patch);
             strip_request_owner_user_id(&mut existing_extra);
             if existing_type == AgentType::Aionrs
                 && let Some(obj) = existing_extra.as_object_mut()
@@ -2456,7 +2458,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        patch: serde_json::Value,
+        mut patch: serde_json::Value,
     ) -> Result<(), ConversationError> {
         let existing = self
             .conversation_repo
@@ -2468,6 +2470,7 @@ impl ConversationService {
 
         let mut merged: serde_json::Value =
             serde_json::from_str(&existing.extra).unwrap_or_else(|_| serde_json::json!({}));
+        strip_request_fork_spec(&mut patch);
         merge_json(&mut merged, &patch);
         if patch.get("workspace").is_some() {
             normalize_workspace_extra(&mut merged)?;
@@ -2990,7 +2993,9 @@ impl ConversationService {
         let mut response = row_to_response(row, &self.workspace_root)?;
         self.attach_assistant_identity(user_id, &mut response).await?;
         response.fork_capability = Some(fork_capability);
-        self.broadcast_list_changed(user_id, &new_id, "created", response.source.as_ref());
+        if !fork_capability.requires_native_head {
+            self.broadcast_list_changed(user_id, &new_id, "created", response.source.as_ref());
+        }
         Ok(response)
     }
 
@@ -3080,11 +3085,16 @@ impl ConversationService {
     /// Reset a conversation: clear messages and set status back to pending.
     #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %id))]
     pub async fn reset(&self, user_id: &str, id: &str) -> Result<(), ConversationError> {
-        // Verify existence and ownership
-        self.conversation_repo
+        let row = self
+            .conversation_repo
             .get(user_id, id)
             .await?
             .ok_or_else(|| ConversationError::NotFound { id: id.to_owned() })?;
+        if self.awaiting_guarded_fork(user_id, &row).await? {
+            return Err(ConversationError::Busy {
+                reason: "FORK_PENDING: the guarded display copy cannot be reset before binding".into(),
+            });
+        }
 
         // Delete all messages
         self.conversation_repo
@@ -3121,6 +3131,9 @@ impl ConversationService {
         let rows = self.conversation_repo.list_associated(user_id, id).await?;
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
+            if self.awaiting_guarded_fork(user_id, &row).await? {
+                continue;
+            }
             let mut response = row_to_response(row, &self.workspace_root)?;
             self.attach_assistant_identity(user_id, &mut response).await?;
             items.push(response);
@@ -4565,6 +4578,7 @@ impl ConversationService {
             });
         }
 
+        let pending_fork = self.awaiting_guarded_fork(user_id, &row).await?;
         let (agent, recovered) = self
             .ensure_runtime_agent(user_id, conversation_id, task_manager, "runtime_ensure")
             .await?;
@@ -4573,6 +4587,32 @@ impl ConversationService {
             .await
             .map_err(ConversationError::from)?
             .config_options;
+        if pending_fork {
+            let AgentInstance::Acp(manager) = &agent else {
+                return Err(ConversationError::Busy {
+                    reason: "FORK_HEAD_UNAVAILABLE: the guarded fork requires an ACP runtime".into(),
+                });
+            };
+            let session_id = manager
+                .session_id()
+                .await
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| ConversationError::internal("Guarded fork has no ACP session binding"))?;
+            if !self
+                .acp_session_repo
+                .update_session_id_for_user(user_id, conversation_id, &session_id)
+                .await?
+            {
+                return Err(ConversationError::NotFound {
+                    id: conversation_id.to_owned(),
+                });
+            }
+            let source = row
+                .source
+                .as_deref()
+                .and_then(|source| string_to_enum::<ConversationSource>(source).ok());
+            self.broadcast_list_changed(user_id, conversation_id, "created", source.as_ref());
+        }
 
         Ok(EnsureConversationRuntimeResponse {
             recovered,
@@ -5001,6 +5041,19 @@ impl ConversationService {
         Arc::clone(&self.skill_resolver)
     }
 
+    async fn awaiting_guarded_fork(
+        &self,
+        user_id: &str,
+        row: &aionui_db::models::ConversationRow,
+    ) -> Result<bool, ConversationError> {
+        Ok(is_guarded_fork(&row.extra)
+            && !self
+                .acp_session_repo
+                .get_for_user(user_id, &row.id)
+                .await?
+                .is_some_and(|session| session.has_published_fork()))
+    }
+
     /// Backfill `extra.skills` if the row predates the snapshot model.
     /// Persists the mutation asynchronously; failures are logged and
     /// swallowed so a read path never 500s because of a backfill write
@@ -5093,14 +5146,18 @@ fn strip_request_owner_user_id(extra: &mut serde_json::Value) {
     }
 }
 
-/// See the call site in `create`: `extra.fork` may only be minted by the
-/// server-side fork API, never accepted from a client payload.
+/// Only the fork API can write this lineage and its recorded HEAD.
 fn strip_request_fork_spec(extra: &mut serde_json::Value) {
     if let Some(obj) = extra.as_object_mut()
         && obj.remove("fork").is_some()
     {
-        warn!("create: stripped client-supplied `extra.fork` (server-minted only)");
+        warn!("Ignoring client-supplied `extra.fork`");
     }
+}
+
+fn is_guarded_fork(extra: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(extra)
+        .is_ok_and(|value| value["fork"]["expected_native_head"].is_string())
 }
 
 fn team_id_from_extra(extra: &str) -> Option<String> {
