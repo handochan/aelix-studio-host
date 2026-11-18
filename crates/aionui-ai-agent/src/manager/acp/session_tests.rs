@@ -78,6 +78,32 @@ fn resumed_permission_preserves_model_and_thought_intent() {
 }
 
 #[test]
+fn aelix_legacy_model_is_adopted_without_consuming_unreported_thought_intent() {
+    let mut session = AcpSession::new(None, Some(ModelId::new("fixture/one")), HashMap::new());
+    session.seed_pending_startup_config(SessionConfigOptionCategory::Model, ConfigValue::new("fixture/one"));
+    session.seed_pending_startup_config(SessionConfigOptionCategory::ThoughtLevel, ConfigValue::new("low"));
+    let models = LegacySessionModelState::new(
+        "fixture/two",
+        vec![
+            LegacyModelEntry::new("fixture/one", "One"),
+            LegacyModelEntry::new("fixture/two", "Two"),
+        ],
+    );
+
+    session.adopt_aelix_restored_selections(Some(&models), &[]);
+    session.apply_advertised_models(models);
+    session.resolve_pending_startup_config_seeds();
+
+    assert_eq!(session.observed_model(), Some("fixture/two"));
+    assert!(session.plan_reconcile().is_empty());
+    assert_eq!(session.desired.pending_startup_config.len(), 1);
+    assert_eq!(
+        session.desired.pending_startup_config[0].category,
+        SessionConfigOptionCategory::ThoughtLevel
+    );
+}
+
+#[test]
 fn resumed_legacy_mode_wins_over_cached_generic_mode_with_partial_config() {
     let mut session = AcpSession::new(Some(ModeId::new("yolo")), None, HashMap::new());
     session.apply_advertised_config_options(vec![
