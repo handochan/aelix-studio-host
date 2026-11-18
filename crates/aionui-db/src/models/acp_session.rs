@@ -14,6 +14,7 @@ pub struct AcpSessionRow {
     pub session_status: String,
     /// JSON object: serialized session configuration.
     pub session_config: String,
+    pub team_permission_mode: Option<String>,
     pub last_active_at: Option<TimestampMs>,
     pub suspended_at: Option<TimestampMs>,
 }

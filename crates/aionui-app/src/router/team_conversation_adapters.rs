@@ -660,6 +660,23 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
             .map_err(map_conversation_update_error)
     }
 
+    async fn save_team_permission_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError> {
+        let user_id = self.require_owner_user_id(conversation_id).await?;
+        if !self
+            .acp_session_repo
+            .set_team_permission_mode(&user_id, conversation_id, mode)
+            .await?
+            && self
+                .conversation_repo
+                .get(&user_id, conversation_id)
+                .await?
+                .is_none_or(|row| row.r#type == "acp")
+        {
+            return Err(TeamError::AgentNotFound(conversation_id.to_owned()));
+        }
+        Ok(())
+    }
+
     async fn get_config_options(&self, conversation_id: &str) -> Result<GetConfigOptionsResponse, TeamError> {
         let user_id = self.require_owner_user_id(conversation_id).await?;
         self.conversation_service
@@ -676,7 +693,7 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
     ) -> Result<SetConfigOptionResponse, TeamError> {
         let user_id = self.require_owner_user_id(conversation_id).await?;
         self.conversation_service
-            .set_config_option(&user_id, conversation_id, option_id, request)
+            .set_team_config_option(&user_id, conversation_id, option_id, request)
             .await
             .map_err(map_conversation_update_error)
     }

@@ -1106,6 +1106,7 @@ impl StubAcpSessionRepo {
             session_id: self.session_id.lock().unwrap().clone(),
             session_status: "idle".into(),
             session_config: "{}".into(),
+            team_permission_mode: None,
             last_active_at: None,
             suspended_at: None,
         }
@@ -1122,6 +1123,15 @@ struct CreateAcpSessionCall {
 
 #[async_trait::async_trait]
 impl IAcpSessionRepository for StubAcpSessionRepo {
+    async fn set_team_permission_mode(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _mode: &str,
+    ) -> Result<bool, aionui_db::DbError> {
+        Ok(false)
+    }
+
     async fn get_for_user(&self, _user_id: &str, conversation_id: &str) -> Result<Option<AcpSessionRow>, DbError> {
         Ok(Some(self.row_for(conversation_id)))
     }
@@ -1141,6 +1151,7 @@ impl IAcpSessionRepository for StubAcpSessionRepo {
             session_id: self.session_id.lock().unwrap().clone(),
             session_status: "idle".into(),
             session_config: "{}".into(),
+            team_permission_mode: None,
             last_active_at: None,
             suspended_at: None,
         })

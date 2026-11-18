@@ -234,7 +234,7 @@ impl TeamSessionBinding {
             runtime_seed: TeamRuntimeSeed {
                 backend: extra_string_field(extra, "backend"),
                 session_mode: extra_string_field(extra, "session_mode"),
-                selected_permission_mode: extra_string_field(extra, "team_permission_mode"),
+                selected_permission_mode: None,
                 current_model_id: extra_string_field(extra, "current_model_id"),
             },
             mcp,

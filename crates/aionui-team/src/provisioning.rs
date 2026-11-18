@@ -52,6 +52,7 @@ struct NewAgentProvisioning {
     assistant_id: Option<String>,
     workspace: Option<String>,
     session_mode: Option<String>,
+    aelix_permission_mode: Option<String>,
 }
 
 pub(crate) struct PersistSpawnedAgentRequest {
@@ -121,6 +122,10 @@ pub trait TeamConversationProvisioningPort: Send + Sync {
     }
 
     async fn save_acp_runtime_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError>;
+
+    async fn save_team_permission_mode(&self, _conversation_id: &str, _mode: &str) -> Result<(), TeamError> {
+        Ok(())
+    }
 
     async fn get_config_options(&self, conversation_id: &str) -> Result<GetConfigOptionsResponse, TeamError>;
 
@@ -417,6 +422,7 @@ impl TeamAgentProvisioner {
                     assistant_id,
                     workspace: Some(workspace),
                     session_mode: row.session_mode.clone(),
+                    aelix_permission_mode: row.aelix_permission_mode.clone(),
                 },
                 Some(&mcp_selection),
             )
@@ -477,6 +483,7 @@ impl TeamAgentProvisioner {
                     assistant_id: req.assistant_id,
                     workspace: Some(workspace),
                     session_mode: row.session_mode.clone(),
+                    aelix_permission_mode: row.aelix_permission_mode.clone(),
                 },
                 Some(&mcp_selection),
             )
@@ -693,11 +700,13 @@ impl TeamAgentProvisioner {
     }
 
     pub(crate) async fn update_session_mode_seed(&self, agent: &TeamAgent, mode: &str) -> Result<(), TeamError> {
+        if matches!(mode, "default" | "yolo") {
+            self.conversation_port
+                .save_team_permission_mode(&agent.conversation_id, mode)
+                .await?;
+        }
         self.conversation_port
-            .patch_runtime_config(
-                &agent.conversation_id,
-                serde_json::json!({ "session_mode": mode, "team_permission_mode": mode }),
-            )
+            .patch_runtime_config(&agent.conversation_id, serde_json::json!({ "session_mode": mode }))
             .await
             .map_err(|e| {
                 TeamError::InvalidRequest(format!("failed to persist session_mode for {}: {e}", agent.slot_id))
@@ -731,6 +740,11 @@ impl TeamAgentProvisioner {
                 mcp_selection,
             )
             .await?;
+        if let Some(mode) = input.aelix_permission_mode.as_deref() {
+            self.conversation_port
+                .save_team_permission_mode(&conversation.conversation_id, mode)
+                .await?;
+        }
         Ok(TeamAgent {
             slot_id: input.slot_id,
             name: input.name,
@@ -882,7 +896,6 @@ impl TeamAgentProvisioner {
         session_mode: Option<&str>,
         mcp_selection: Option<&TeamMcpSelection>,
     ) -> serde_json::Value {
-        let selected_mode = session_mode.map(str::trim).filter(|value| !value.is_empty());
         let session_mode = session_mode
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -895,9 +908,6 @@ impl TeamAgentProvisioner {
             "backend": backend,
             "session_mode": session_mode,
         });
-        if let Some(mode) = selected_mode {
-            extra["team_permission_mode"] = serde_json::Value::String(mode.to_owned());
-        }
         if agent_type != AgentType::Aionrs {
             extra["current_model_id"] = serde_json::Value::String(model.to_owned());
         }

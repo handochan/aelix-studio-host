@@ -803,6 +803,7 @@ impl TeamSessionService {
             agents: agents_json,
             lead_agent_id: lead_agent_id.clone(),
             session_mode: None,
+            aelix_permission_mode: None,
             agents_version: "1.0.1".into(),
             created_at: now,
             updated_at: now,
@@ -1885,7 +1886,15 @@ impl TeamSessionService {
         option_id: &str,
         request: SetConfigOptionRequest,
     ) -> Result<SetConfigOptionResponse, TeamError> {
-        let row = self.load_owned_team_row(user_id, team_id).await?;
+        let option_id = option_id.trim();
+        let mut row = self.load_owned_team_row(user_id, team_id).await?;
+        let _mode_guard = if matches!(option_id, "mode" | "permission_mode") {
+            let guard = self.lock_permission_selection(team_id).await;
+            row = self.load_owned_team_row(user_id, team_id).await?;
+            Some(guard)
+        } else {
+            None
+        };
         let team = Team::from_row(&row)?;
         let member = team
             .agents
@@ -1897,9 +1906,11 @@ impl TeamSessionService {
         }
 
         let options = self.conversation_port.get_config_options(conversation_id).await?;
-        let is_mode_option = options.config_options.iter().any(|option| {
-            option.id == option_id && (option.category.as_deref() == Some("mode") || option.id == "mode")
-        });
+        let is_mode_option = option_id == "mode"
+            || options
+                .config_options
+                .iter()
+                .any(|option| option.id == option_id && option.category.as_deref() == Some("mode"));
         let is_global_mode = member.role == TeammateRole::Lead && is_mode_option;
         if is_global_mode
             && let Some(starting_member) = team
@@ -1920,8 +1931,8 @@ impl TeamSessionService {
         // confirmation deliberately still reads back the OLD value, so echoing the
         // readback would persist the model the user just switched away from.
         let requested_model = is_model_option.then(|| request.value.trim().to_owned());
-        let requested_permission_mode =
-            (is_mode_option && option_id == "permission_mode").then(|| request.value.trim().to_owned());
+        let requested_permission_mode = (is_mode_option && matches!(request.value.trim(), "default" | "yolo"))
+            .then(|| request.value.trim().to_owned());
 
         let response = self
             .conversation_port
@@ -1931,13 +1942,13 @@ impl TeamSessionService {
         if let Some(mode) = requested_permission_mode
             && response.confirmation == aionui_api_types::ConfigOptionConfirmation::Observed
             && response.config_options.as_deref().is_some_and(|options| {
-                options
-                    .iter()
-                    .any(|option| option.id == option_id && option.current_value.as_deref() == Some(mode.as_str()))
+                options.iter().any(|option| {
+                    option.id == "permission_mode" && option.current_value.as_deref() == Some(mode.as_str())
+                })
             })
         {
             self.conversation_port
-                .patch_runtime_config(conversation_id, serde_json::json!({ "team_permission_mode": mode }))
+                .save_team_permission_mode(conversation_id, &mode)
                 .await?;
         }
 
@@ -2677,6 +2688,7 @@ impl TeamSessionService {
         if allow_queued {
             self.ensure_session_inner(team_id, Some(user_id)).await?;
         }
+        let mode_guard = self.lock_permission_selection(team_id).await;
         let session = {
             let entry = self.sessions.get(team_id).ok_or_else(|| TeamError::RuntimeNotReady {
                 conversation_id: requested_agent.conversation_id.clone(),
@@ -2748,6 +2760,7 @@ impl TeamSessionService {
             }
         };
 
+        drop(mode_guard);
         self.broadcast_agent_runtime_status(user_id, team_id, &agent, TeamAgentRuntimeStatus::Pending, None);
         info!(
             team_id,
@@ -2860,6 +2873,7 @@ impl TeamSessionService {
             slot_id: slot_id.to_owned(),
             conversation_id: agent.conversation_id.clone(),
         };
+        let mode_guard = self.lock_permission_selection(team_id).await;
         let restart_gate = session
             .work_coordinator()
             .begin_runtime_restart(slot_id)
@@ -2912,6 +2926,7 @@ impl TeamSessionService {
                 });
             }
         };
+        drop(mode_guard);
         let operation_id = lease.operation_id();
 
         self.broadcast_agent_runtime_status(user_id, team_id, &agent, TeamAgentRuntimeStatus::Pending, None);
@@ -3118,7 +3133,21 @@ impl TeamSessionService {
         session.pause_slot_work(team_run_id, slot_id, reason).await
     }
 
+    // Keep permission RPCs and their durable writes ordered with other
+    // choices and with adding members that inherit the Team selection.
+    async fn lock_permission_selection(&self, team_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .add_agent_locks
+            .entry(team_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
+    }
+
     pub async fn set_session_mode(&self, user_id: &str, team_id: &str, mode: &str) -> Result<(), TeamError> {
+        let mode = mode.trim();
+        self.load_owned_team_row(user_id, team_id).await?;
+        let _mode_guard = self.lock_permission_selection(team_id).await;
         let team = self.load_owned_team(user_id, team_id).await?;
         if let Some(starting_member) = team
             .agents
@@ -3134,6 +3163,7 @@ impl TeamSessionService {
                 team_id,
                 &UpdateTeamParams {
                     session_mode: Some(mode.to_owned()),
+                    aelix_permission_mode: Some(if mode == "yolo" { "yolo" } else { "default" }.to_owned()),
                     ..Default::default()
                 },
             )
@@ -3167,10 +3197,7 @@ impl TeamSessionService {
                     // The live slot may be busy. Record Ask for the next build
                     // without reporting that the current turn changed mode.
                     self.conversation_port
-                        .patch_runtime_config(
-                            &agent.conversation_id,
-                            serde_json::json!({ "team_permission_mode": mode }),
-                        )
+                        .save_team_permission_mode(&agent.conversation_id, mode)
                         .await?;
                 }
                 continue;

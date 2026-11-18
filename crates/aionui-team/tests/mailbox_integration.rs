@@ -27,6 +27,7 @@ async fn setup() -> (Mailbox, aionui_db::Database) {
             agents: "[]".to_owned(),
             lead_agent_id: None,
             session_mode: None,
+            aelix_permission_mode: None,
             agents_version: "1.0.1".to_owned(),
             created_at: now_ms(),
             updated_at: now_ms(),

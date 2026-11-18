@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::Component;
 
-use aionui_ai_agent::{AcpError, AgentError};
+use aionui_ai_agent::{AcpError, AgentError, AgentInstance};
 use aionui_api_types::{
     ConfigOptionConfirmation, GetConfigOptionsResponse, SetConfigOptionRequest, SetConfigOptionResponse,
     SideQuestionRequest, SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
@@ -154,6 +154,29 @@ impl ConversationService {
         option_id: &str,
         req: SetConfigOptionRequest,
     ) -> Result<SetConfigOptionResponse, ConversationError> {
+        self.set_config_option_inner(user_id, conversation_id, option_id, req, false)
+            .await
+    }
+
+    pub async fn set_team_config_option(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        option_id: &str,
+        req: SetConfigOptionRequest,
+    ) -> Result<SetConfigOptionResponse, ConversationError> {
+        self.set_config_option_inner(user_id, conversation_id, option_id, req, true)
+            .await
+    }
+
+    async fn set_config_option_inner(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        option_id: &str,
+        req: SetConfigOptionRequest,
+        from_team: bool,
+    ) -> Result<SetConfigOptionResponse, ConversationError> {
         if option_id.trim().is_empty() {
             return Err(ConversationError::BadRequest {
                 reason: "option_id must not be empty".into(),
@@ -171,6 +194,14 @@ impl ConversationService {
             });
         }
         let agent = self.task(conversation_id)?;
+        if !from_team
+            && matches!(option_id.trim(), "mode" | "permission_mode")
+            && matches!(&agent, AgentInstance::Acp(manager) if manager.has_team_permission_policy())
+        {
+            return Err(ConversationError::BadRequest {
+                reason: "Team permission mode must be selected through the Team API".into(),
+            });
+        }
         let response = match agent.set_config_option(option_id, &req.value).await {
             Ok(response) => response,
             Err(err @ AgentError::Acp(AcpError::NotConnected)) => {

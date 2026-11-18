@@ -2156,6 +2156,8 @@ for line in sys.stdin:
         response['result'] = {'configOptions': options()}
         if method == 'session/new':
             response['result']['sessionId'] = 'synthetic-team-session'
+    elif method == 'session/prompt':
+        response['result'] = {'stopReason': 'end_turn'}
     elif method == 'session/set_config_option':
         if Path(trace + '.busy').exists() and params['value'] == 'default':
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
@@ -2229,6 +2231,13 @@ for line in sys.stdin:
     let team_id = body["data"]["id"].as_str().unwrap();
     let roster = body["data"]["assistants"].as_array().unwrap();
 
+    // Simulate upgraded data written before explicit Aelix consent was stored.
+    sqlx::query("UPDATE teams SET session_mode = 'yolo' WHERE id = ?")
+        .bind(team_id)
+        .execute(services.database.pool())
+        .await
+        .unwrap();
+
     let attach = async |slot: &Value, action: &str| {
         let slot_id = slot["slot_id"].as_str().unwrap();
         let resp = app
@@ -2253,6 +2262,7 @@ for line in sys.stdin:
     let mode = async |slot: &Value| {
         let conversation_id = slot["conversation_id"].as_str().unwrap();
         let path = format!("/api/teams/{team_id}/conversations/{conversation_id}/config-options");
+        let mut last_status = Value::Null;
         tokio::time::timeout(std::time::Duration::from_secs(12), async {
             loop {
                 let resp = app.clone().oneshot(get_with_token(&path, &token)).await.unwrap();
@@ -2268,17 +2278,39 @@ for line in sys.stdin:
                     return observed["current_value"].as_str().unwrap().to_owned();
                 }
                 assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                last_status = body;
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             }
         })
         .await
-        .expect("Team member did not become ready")
+        .unwrap_or_else(|_| panic!("Team member {slot} did not become ready: {last_status}"))
     };
 
     for member in roster {
         attach(member, "attach").await;
         assert_eq!(mode(member).await, "default");
     }
+    attach(&roster[0], "runtime/restart").await;
+    assert_eq!(mode(&roster[0]).await, "default");
+
+    let added = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            &format!("/api/teams/{team_id}/agents"),
+            json!({"name": "Added after upgrade", "role": "teammate", "model": "default",
+            "assistant_id": format!("bare:{}", agent_ids[0])}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    let status = added.status();
+    let added = body_json(added).await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+    let added = &added["data"];
+    assert_eq!(mode(added).await, "default");
+
     let yes_trace = std::fs::read_to_string(root.path().join("yes.trace")).unwrap();
     let no_trace = std::fs::read_to_string(root.path().join("no.trace")).unwrap();
     assert!(
@@ -2305,6 +2337,23 @@ for line in sys.stdin:
         "Team permission mode must be selected through the Team API"
     );
 
+    let detach = app
+        .clone()
+        .oneshot(json_with_token(
+            "PATCH",
+            &format!("/api/conversations/{member_id}"),
+            json!({"extra": {"teamId": null}}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(detach.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(detach).await["error"],
+        "Team ownership cannot be changed through conversation metadata"
+    );
+
     let team_mode_path = format!("/api/teams/{team_id}/session-mode");
     let change_mode = async |selected: &str| {
         app.clone()
@@ -2325,9 +2374,88 @@ for line in sys.stdin:
         assert_eq!(mode(member).await, "yolo");
     }
 
+    let ordinary = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            &format!("/api/conversations/{member_id}/config-options/permission_mode"),
+            json!({"value": "default"}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ordinary.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(ordinary).await["error"],
+        "Team permission mode must be selected through the Team API"
+    );
+    assert_eq!(mode(&roster[1]).await, "yolo");
+
+    // Reproduce a paused MCP write: capture the old extra, persist an
+    // observed Ask, then let the writer publish its stale whole document.
+    let user_id = services
+        .conversation_repo
+        .owner_user_id(member_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let previous = services
+        .conversation_repo
+        .get(&user_id, member_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale: Value = serde_json::from_str(&previous.extra).unwrap();
+    stale["team_permission_mode"] = json!("yolo");
+    stale["team_mcp_stdio_config"] = Value::Null;
+    stale["mcp_servers"] = json!(["refreshed"]);
+    let team_choice_path =
+        format!("/api/teams/{team_id}/conversations/{member_id}/config-options/%20permission_mode%20");
+    let choose_slot = async |selected: &str| {
+        let response = app
+            .clone()
+            .oneshot(json_with_token(
+                "PUT",
+                &team_choice_path,
+                json!({"value": selected}),
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["data"]["confirmation"], "observed");
+    };
+    choose_slot("default").await;
+    services
+        .conversation_repo
+        .update(
+            &user_id,
+            member_id,
+            &aionui_db::ConversationRowUpdate {
+                extra: Some(stale.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after = services
+        .conversation_repo
+        .get(&user_id, member_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let after: Value = serde_json::from_str(&after.extra).unwrap();
+    assert_eq!(after["mcp_servers"], json!(["refreshed"]));
+    attach(&roster[1], "runtime/restart").await;
+    assert_eq!(mode(&roster[1]).await, "default");
+    assert_eq!(mode(&roster[0]).await, "yolo");
+    choose_slot("yolo").await;
+
     let busy = root.path().join("no.trace.busy");
     std::fs::write(&busy, "").unwrap();
-    let response = change_mode("default").await;
+    let response = change_mode(" default ").await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         body_json(response).await["error"],

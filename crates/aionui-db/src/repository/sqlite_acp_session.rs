@@ -202,6 +202,24 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         Ok(row)
     }
 
+    async fn set_team_permission_mode(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        mode: &str,
+    ) -> Result<bool, DbError> {
+        let updated = sqlx::query(
+            "UPDATE acp_session SET team_permission_mode = ? WHERE conversation_id = ?
+             AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
+        )
+        .bind(mode)
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() != 0)
+    }
+
     async fn create(&self, params: &CreateAcpSessionParams<'_>) -> Result<AcpSessionRow, DbError> {
         let now = now_ms();
         let result = sqlx::query(

@@ -223,6 +223,11 @@ async fn update(
     let Json(req) = body.map_err(ApiError::from)?;
     if let Some(extra) = &req.extra {
         reject_team_permission_override(extra)?;
+        if extra.get("teamId").is_some() {
+            return Err(ApiError::BadRequest(
+                "Team ownership cannot be changed through conversation metadata".into(),
+            ));
+        }
     }
     let conversation = state
         .service
