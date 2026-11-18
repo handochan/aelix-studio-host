@@ -690,9 +690,36 @@ impl AcpSession {
 
             let reported_key = reported_option.map(|option| option.id.to_string());
             let aliases = config_option_aliases_for_category(&category);
+            let legacy_model_only = reports_legacy_model && reported_option.is_none();
+            let mut obsolete_keys = Vec::new();
+            if legacy_model_only && let Some(cached) = &mut self.advertised.config_options {
+                cached.retain(|option| {
+                    let key = option.id.to_string();
+                    let is_model =
+                        option.category == Some(SessionConfigOptionCategory::Model) || aliases.contains(&key.as_str());
+                    if is_model {
+                        obsolete_keys.push(key);
+                    }
+                    !is_model
+                });
+            }
+            let is_saved_selector_key = |key: &ConfigKey| {
+                aliases.contains(&key.as_str()) || obsolete_keys.iter().any(|obsolete| obsolete == key.as_str())
+            };
             self.desired
                 .config_selections
-                .retain(|key, _| reported_key.as_deref() != Some(key.as_str()) && !aliases.contains(&key.as_str()));
+                .retain(|key, _| reported_key.as_deref() != Some(key.as_str()) && !is_saved_selector_key(key));
+            if legacy_model_only {
+                let before = self.observed.config_current.len();
+                self.observed
+                    .config_current
+                    .retain(|key, _| !is_saved_selector_key(key));
+                if self.observed.config_current.len() != before {
+                    self.pending_events.push(AcpSessionEvent::ObservedConfigSynced {
+                        selections: self.observed.config_current.clone(),
+                    });
+                }
+            }
             self.desired
                 .pending_startup_config
                 .retain(|seed| seed.category != category);
