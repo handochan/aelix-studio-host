@@ -529,6 +529,14 @@ fn matched_slash_command(raw_user_input: &str, commands: &[AvailableCommand]) ->
         .map(slash_command_item)
 }
 
+fn defer_session_prelude(raw_user_input: &str, agent_name: Option<&str>) -> bool {
+    // The adapter identifies itself through ACP initialize. Its command parser
+    // accepts /compact only at the start of the user input.
+    agent_name == Some("aelix-acp")
+        && raw_user_input.starts_with('/')
+        && leading_slash_token(raw_user_input) == Some("compact")
+}
+
 /// Manages a single ACP Agent instance.
 ///
 /// ACP is the most complex agent type, supporting 20+ CLI sub-backends
@@ -1314,7 +1322,14 @@ impl AcpAgentManager {
                 .and_then(|commands| matched_slash_command(&raw_user_input, commands))
         };
 
-        let content = {
+        let agent_info = self
+            .protocol
+            .initialize_response()
+            .and_then(|response| response.agent_info);
+        let content = if defer_session_prelude(&raw_user_input, agent_info.as_ref().map(|info| info.name.as_str())) {
+            // Leave the one-shot prelude pending for the next ordinary turn.
+            raw_user_input
+        } else {
             let mut s = self.session.write().await;
             let mut ctx = PromptCtx {
                 session: &mut s,
@@ -2256,6 +2271,25 @@ mod tests {
             Some(aionui_api_types::SlashCommandCompletionBehavior::NeutralTipOnEmpty)
         );
         assert_eq!(matched.empty_turn_tip_code.as_deref(), None);
+    }
+
+    #[test]
+    fn defers_prelude_for_explicit_aelix_compact_only() {
+        let aelix = Some("aelix-acp");
+        assert!(super::defer_session_prelude("/compact", aelix));
+        assert!(super::defer_session_prelude("/compact keep decisions", aelix));
+        assert!(super::defer_session_prelude(
+            "/compact\n\n[[AION_FILES]]\nnotes.txt",
+            aelix
+        ));
+        assert!(!super::defer_session_prelude(" /compact", aelix));
+        assert!(!super::defer_session_prelude("/compact-example", aelix));
+        assert!(!super::defer_session_prelude(
+            "[Assistant Rules]\nExample\n[/Assistant Rules]\n\n/compact",
+            aelix
+        ));
+        assert!(!super::defer_session_prelude("/compact", Some("other-acp")));
+        assert!(!super::defer_session_prelude("/compact", None));
     }
 
     #[test]
