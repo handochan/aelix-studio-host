@@ -1897,10 +1897,10 @@ impl TeamSessionService {
         }
 
         let options = self.conversation_port.get_config_options(conversation_id).await?;
-        let is_global_mode = member.role == TeammateRole::Lead
-            && options.config_options.iter().any(|option| {
-                option.id == option_id && (option.category.as_deref() == Some("mode") || option.id == "mode")
-            });
+        let is_mode_option = options.config_options.iter().any(|option| {
+            option.id == option_id && (option.category.as_deref() == Some("mode") || option.id == "mode")
+        });
+        let is_global_mode = member.role == TeammateRole::Lead && is_mode_option;
         if is_global_mode
             && let Some(starting_member) = team
                 .agents
@@ -1920,11 +1920,26 @@ impl TeamSessionService {
         // confirmation deliberately still reads back the OLD value, so echoing the
         // readback would persist the model the user just switched away from.
         let requested_model = is_model_option.then(|| request.value.trim().to_owned());
+        let requested_permission_mode =
+            (is_mode_option && option_id == "permission_mode").then(|| request.value.trim().to_owned());
 
         let response = self
             .conversation_port
             .set_config_option(conversation_id, option_id, request)
             .await?;
+
+        if let Some(mode) = requested_permission_mode
+            && response.confirmation == aionui_api_types::ConfigOptionConfirmation::Observed
+            && response.config_options.as_deref().is_some_and(|options| {
+                options
+                    .iter()
+                    .any(|option| option.id == option_id && option.current_value.as_deref() == Some(mode.as_str()))
+            })
+        {
+            self.conversation_port
+                .patch_runtime_config(conversation_id, serde_json::json!({ "team_permission_mode": mode }))
+                .await?;
+        }
 
         // The runtime accepted the switch, so the roster and the persisted
         // conversation state must follow — including for `PendingNextTurn`, where
@@ -3124,16 +3139,20 @@ impl TeamSessionService {
             )
             .await?;
 
+        let mut incomplete = false;
         for agent in &team.agents {
-            let mode_applied = match self.task_manager.get_task(&agent.conversation_id) {
+            let instance = self.task_manager.get_task(&agent.conversation_id);
+            let protects_aelix =
+                matches!(&instance, Some(AgentInstance::Acp(manager)) if manager.has_team_permission_policy());
+            let mode_applied = match instance {
                 Some(instance) => match set_active_agent_session_mode(&instance, mode).await {
                     Ok(()) => true,
-                    Err(e) => {
+                    Err(error) => {
                         warn!(
                             team_id,
                             slot_id = %agent.slot_id,
                             conversation_id = %agent.conversation_id,
-                            error = %e,
+                            %error,
                             "failed to set session mode on agent"
                         );
                         false
@@ -3141,15 +3160,37 @@ impl TeamSessionService {
                 },
                 None => true,
             };
-            if mode_applied && let Err(e) = provisioner.update_session_mode_seed(agent, mode).await {
+
+            if protects_aelix && !mode_applied {
+                incomplete = true;
+                if mode == "default" {
+                    // The live slot may be busy. Record Ask for the next build
+                    // without reporting that the current turn changed mode.
+                    self.conversation_port
+                        .patch_runtime_config(
+                            &agent.conversation_id,
+                            serde_json::json!({ "team_permission_mode": mode }),
+                        )
+                        .await?;
+                }
+                continue;
+            }
+            if mode_applied && let Err(error) = provisioner.update_session_mode_seed(agent, mode).await {
+                incomplete |= protects_aelix;
                 warn!(
                     team_id,
                     slot_id = %agent.slot_id,
                     conversation_id = %agent.conversation_id,
-                    error = %e,
+                    %error,
                     "failed to persist team session mode seed"
                 );
             }
+        }
+
+        if incomplete {
+            return Err(TeamError::InvalidRequest(
+                "Team permission change could not be applied to every Aelix slot".to_owned(),
+            ));
         }
 
         Ok(())
@@ -3226,7 +3267,13 @@ impl TeamSessionService {
 async fn set_active_agent_session_mode(instance: &AgentInstance, mode: &str) -> Result<(), AgentError> {
     #[allow(unreachable_patterns)]
     match instance {
-        AgentInstance::Acp(_) => instance.set_config_option("mode", mode).await.map(|_| ()),
+        AgentInstance::Acp(manager) if manager.has_team_permission_policy() => {
+            let response = instance.set_config_option("permission_mode", mode).await?;
+            if response.confirmation != aionui_api_types::ConfigOptionConfirmation::Observed {
+                return Err(AgentError::conflict("Team permission mode could not be confirmed"));
+            }
+            Ok(())
+        }
         AgentInstance::Aionrs(manager) => manager.set_mode(mode).await,
         _ => instance.set_config_option("mode", mode).await.map(|_| ()),
     }

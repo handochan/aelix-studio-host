@@ -278,29 +278,34 @@ pub(super) async fn build(
         }
     }
 
-    let params = Arc::new(
-        assemble_acp_params(
-            ctx.conversation_id.clone(),
-            ctx.user_id.clone(),
-            WorkspaceInfo {
-                path: ctx.workspace,
-                is_custom: ctx.is_custom_workspace,
-            },
-            meta,
-            command_spec,
-            config,
-            session_mcp_servers,
-            session_snapshot,
-            deps.data_dir.clone(),
-            deps.dump_prompts,
-        )
-        .await,
-    );
+    let mut params = assemble_acp_params(
+        ctx.conversation_id.clone(),
+        ctx.user_id.clone(),
+        WorkspaceInfo {
+            path: ctx.workspace,
+            is_custom: ctx.is_custom_workspace,
+        },
+        meta,
+        command_spec,
+        config,
+        session_mcp_servers,
+        session_snapshot,
+        deps.data_dir.clone(),
+        deps.dump_prompts,
+    )
+    .await;
+    params.team_permission_mode = build_context.team.as_ref().map(|team| {
+        if team.runtime_seed.selected_permission_mode.as_deref() == Some("yolo") {
+            "yolo"
+        } else {
+            "default"
+        }
+    });
 
     let skill_mgr = deps.skill_manager.clone();
     let catalog_tx = deps.agent_registry.catalog_sender();
 
-    let (agent, domain_rx, notification_rx) = AcpAgentManager::build(params, skill_mgr, &catalog_tx).await?;
+    let (agent, domain_rx, notification_rx) = AcpAgentManager::build(Arc::new(params), skill_mgr, &catalog_tx).await?;
 
     let arc = Arc::new(agent);
     arc.start_permission_handler();
@@ -325,6 +330,7 @@ pub(super) async fn build(
     // reconcile pass have completed. Matches aionrs factory behaviour:
     // the caller sees "warmed up" == "ready for PUT /mode | /model".
     arc.warmup_session().await?;
+    arc.enforce_team_permission_mode().await?;
 
     let instance = AgentInstance::Acp(Arc::clone(&arc));
 

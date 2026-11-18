@@ -11,7 +11,7 @@ use aionui_conversation::{
     ConversationService,
 };
 use aionui_db::models::{AgentMetadataRow, MessageRow};
-use aionui_db::{IAgentMetadataRepository, IConversationRepository};
+use aionui_db::{IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository};
 use aionui_team::{
     AgentTurnCancellationPort, AgentTurnExecutionError, AgentTurnExecutionPort, AgentTurnOutcome, AgentTurnRequest,
     AgentTurnStarted, AgentTurnStatus, NativeSlashCommandPort, SlashCatalogSource, SlashCommandRecognition,
@@ -30,6 +30,7 @@ pub struct TeamConversationAdapters {
     conversation_service: ConversationService,
     conversation_repo: Arc<dyn IConversationRepository>,
     agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
+    acp_session_repo: Arc<dyn IAcpSessionRepository>,
     task_manager: Arc<dyn IWorkerTaskManager>,
 }
 
@@ -38,12 +39,14 @@ impl TeamConversationAdapters {
         conversation_service: ConversationService,
         conversation_repo: Arc<dyn IConversationRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
+        acp_session_repo: Arc<dyn IAcpSessionRepository>,
         task_manager: Arc<dyn IWorkerTaskManager>,
     ) -> Self {
         Self {
             conversation_service,
             conversation_repo,
             agent_metadata_repo,
+            acp_session_repo,
             task_manager,
         }
     }
@@ -471,6 +474,32 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
             conversation_id: response.id,
             workspace,
         })
+    }
+
+    async fn bound_agent_id(&self, user_id: &str, conversation_id: &str) -> Result<Option<String>, TeamError> {
+        let row = self
+            .conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| TeamError::AgentNotFound(conversation_id.to_owned()))?;
+        let extra: serde_json::Value = serde_json::from_str(&row.extra)
+            .map_err(|error| TeamError::InvalidRequest(format!("Invalid Team conversation binding: {error}")))?;
+        // Match the ACP session builder's binding precedence, including
+        // conversation rows written before extra carried the agent ID.
+        if let Some(id) = extra
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            return Ok(Some(id.to_owned()));
+        }
+
+        Ok(self
+            .acp_session_repo
+            .get_for_user(user_id, conversation_id)
+            .await?
+            .map(|session| session.agent_id)
+            .filter(|id| !id.is_empty()))
     }
 
     async fn conversation_workspace(&self, conversation_id: &str) -> Result<Option<String>, TeamError> {

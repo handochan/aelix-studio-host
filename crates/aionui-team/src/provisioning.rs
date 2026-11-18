@@ -102,6 +102,11 @@ pub trait TeamConversationProvisioningPort: Send + Sync {
 
     async fn conversation_assistant_id(&self, conversation_id: &str) -> Result<Option<String>, TeamError>;
 
+    /// Return the agent identity captured on this member's conversation.
+    async fn bound_agent_id(&self, _user_id: &str, _conversation_id: &str) -> Result<Option<String>, TeamError> {
+        Ok(None)
+    }
+
     async fn create_team_temp_workspace(&self, user_id: &str, team_id: &str) -> Result<String, TeamError>;
 
     async fn patch_runtime_config(&self, conversation_id: &str, patch: serde_json::Value) -> Result<(), TeamError>;
@@ -606,7 +611,14 @@ impl TeamAgentProvisioner {
         user_id: &str,
         agent: &TeamAgent,
     ) -> Result<(TeamToolTransport, aionui_common::ResolvedBackendCapabilities), TeamError> {
-        let capabilities = self.capability_port.resolve(user_id, &agent.backend, None).await?;
+        let bound_agent_id = self
+            .conversation_port
+            .bound_agent_id(user_id, &agent.conversation_id)
+            .await?;
+        let capabilities = self
+            .capability_port
+            .resolve(user_id, &agent.backend, bound_agent_id.as_deref())
+            .await?;
         if capabilities.mcp.stdio {
             return Ok((TeamToolTransport::Mcp, capabilities));
         }
@@ -682,7 +694,10 @@ impl TeamAgentProvisioner {
 
     pub(crate) async fn update_session_mode_seed(&self, agent: &TeamAgent, mode: &str) -> Result<(), TeamError> {
         self.conversation_port
-            .patch_runtime_config(&agent.conversation_id, serde_json::json!({ "session_mode": mode }))
+            .patch_runtime_config(
+                &agent.conversation_id,
+                serde_json::json!({ "session_mode": mode, "team_permission_mode": mode }),
+            )
             .await
             .map_err(|e| {
                 TeamError::InvalidRequest(format!("failed to persist session_mode for {}: {e}", agent.slot_id))
@@ -867,6 +882,7 @@ impl TeamAgentProvisioner {
         session_mode: Option<&str>,
         mcp_selection: Option<&TeamMcpSelection>,
     ) -> serde_json::Value {
+        let selected_mode = session_mode.map(str::trim).filter(|value| !value.is_empty());
         let session_mode = session_mode
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -879,6 +895,9 @@ impl TeamAgentProvisioner {
             "backend": backend,
             "session_mode": session_mode,
         });
+        if let Some(mode) = selected_mode {
+            extra["team_permission_mode"] = serde_json::Value::String(mode.to_owned());
+        }
         if agent_type != AgentType::Aionrs {
             extra["current_model_id"] = serde_json::Value::String(model.to_owned());
         }

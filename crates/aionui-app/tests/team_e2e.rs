@@ -2120,3 +2120,222 @@ async fn full_team_lifecycle() {
     let json = body_json(resp).await;
     assert!(json["data"].as_array().unwrap().is_empty());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn aelix_team_uses_bound_capabilities_and_requires_an_explicit_yolo_selection() {
+    // A synthetic ACP peer exercises the host's real provisioning, stdio,
+    // config endpoints, MCP routing and rebuild. It starts in Yolo to make
+    // inheriting a permissive launch setting observable.
+    const PEER: &str = r#"
+import json
+import sys
+from pathlib import Path
+
+supports_mcp, trace = sys.argv[1:]
+mode = 'yolo'
+def options():
+    return [{'id': 'permission_mode', 'name': 'Permissions', 'category': 'mode',
+             'type': 'select', 'currentValue': mode,
+             'options': [{'value': 'default', 'name': 'Ask'}, {'value': 'yolo', 'name': 'Yolo'}]}]
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if 'id' not in message:
+        continue
+    method, params = message['method'], message.get('params', {})
+    response = {'jsonrpc': '2.0', 'id': message['id']}
+    if method == 'initialize':
+        response['result'] = {'protocolVersion': 1,
+            'agentInfo': {'name': 'aelix-acp', 'version': 'test'},
+            'agentCapabilities': {'loadSession': True, 'mcpCapabilities': {'http': supports_mcp == 'yes'}},
+            'authMethods': []}
+    elif method in ('session/new', 'session/load'):
+        with open(trace, 'a') as output:
+            output.write(json.dumps([server['name'] for server in params.get('mcpServers', [])]) + '\n')
+        response['result'] = {'configOptions': options()}
+        if method == 'session/new':
+            response['result']['sessionId'] = 'synthetic-team-session'
+    elif method == 'session/set_config_option':
+        if Path(trace + '.busy').exists() and params['value'] == 'default':
+            response['error'] = {'code': -32000, 'message': 'Session is busy'}
+        elif params['configId'] != 'permission_mode':
+            response['error'] = {'code': -32602, 'message': 'Wrong permission config ID'}
+        else:
+            mode = params['value']
+            response['result'] = {'configOptions': options()}
+    else:
+        response['error'] = {'code': -32601, 'message': 'Unexpected method'}
+    print(json.dumps(response), flush=True)
+"#;
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("peer.py");
+    std::fs::write(&script, PEER).unwrap();
+    let (mut app, services, _paths) = common::build_app_with_skill_paths(root.path()).await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let mut agent_ids = Vec::new();
+    for flag in ["yes", "no"] {
+        let trace = root.path().join(format!("{flag}.trace"));
+        let resp = app
+            .clone()
+            .oneshot(json_with_token(
+                "POST",
+                "/api/agents/custom",
+                json!({
+                    "name": format!("Aelix fixture {flag}"), "command": "python3",
+                    "args": [script.to_str().unwrap(), flag, trace.to_str().unwrap()],
+                    "advanced": {"behavior_policy": {"supports_team": true}},
+                }),
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = body_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        agent_ids.push(body["data"]["id"].as_str().unwrap().to_owned());
+    }
+    // The normal assistant-list entry point materializes generated rows.
+    let list = app
+        .clone()
+        .oneshot(get_with_token("/api/assistants", &token))
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let assistants = body_json(list).await;
+    for id in &agent_ids {
+        assert!(
+            assistants["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == format!("bare:{id}") && row["team_selectable"] == true)
+        );
+    }
+    let response = app.clone().oneshot(json_with_token(
+        "POST",
+        "/api/teams",
+        json!({"name": "Bound ACP Team", "agents": [
+            {"name": "Leader", "role": "lead", "model": "default", "assistant_id": format!("bare:{}", agent_ids[0])},
+            {"name": "Worker", "role": "teammate", "model": "default", "assistant_id": format!("bare:{}", agent_ids[1])}
+        ]}),
+        &token, &csrf,
+    )).await.unwrap();
+    let status = response.status();
+    let body = body_json(response).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let team_id = body["data"]["id"].as_str().unwrap();
+    let roster = body["data"]["assistants"].as_array().unwrap();
+
+    let attach = async |slot: &Value, action: &str| {
+        let slot_id = slot["slot_id"].as_str().unwrap();
+        let resp = app
+            .clone()
+            .oneshot(json_with_token(
+                "POST",
+                &format!("/api/teams/{team_id}/agents/{slot_id}/{action}"),
+                json!({}),
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        let status = resp.status();
+        assert!(
+            status.is_success(),
+            "attach returned {status}: {}",
+            body_json(resp).await
+        );
+    };
+
+    let mode = async |slot: &Value| {
+        let conversation_id = slot["conversation_id"].as_str().unwrap();
+        let path = format!("/api/teams/{team_id}/conversations/{conversation_id}/config-options");
+        tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            loop {
+                let resp = app.clone().oneshot(get_with_token(&path, &token)).await.unwrap();
+                let status = resp.status();
+                let body = body_json(resp).await;
+                if status == StatusCode::OK {
+                    let observed = body["data"]["config_options"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|option| option["id"] == "permission_mode")
+                        .unwrap();
+                    return observed["current_value"].as_str().unwrap().to_owned();
+                }
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+        })
+        .await
+        .expect("Team member did not become ready")
+    };
+
+    for member in roster {
+        attach(member, "attach").await;
+        assert_eq!(mode(member).await, "default");
+    }
+    let yes_trace = std::fs::read_to_string(root.path().join("yes.trace")).unwrap();
+    let no_trace = std::fs::read_to_string(root.path().join("no.trace")).unwrap();
+    assert!(
+        yes_trace.contains(aionui_api_types::TEAM_MCP_SERVER_NAME),
+        "{yes_trace}"
+    );
+    assert!(!no_trace.contains(aionui_api_types::TEAM_MCP_SERVER_NAME), "{no_trace}");
+
+    let member_id = roster[1]["conversation_id"].as_str().unwrap();
+    let forged = app
+        .clone()
+        .oneshot(json_with_token(
+            "PATCH",
+            &format!("/api/conversations/{member_id}"),
+            json!({"extra": {"team_permission_mode": "yolo"}}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(forged).await["error"],
+        "Team permission mode must be selected through the Team API"
+    );
+
+    let team_mode_path = format!("/api/teams/{team_id}/session-mode");
+    let change_mode = async |selected: &str| {
+        app.clone()
+            .oneshot(json_with_token(
+                "POST",
+                &team_mode_path,
+                json!({"mode": selected}),
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap()
+    };
+    assert_eq!(change_mode("yolo").await.status(), StatusCode::OK);
+    for member in roster {
+        assert_eq!(mode(member).await, "yolo");
+        attach(member, "runtime/restart").await;
+        assert_eq!(mode(member).await, "yolo");
+    }
+
+    let busy = root.path().join("no.trace.busy");
+    std::fs::write(&busy, "").unwrap();
+    let response = change_mode("default").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(response).await["error"],
+        "Team permission change could not be applied to every Aelix slot"
+    );
+    assert_eq!(mode(&roster[0]).await, "default");
+    assert_eq!(mode(&roster[1]).await, "yolo");
+    std::fs::remove_file(&busy).unwrap();
+    attach(&roster[1], "runtime/restart").await;
+    assert_eq!(mode(&roster[1]).await, "default");
+}
