@@ -2187,9 +2187,15 @@ async fn attach_member_runtime_inner(
     let started_at = Instant::now();
     let operation_id = lease.operation_id();
     let generation = session.generation().to_owned();
-    session
-        .work_coordinator
-        .set_runtime_constraint(&agent.slot_id, RuntimeConstraint::Starting { operation_id });
+    {
+        // Every attach path announces Starting under the same lock used to
+        // select and store permissions. Either the save wins before warmup
+        // reads it, or the permission request sees Starting and rejects.
+        let _guard = service.lock_permission_selection(session.team_id()).await;
+        session
+            .work_coordinator
+            .set_runtime_constraint(&agent.slot_id, RuntimeConstraint::Starting { operation_id });
+    }
     // Session-level `Starting` drives the full-screen warmup overlay, which is
     // leader-scoped (spec 5.4/5.5): it only reflects leader bootstrap/failure.
     // A teammate attach is surfaced inline via its own

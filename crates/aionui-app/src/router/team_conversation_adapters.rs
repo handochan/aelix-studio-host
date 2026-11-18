@@ -11,7 +11,9 @@ use aionui_conversation::{
     ConversationService,
 };
 use aionui_db::models::{AgentMetadataRow, MessageRow};
-use aionui_db::{IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository};
+use aionui_db::{
+    CreateAcpSessionParams, DbError, IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository,
+};
 use aionui_team::{
     AgentTurnCancellationPort, AgentTurnExecutionError, AgentTurnExecutionPort, AgentTurnOutcome, AgentTurnRequest,
     AgentTurnStarted, AgentTurnStatus, NativeSlashCommandPort, SlashCatalogSource, SlashCommandRecognition,
@@ -48,6 +50,72 @@ impl TeamConversationAdapters {
             agent_metadata_repo,
             acp_session_repo,
             task_manager,
+        }
+    }
+
+    /// Legacy Team conversations without a session anchor may have no ACP
+    /// row. Recover the same owned agent binding used for runtime startup.
+    async fn ensure_team_permission_storage(&self, user_id: &str, conversation_id: &str) -> Result<bool, TeamError> {
+        if self
+            .acp_session_repo
+            .get_for_user(user_id, conversation_id)
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let row = self
+            .conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| TeamError::AgentNotFound(conversation_id.to_owned()))?;
+        if row.r#type != "acp" {
+            return Ok(false);
+        }
+        let extra: serde_json::Value = serde_json::from_str(&row.extra)
+            .map_err(|error| TeamError::InvalidRequest(format!("Invalid Team conversation binding: {error}")))?;
+        let metadata = if let Some(id) = extra
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            self.agent_metadata_repo.get_for_user(user_id, id).await?
+        } else if extra
+            .get("agent_source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("builtin")
+            == "builtin"
+            && let Some(backend) = extra.get("backend").and_then(serde_json::Value::as_str)
+        {
+            self.agent_metadata_repo
+                .find_builtin_by_backend_for_user(user_id, backend)
+                .await?
+        } else {
+            None
+        }
+        .ok_or_else(|| TeamError::InvalidRequest("Team conversation has no available ACP agent binding".to_owned()))?;
+
+        match self
+            .acp_session_repo
+            .create(&CreateAcpSessionParams {
+                user_id,
+                conversation_id,
+                agent_source: &metadata.agent_source,
+                agent_id: &metadata.id,
+            })
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(DbError::Conflict(_))
+                if self
+                    .acp_session_repo
+                    .get_for_user(user_id, conversation_id)
+                    .await?
+                    .is_some_and(|session| session.agent_id == metadata.id) =>
+            {
+                Ok(true)
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -662,15 +730,11 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
 
     async fn save_team_permission_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError> {
         let user_id = self.require_owner_user_id(conversation_id).await?;
-        if !self
-            .acp_session_repo
-            .set_team_permission_mode(&user_id, conversation_id, mode)
-            .await?
-            && self
-                .conversation_repo
-                .get(&user_id, conversation_id)
+        if self.ensure_team_permission_storage(&user_id, conversation_id).await?
+            && !self
+                .acp_session_repo
+                .set_team_permission_mode(&user_id, conversation_id, mode)
                 .await?
-                .is_none_or(|row| row.r#type == "acp")
         {
             return Err(TeamError::AgentNotFound(conversation_id.to_owned()));
         }
@@ -692,6 +756,9 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
         request: SetConfigOptionRequest,
     ) -> Result<SetConfigOptionResponse, TeamError> {
         let user_id = self.require_owner_user_id(conversation_id).await?;
+        if matches!(option_id, "mode" | "permission_mode") {
+            self.ensure_team_permission_storage(&user_id, conversation_id).await?;
+        }
         self.conversation_service
             .set_team_config_option(&user_id, conversation_id, option_id, request)
             .await
@@ -718,6 +785,7 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
         conversation_id: &str,
         task_manager: &Arc<dyn IWorkerTaskManager>,
     ) -> Result<(), TeamError> {
+        self.ensure_team_permission_storage(user_id, conversation_id).await?;
         self.conversation_service
             .warmup(user_id, conversation_id, task_manager)
             .await

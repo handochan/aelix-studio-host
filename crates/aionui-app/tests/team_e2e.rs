@@ -2374,6 +2374,14 @@ for line in sys.stdin:
         assert_eq!(mode(member).await, "yolo");
     }
 
+    // The active legacy slot has an intact agent binding but no persisted
+    // session anchor. Only the Team endpoint may recover and write its mode.
+    sqlx::query("DELETE FROM acp_session WHERE conversation_id = ?")
+        .bind(member_id)
+        .execute(services.database.pool())
+        .await
+        .unwrap();
+
     let ordinary = app
         .clone()
         .oneshot(json_with_token(
@@ -2428,6 +2436,14 @@ for line in sys.stdin:
         assert_eq!(body_json(response).await["data"]["confirmation"], "observed");
     };
     choose_slot("default").await;
+    let recovered: (String, String) =
+        sqlx::query_as("SELECT agent_id, team_permission_mode FROM acp_session WHERE conversation_id = ?")
+            .bind(member_id)
+            .fetch_one(services.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(recovered, (agent_ids[1].clone(), "default".to_owned()));
+
     services
         .conversation_repo
         .update(
@@ -2465,5 +2481,74 @@ for line in sys.stdin:
     assert_eq!(mode(&roster[1]).await, "yolo");
     std::fs::remove_file(&busy).unwrap();
     attach(&roster[1], "runtime/restart").await;
+    assert_eq!(mode(&roster[1]).await, "default");
+
+    let stopped = app
+        .clone()
+        .oneshot(delete_with_token(
+            &format!("/api/teams/{team_id}/session"),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    services.worker_task_manager.kill_and_wait(member_id, None).await;
+    assert!(services.worker_task_manager.get_task(member_id).is_none());
+
+    sqlx::query("DELETE FROM acp_session WHERE conversation_id = ?")
+        .bind(member_id)
+        .execute(services.database.pool())
+        .await
+        .unwrap();
+    let saved = services
+        .conversation_repo
+        .get(&user_id, member_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut invalid: Value = serde_json::from_str(&saved.extra).unwrap();
+    invalid["agent_id"] = json!("unavailable-agent");
+    services
+        .conversation_repo
+        .update(
+            &user_id,
+            member_id,
+            &aionui_db::ConversationRowUpdate {
+                extra: Some(invalid.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(change_mode("default").await.status(), StatusCode::BAD_REQUEST);
+    let absent: i64 = sqlx::query_scalar("SELECT count(*) FROM acp_session WHERE conversation_id = ?")
+        .bind(member_id)
+        .fetch_one(services.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(absent, 0, "invalid binding must not create a permission record");
+
+    services
+        .conversation_repo
+        .update(
+            &user_id,
+            member_id,
+            &aionui_db::ConversationRowUpdate {
+                extra: Some(saved.extra),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(change_mode("default").await.status(), StatusCode::OK);
+    let recovered: (String, String) =
+        sqlx::query_as("SELECT agent_id, team_permission_mode FROM acp_session WHERE conversation_id = ?")
+            .bind(member_id)
+            .fetch_one(services.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(recovered, (agent_ids[1].clone(), "default".to_owned()));
+    attach(&roster[1], "attach").await;
     assert_eq!(mode(&roster[1]).await, "default");
 }

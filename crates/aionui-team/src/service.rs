@@ -3135,7 +3135,7 @@ impl TeamSessionService {
 
     // Keep permission RPCs and their durable writes ordered with other
     // choices and with adding members that inherit the Team selection.
-    async fn lock_permission_selection(&self, team_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) async fn lock_permission_selection(&self, team_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = self
             .add_agent_locks
             .entry(team_id.to_owned())
@@ -3172,6 +3172,20 @@ impl TeamSessionService {
         let mut incomplete = false;
         for agent in &team.agents {
             let instance = self.task_manager.get_task(&agent.conversation_id);
+            // A Ready slot without its old task may be rebuilding in the
+            // turn executor rather than the attach path. Store the requested
+            // mode, but do not claim it reached a live task we could not set.
+            if instance.is_none()
+                && matches!(mode, "default" | "yolo")
+                && self.sessions.get(team_id).is_some_and(|entry| {
+                    matches!(
+                        entry.session.member_runtimes().snapshot(&agent.slot_id),
+                        MemberRuntimeSnapshot::Ready
+                    )
+                })
+            {
+                incomplete = true;
+            }
             let protects_aelix =
                 matches!(&instance, Some(AgentInstance::Acp(manager)) if manager.has_team_permission_policy());
             let mode_applied = match instance {
@@ -3203,7 +3217,7 @@ impl TeamSessionService {
                 continue;
             }
             if mode_applied && let Err(error) = provisioner.update_session_mode_seed(agent, mode).await {
-                incomplete |= protects_aelix;
+                incomplete |= protects_aelix || matches!(mode, "default" | "yolo");
                 warn!(
                     team_id,
                     slot_id = %agent.slot_id,
@@ -4068,6 +4082,71 @@ mod tests {
         assert!(matches!(
             model_error,
             TeamError::MemberRuntimeStarting { ref slot_id, .. } if slot_id == &worker.slot_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn dormant_attach_does_not_begin_warmup_before_permission_storage() {
+        let (svc, _repo, task_manager, conv_repo) = setup_with_factory_metadata_team_repo_and_conversation_repo();
+        let created = svc
+            .create_team("user-test", two_agent_team_request("Dormant Permission Gate"))
+            .await
+            .unwrap();
+        svc.ensure_session("user-test", &created.id).await.unwrap();
+        let worker = created
+            .assistants
+            .iter()
+            .find(|agent| agent.role == "teammate")
+            .unwrap();
+        let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
+        let agent = session.scheduler().get_agent(&worker.slot_id).await.unwrap();
+
+        svc.provisioner()
+            .update_session_mode_seed(&agent, "yolo")
+            .await
+            .unwrap();
+
+        // Park the permission writer after it has already checked that no
+        // runtime is starting, and before it has persisted Ask.
+        let guard = svc.lock_permission_selection(&created.id).await;
+        let ReserveAttach::Start(lease) = session.member_runtimes().reserve_attach(&worker.slot_id, false) else {
+            panic!("a dormant teammate must be attachable");
+        };
+        let attach = super::attach_member_runtime(
+            svc.clone(),
+            session.clone(),
+            "user-test".to_owned(),
+            agent.clone(),
+            task_manager,
+            lease,
+            false,
+        );
+        tokio::pin!(attach);
+
+        assert!(futures_util::poll!(&mut attach).is_pending());
+        assert!(!svc.member_runtime_is_starting(&created.id, &worker.slot_id));
+        assert_eq!(
+            conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_team_permission"],
+            "yolo"
+        );
+
+        svc.provisioner()
+            .update_session_mode_seed(&agent, "default")
+            .await
+            .unwrap();
+        drop(guard);
+        assert!(matches!(attach.await, super::AttachOutcome::Ready));
+        assert_eq!(
+            conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_warmup_permission"],
+            "default"
+        );
+
+        // A turn-executor rebuild with no attached task cannot acknowledge a
+        // live mode update, even if the request can save the next mode.
+        assert!(svc.task_manager.get_task(&worker.conversation_id).is_none());
+        assert!(matches!(
+            svc.set_session_mode("user-test", &created.id, "default").await,
+            Err(TeamError::InvalidRequest(reason)) if reason.contains("every Aelix slot")
         ));
     }
 
