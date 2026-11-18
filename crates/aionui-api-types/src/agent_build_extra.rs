@@ -58,6 +58,9 @@ pub struct ForkSpec {
     /// fork at HEAD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_id: Option<String>,
+    /// The native HEAD reference from the parent's selected display message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_native_head: Option<String>,
 }
 
 /// ACP-specific fields extracted from `extra` in build task options.

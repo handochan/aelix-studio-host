@@ -2804,6 +2804,35 @@ impl ConversationService {
             .await?;
         let is_head = latest.items.last().is_none_or(|m| m.id == fork_point.id);
 
+        let expected_native_head = if fork_capability.requires_native_head {
+            let anchor = fork_point
+                .backend_turn_id
+                .as_ref()
+                .filter(|v| !v.is_empty() && v.len() <= 128);
+            if !is_head
+                || req
+                    .expected_native_head
+                    .as_ref()
+                    .is_some_and(|shown| Some(shown) != anchor)
+            {
+                return Err(ConversationError::Busy {
+                    reason: format!(
+                        "{}: the parent advanced past the selected message",
+                        aionui_api_types::FORK_HEAD_CHANGED
+                    ),
+                });
+            }
+            Some(anchor.cloned().ok_or_else(|| ConversationError::Unprocessable {
+                reason: "FORK_HEAD_UNAVAILABLE: the selected message has no native HEAD reference".into(),
+            })?)
+        } else if req.expected_native_head.is_some() {
+            return Err(ConversationError::Unprocessable {
+                reason: "FORK_HEAD_UNAVAILABLE: the agent no longer supports native HEAD verification".into(),
+            });
+        } else {
+            None
+        };
+
         let last_turn_id = if is_head {
             // HEAD fork: every backend supports it and no anchor is needed
             // (codex `lastTurnId` omitted = fork at HEAD).
@@ -2845,6 +2874,7 @@ impl ConversationService {
                     parent_message_id: fork_point.id.clone(),
                     parent_session_id,
                     last_turn_id,
+                    expected_native_head,
                 })
                 .map_err(|e| ConversationError::internal(format!("Failed to serialize fork spec: {e}")))?,
             );
@@ -5804,6 +5834,11 @@ fn fork_capability_view(capabilities: &serde_json::Value) -> Option<ForkCapabili
     }
     Some(ForkCapabilityView {
         at_turn: fork.get("at_turn").and_then(|v| v.as_bool()).unwrap_or(false),
+        requires_native_head: fork
+            .get("_meta")
+            .and_then(|meta| meta.get(aionui_api_types::AELIX_EXPECTED_FORK_HEAD))
+            .and_then(serde_json::Value::as_u64)
+            == Some(1),
     })
 }
 

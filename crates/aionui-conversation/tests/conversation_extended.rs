@@ -816,12 +816,22 @@ async fn setup_fork() -> (
     Arc<dyn aionui_db::IAcpSessionRepository>,
 ) {
     let db = init_database_memory().await.unwrap();
-    let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+    setup_fork_in_pool(db.pool())
+}
+
+fn setup_fork_in_pool(
+    pool: &sqlx::SqlitePool,
+) -> (
+    ConversationService,
+    Arc<SqliteConversationRepository>,
+    Arc<dyn aionui_db::IAcpSessionRepository>,
+) {
+    let repo = Arc::new(SqliteConversationRepository::new(pool.clone()));
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn aionui_db::IAgentMetadataRepository> =
-        Arc::new(aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
+        Arc::new(aionui_db::SqliteAgentMetadataRepository::new(pool.clone()));
     let acp_session_repo: Arc<dyn aionui_db::IAcpSessionRepository> =
-        Arc::new(aionui_db::SqliteAcpSessionRepository::new(db.pool().clone()));
+        Arc::new(aionui_db::SqliteAcpSessionRepository::new(pool.clone()));
     let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
     let svc = ConversationService::new(
         std::env::temp_dir(),
@@ -849,6 +859,63 @@ fn fork_req(message_id: &str) -> aionui_api_types::ForkConversationRequest {
 }
 
 #[tokio::test]
+async fn native_fork_persists_the_selected_head_and_rejects_a_stale_renderer_reference() {
+    use aionui_db::{IAgentMetadataRepository, UpdateAgentHandshakeParams};
+    let db = init_database_memory().await.unwrap();
+    let (svc, repo, acp_repo) = setup_fork_in_pool(db.pool());
+    let parent = svc.create(USER_ID, fork_create_req("gemini")).await.unwrap();
+    acp_repo
+        .update_session_id_for_user(USER_ID, &parent.id, "parent-sid")
+        .await
+        .unwrap();
+    let agent = acp_repo.get_for_user(USER_ID, &parent.id).await.unwrap().unwrap();
+    aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone())
+        .apply_handshake(
+            &agent.agent_id,
+            &UpdateAgentHandshakeParams {
+                agent_capabilities: Some(Some(
+                    r#"{"session_capabilities":{"fork":{"_meta":{"aelix/expectedHead":1}}}}"#,
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut message = make_message(&parent.id, "selected reply", 1);
+    message.backend_turn_id = Some("turn-selected".into());
+    repo.insert_message(USER_ID, &message).await.unwrap();
+    let mut request = fork_req(&message.id);
+    request.expected_native_head = Some("turn-old".into());
+    let error = svc.fork(USER_ID, &parent.id, request).await.unwrap_err();
+    assert!(matches!(error, ConversationError::Busy { reason } if reason.starts_with("FORK_HEAD_CHANGED")));
+    let selected = svc.fork(USER_ID, &parent.id, fork_req(&message.id)).await.unwrap();
+    let mut later = make_message(&parent.id, "later reply", 2);
+    later.backend_turn_id = Some("turn-later".into());
+    repo.insert_message(USER_ID, &later).await.unwrap();
+    let saved = repo.get(USER_ID, &selected.id).await.unwrap().unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&saved.extra).unwrap();
+    assert_eq!(extra["fork"]["expected_native_head"], "turn-selected");
+    aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone())
+        .apply_handshake(
+            &agent.agent_id,
+            &UpdateAgentHandshakeParams {
+                agent_capabilities: Some(Some(r#"{"session_capabilities":{"fork":{}}}"#)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut request = fork_req(&later.id);
+    request.expected_native_head = Some("turn-later".into());
+    let error = svc.fork(USER_ID, &parent.id, request).await.unwrap_err();
+    assert!(
+        matches!(error, ConversationError::Unprocessable { reason } if reason.starts_with("FORK_HEAD_UNAVAILABLE"))
+    );
+}
+
+#[tokio::test]
 async fn fork_head_creates_lineage_row_and_copies_messages() {
     let (svc, repo, acp_repo) = setup_fork().await;
     let parent = svc.create(USER_ID, fork_create_req("claude")).await.unwrap();
@@ -867,7 +934,10 @@ async fn fork_head_creates_lineage_row_and_copies_messages() {
     assert_eq!(fork.name, parent.name, "name defaults to the parent's");
     assert_eq!(
         fork.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: false }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: false,
+            ..Default::default()
+        }),
         "claude declares a HEAD-only fork capability"
     );
     let spec = fork.extra.get("fork").expect("fork lineage in extra");
@@ -945,7 +1015,10 @@ async fn fork_mid_history_resolves_codex_turn_anchor() {
     let fork = svc.fork(USER_ID, &parent.id, fork_req(&m1.id)).await.unwrap();
     assert_eq!(
         fork.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        }),
         "codex declares an at-turn fork capability"
     );
     assert_eq!(
@@ -1044,14 +1117,20 @@ async fn get_projects_fork_capability_on_detail_path() {
     let got = svc.get(USER_ID, &claude_conv.id).await.unwrap();
     assert_eq!(
         got.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: false })
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: false,
+            ..Default::default()
+        })
     );
 
     let codex_conv = svc.create(USER_ID, fork_create_req("codex")).await.unwrap();
     let got = svc.get(USER_ID, &codex_conv.id).await.unwrap();
     assert_eq!(
         got.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true })
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        })
     );
 }
 
@@ -1184,7 +1263,10 @@ async fn fork_head_aionrs_uses_conversation_id_anchor_without_acp_row() {
     assert_ne!(fork.id, parent.id);
     assert_eq!(
         fork.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        }),
         "aionrs declares an at-turn fork capability (migration 038)"
     );
     let spec = fork.extra.get("fork").expect("fork lineage in extra");
@@ -1260,7 +1342,10 @@ async fn get_projects_fork_capability_for_aionrs_on_detail_path() {
     let detail = svc.get(USER_ID, &conv.id).await.unwrap();
     assert_eq!(
         detail.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        }),
         "detail path projects the aionrs fork capability via the builtin binding ladder"
     );
 }
