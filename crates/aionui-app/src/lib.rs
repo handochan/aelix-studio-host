@@ -11,8 +11,8 @@ mod services;
 
 pub use config::{AppConfig, IdentityMode, derive_encryption_key};
 pub use router::{
-    ChannelOrchestratorComponents, ModuleStates, RouterBuildError, RouterRuntime, build_assistant_state,
+    ChannelOrchestratorComponents, ModuleStates, RouterBuildError, RouterRuntime, StudioAuth, build_assistant_state,
     build_conversation_state, build_extension_states, build_module_states, build_ws_state, create_router,
-    create_router_with_all_state, create_router_with_runtime, create_router_with_states,
+    create_router_with_all_state, create_router_with_runtime, create_router_with_states, create_studio_router,
 };
 pub use services::AppServices;

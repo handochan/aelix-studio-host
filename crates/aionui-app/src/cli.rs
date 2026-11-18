@@ -41,6 +41,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub local: bool,
 
+    /// Protect the Studio loopback listener. Read its 64-character credential from stdin.
+    #[arg(long, requires = "local")]
+    pub studio_auth: bool,
+
     /// Identity source mode. AionPro mode requires AIONCORE_BOOTSTRAP_SECRET.
     #[arg(long, value_enum, default_value_t = IdentityModeArg::Webui)]
     pub identity_mode: IdentityModeArg,
@@ -762,6 +766,10 @@ pub(crate) struct SetPasswordArgs {
     /// `echo "$PW" | aelix-studio-host user set-password --password-stdin`.
     #[arg(long)]
     pub password_stdin: bool,
+
+    /// Require exclusive access to the data directory before reading the password.
+    #[arg(long)]
+    pub require_stopped: bool,
 }
 
 #[derive(Args, Debug, Clone)]

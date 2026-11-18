@@ -52,6 +52,22 @@ async fn set_password(cli: &Cli, args: &SetPasswordArgs) -> Result<ExitCode, Cli
         validate_username(name).map_err(|_| input_error("username does not meet the required format"))?;
     }
 
+    let _guard = if args.require_stopped {
+        let db_path = cli.data_dir.join("aionui-backend.db");
+        Some(
+            aionui_db::DataDirInstanceGuard::try_acquire(&db_path)
+                .map_err(|_| database_error())?
+                .ok_or_else(|| {
+                    CliBoundaryError::new(
+                        CliBoundaryCode::CliUserInputInvalid,
+                        SUBCOMMAND,
+                        "Stop WebUI before resetting its password.",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let password = read_new_password(args.password_stdin)?;
 
     let database = open_database(cli).await?;

@@ -576,6 +576,29 @@ python3 -I -B scripts/release/notices.py --verify-output dist/release-linux-x64
   on a separate branch with review and the same CI; `.github/workflows/` here
   is ours and upstream workflow changes are not taken.
 
+## Studio WebUI authentication
+
+Studio starts the host on IPv4 loopback with `--local --studio-auth`.
+The supervisor writes a fresh 64-character hexadecimal credential to stdin
+and closes the pipe. It sends that credential in the
+`x-aionui-studio-auth` header for trusted desktop and setup requests only.
+The host consumes the header before routing.
+
+Browser requests use the existing operator login. The Studio WebUI
+listener checks the browser-facing Host and Origin before forwarding the
+request using the host's loopback authority. The host checks the operator
+session again before serving protected HTTP routes or accepting WebSocket
+upgrades. Existing conversation-helper capabilities continue to use their
+own scoped credentials.
+
+Stop the standalone WebUI before running the offline password command.
+The command acquires the server's data-directory lock before reading a new
+password.
+
+```bash
+aelix-studio-host --data-dir /path/to/webui-data user set-password --require-stopped
+```
+
 ## Host-managed outbound access
 
 This follows [Studio #15](https://github.com/handochan/aelix-studio/issues/15)
