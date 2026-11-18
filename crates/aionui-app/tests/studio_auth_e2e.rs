@@ -15,6 +15,7 @@ struct StudioHost {
     url: String,
     task: tokio::task::JoinHandle<()>,
     helper_token: String,
+    runtime_tokens: std::sync::Arc<aionui_ai_agent::RuntimeTokenService>,
     _dir: Option<tempfile::TempDir>,
     users: std::sync::Arc<dyn aionui_db::IUserRepository>,
 }
@@ -69,6 +70,7 @@ impl StudioHost {
             url: format!("http://127.0.0.1:{port}"),
             task,
             helper_token,
+            runtime_tokens: services.runtime_token_service,
             _dir: None,
             users: services.user_repo,
         }
@@ -392,4 +394,122 @@ async fn changed_session_generation_closes_an_idle_browser_socket() {
         closed,
         Some(tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy)
     );
+}
+
+fn helper_cli(host: &StudioHost, conversation_id: &str, token: &str) -> tokio::process::Command {
+    let mut cli = tokio::process::Command::new(env!("CARGO_BIN_EXE_aelix-studio-host"));
+    cli.kill_on_drop(true)
+        .env("AIONUI_BASE_URL", &host.url)
+        .env("AIONUI_CONVERSATION_ID", conversation_id)
+        .env("AIONUI_USER_ID", "system_default_user")
+        .env("AIONUI_RUNTIME_TOKEN", token)
+        .env("NO_PROXY", "127.0.0.1");
+    cli
+}
+
+#[tokio::test]
+async fn diagnose_health_and_overview_work_with_a_conversation_helper_token() {
+    let host = StudioHost::start().await;
+    for (action, health_selector) in [("health", "/data/status"), ("overview", "/data/health/status")] {
+        let result = helper_cli(&host, "fixture-conversation", &host.helper_token)
+            .args(["diagnose", action])
+            .output()
+            .await
+            .unwrap();
+        assert!(result.status.success(), "diagnose {action} returned {}", result.status);
+        let response: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(response.pointer(health_selector), Some(&serde_json::json!("ok")));
+    }
+
+    let denied = host
+        .client
+        .get(format!("{}/health", host.url))
+        .header("x-aionui-runtime-token", "invalid-fixture-token")
+        .header("x-aionui-user-id", "system_default_user")
+        .header("x-aionui-conversation-id", "fixture-conversation")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn helper_rename_changes_only_the_name_of_its_own_conversation() {
+    use tokio::io::AsyncWriteExt;
+
+    let host = StudioHost::start().await;
+    let response = host
+        .client
+        .post(format!("{}/api/conversations", host.url))
+        .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+        .json(&serde_json::json!({
+            "type": "aionrs",
+            "name": "Original",
+            "extra": { "fixture_key": "original" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = response.json().await.unwrap();
+    let id = created["data"]["id"].as_str().unwrap();
+    let token = host
+        .runtime_tokens
+        .issue(
+            "system_default_user",
+            id,
+            TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
+            [RuntimeTokenScope::ConversationHelper],
+        )
+        .token;
+
+    let mut rename = helper_cli(&host, id, &token)
+        .args(["config", "conversation", "rename"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let payload = serde_json::to_vec(&serde_json::json!({"conversation_id": id, "name": "Renamed"})).unwrap();
+    rename.stdin.take().unwrap().write_all(&payload).await.unwrap();
+    assert!(rename.wait_with_output().await.unwrap().status.success());
+
+    let patch = |target: &str, body: String| {
+        host.client
+            .patch(format!("{}/api/conversations/{target}", host.url))
+            .header("x-aionui-runtime-token", &token)
+            .header("x-aionui-user-id", "system_default_user")
+            .header("x-aionui-conversation-id", id)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+    };
+    for body in [
+        r#"{"name":"Unexpected","extra":{"fixture_key":"changed"}}"#.to_owned(),
+        r#"{"name":"Unexpected","name_source":"auto"}"#.to_owned(),
+        r#"{"name":"First","name":"Second"}"#.to_owned(),
+        r#"{"name":null}"#.to_owned(),
+        format!(r#"{{"name":"{}"}}"#, "x".repeat(16 * 1024)),
+    ] {
+        let denied = patch(id, body).send().await.unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
+    let denied = patch("other-conversation", r#"{"name":"Unexpected"}"#.to_owned())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let current: serde_json::Value = host
+        .client
+        .get(format!("{}/api/conversations/{id}", host.url))
+        .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(current["data"]["name"], "Renamed");
+    assert_eq!(current["data"]["extra"]["fixture_key"], "original");
 }

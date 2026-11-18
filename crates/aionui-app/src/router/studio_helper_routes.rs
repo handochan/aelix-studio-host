@@ -1,17 +1,60 @@
-use axum::http::Method;
+use axum::body::{Body, to_bytes};
+use axum::extract::Request;
+use axum::http::{Method, header};
+use serde::{Deserialize, Serialize};
+
+pub(super) enum HelperGrant {
+    Route,
+    Rename,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ConversationRename {
+    name: String,
+}
+
+/// A rename uses the general PATCH handler, so forward only the admitted field.
+pub(super) async fn rename_request(request: Request) -> Option<Request> {
+    const MAX_RENAME_BYTES: usize = 16 * 1024;
+
+    let (mut parts, body) = request.into_parts();
+    let content_type = parts.headers.get(header::CONTENT_TYPE)?.to_str().ok()?;
+    if !content_type
+        .split(';')
+        .next()?
+        .trim()
+        .eq_ignore_ascii_case("application/json")
+    {
+        return None;
+    }
+
+    let bytes = to_bytes(body, MAX_RENAME_BYTES).await.ok()?;
+    let rename: ConversationRename = serde_json::from_slice(&bytes).ok()?;
+    let body = Body::from(serde_json::to_vec(&rename).ok()?);
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Some(Request::from_parts(parts, body))
+}
 
 /// Match the routes used by the config and diagnose CLIs. Runtime tools
 /// with their own capabilities have a separate admission path.
-pub(super) fn allows(method: &Method, path: &str, conversation: &str) -> bool {
+pub(super) fn grant(method: &Method, path: &str, conversation: &str) -> Option<HelperGrant> {
+    if *method == Method::GET && path == "/health" {
+        return Some(HelperGrant::Route);
+    }
+
     let parts: Vec<_> = path.split('/').collect();
     let ["", "api", rest @ ..] = parts.as_slice() else {
-        return false;
+        return None;
     };
 
-    match (method, rest) {
+    if let (&Method::PATCH, ["conversations", id]) = (method, rest) {
+        return (*id == conversation).then_some(HelperGrant::Rename);
+    }
+
+    let allowed = match (method, rest) {
         (&Method::GET, ["system", "info"] | ["conversations"] | ["teams"]) => true,
-        (&Method::GET, ["conversations", id] | ["conversations", id, "messages"])
-        | (&Method::PATCH, ["conversations", id]) => *id == conversation,
+        (&Method::GET, ["conversations", id] | ["conversations", id, "messages"]) => *id == conversation,
 
         (&Method::GET | &Method::POST, ["assistants" | "providers"] | ["mcp", "servers"] | ["cron", "jobs"]) => true,
         (
@@ -55,5 +98,6 @@ pub(super) fn allows(method: &Method, path: &str, conversation: &str) -> bool {
         | (&Method::POST, ["internal", "conversation-cron", "create"])
         | (&Method::PUT, ["internal", "conversation-cron", "jobs", _]) => true,
         _ => false,
-    }
+    };
+    allowed.then_some(HelperGrant::Route)
 }

@@ -135,10 +135,20 @@ async fn admit(
         return Ok(next.run(request).await);
     }
     if headers.contains_key(RUNTIME_TOKEN_HEADER) {
-        if native && !websocket && state.helper_can_access(headers, request.method(), path) {
-            return Ok(next.run(request).await);
+        if !native || websocket {
+            return Err(forbidden());
         }
-        return Err(forbidden());
+
+        let grant = state
+            .helper_grant(headers, request.method(), path)
+            .ok_or_else(forbidden)?;
+        let request = match grant {
+            super::studio_helper_routes::HelperGrant::Route => request,
+            super::studio_helper_routes::HelperGrant::Rename => super::studio_helper_routes::rename_request(request)
+                .await
+                .ok_or_else(forbidden)?,
+        };
+        return Ok(next.run(request).await);
     }
     if path.starts_with("/api/internal/") || path.starts_with("/api/runtime/") || path.starts_with("/internal/") {
         return Err(forbidden());
@@ -187,25 +197,30 @@ async fn admit(
 }
 
 impl AdmissionState {
-    fn helper_can_access(&self, headers: &HeaderMap, method: &Method, path: &str) -> bool {
+    fn helper_grant(
+        &self,
+        headers: &HeaderMap,
+        method: &Method,
+        path: &str,
+    ) -> Option<super::studio_helper_routes::HelperGrant> {
         let (Some(token), Some(OPERATOR), Some(conversation)) = (
             single_header(headers, RUNTIME_TOKEN_HEADER),
             single_header(headers, RUNTIME_USER_ID_HEADER),
             single_header(headers, RUNTIME_CONVERSATION_ID_HEADER),
         ) else {
-            return false;
+            return None;
         };
-        super::studio_helper_routes::allows(method, path, conversation)
-            && self
-                .runtime_tokens
-                .validate(
-                    Some(token),
-                    OPERATOR,
-                    conversation,
-                    RuntimeTokenScope::ConversationHelper,
-                    TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
-                )
-                .is_ok()
+        let grant = super::studio_helper_routes::grant(method, path, conversation)?;
+        self.runtime_tokens
+            .validate(
+                Some(token),
+                OPERATOR,
+                conversation,
+                RuntimeTokenScope::ConversationHelper,
+                TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
+            )
+            .ok()?;
+        Some(grant)
     }
 }
 
