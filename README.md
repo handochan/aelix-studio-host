@@ -410,7 +410,8 @@ python3 -I -B -m unittest discover -s scripts/deny -p 'test_*.py' -v
   aionrs and dependencies such as rmcp, cron and oauth2; `chrono-tz` is required
   through `aionui-app -> aionui-cron`. The owner approved these two exceptions
   with a recheck immediately before the first Beta
-  ([#35](https://github.com/handochan/aelix-studio-host/issues/35)). The same
+  ([#37](https://github.com/handochan/aelix-studio-host/issues/37); decision in
+  [#35](https://github.com/handochan/aelix-studio-host/issues/35)). The same
   change resolves vulnerability RUSTSEC-2026-0544 by updating `libz-sys`
   1.1.31 to 1.1.33 through `git2 -> libgit2-sys`, without an exception.
   No other crate version or Cargo manifest changes. Its native-source release
