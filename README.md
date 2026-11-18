@@ -385,7 +385,7 @@ python3 -I -B -m unittest discover -s scripts/deny -p 'test_*.py' -v
   [#7](https://github.com/handochan/aelix-studio-host/issues/7). Calamine 0.38
   also addresses RUSTSEC-2026-0436, published on 2026-11-03. New advisories fail
   the advisory check, including transitive unsound notices (`unsound = "all"`),
-  except for the documented baseline and approved exception below. Host #23 upgrades rmcp to
+  except for the documented baseline and approved exceptions below. Host #23 upgrades rmcp to
   3.9.0 (0462), removes pin-utils through AWS updates (0441), and updates
   event-listener to 5.4.2 (0221) and lru to 0.18.2 (0253).
   [The dependency change record](docs/host-23-dependencies.md) lists every
@@ -404,6 +404,20 @@ python3 -I -B -m unittest discover -s scripts/deny -p 'test_*.py' -v
   changing only the host parser cannot remove it. The owner approved this one
   exception separately from the unresolved baseline. Removal is tracked in
   [Later #18](https://github.com/handochan/aelix-studio-host/issues/18).
+- **User-approved maintenance exceptions (2026-11-17):** RUSTSEC-2026-0543
+  (`chrono` 0.4.44) and RUSTSEC-2026-0555 (`chrono-tz` 0.10.4) are unmaintained
+  notices with no patched versions. `chrono` is required by host crates,
+  aionrs and dependencies such as rmcp, cron and oauth2; `chrono-tz` is required
+  through `aionui-app -> aionui-cron`. The owner approved these two exceptions
+  with a recheck immediately before the first Beta
+  ([#37](https://github.com/handochan/aelix-studio-host/issues/37); decision in
+  [#35](https://github.com/handochan/aelix-studio-host/issues/35)). The same
+  change resolves vulnerability RUSTSEC-2026-0544 by updating `libz-sys`
+  1.1.31 to 1.1.33 through `git2 -> libgit2-sys`, without an exception.
+  No other crate version or Cargo manifest changes. Its native-source release
+  pin and Apache NOTICE audit binding are refreshed from the checksum-verified
+  crate and its published upstream revision; the build recipe and original
+  license notices are unchanged.
 
 ### Third-party release notices
 
