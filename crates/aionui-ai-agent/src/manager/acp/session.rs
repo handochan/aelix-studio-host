@@ -668,6 +668,65 @@ impl AcpSession {
         }
     }
 
+    /// Clear startup intent for selectors that Aelix restored natively.
+    /// Do this before applying the response so the legacy desired model
+    /// cannot override the reported current model in the advertised catalog.
+    pub(crate) fn adopt_aelix_restored_selections(
+        &mut self,
+        legacy_models: Option<&LegacySessionModelState>,
+        options: &[SessionConfigOption],
+    ) {
+        for category in [
+            SessionConfigOptionCategory::Model,
+            SessionConfigOptionCategory::ThoughtLevel,
+        ] {
+            let reported_option = select_option_for_startup_seed(options, &category)
+                .filter(|option| extract_config_current_value(&option.kind).is_some_and(|value| !value.is_empty()));
+            let reports_legacy_model = category == SessionConfigOptionCategory::Model
+                && legacy_models.is_some_and(|models| !models.current_model_id.is_empty());
+            if reported_option.is_none() && !reports_legacy_model {
+                continue;
+            }
+
+            let reported_key = reported_option.map(|option| option.id.to_string());
+            let aliases = config_option_aliases_for_category(&category);
+            let legacy_model_only = reports_legacy_model && reported_option.is_none();
+            let mut obsolete_keys = Vec::new();
+            if legacy_model_only && let Some(cached) = &mut self.advertised.config_options {
+                cached.retain(|option| {
+                    let key = option.id.to_string();
+                    let is_model =
+                        option.category == Some(SessionConfigOptionCategory::Model) || aliases.contains(&key.as_str());
+                    if is_model {
+                        obsolete_keys.push(key);
+                    }
+                    !is_model
+                });
+            }
+            let is_saved_selector_key = |key: &ConfigKey| {
+                aliases.contains(&key.as_str()) || obsolete_keys.iter().any(|obsolete| obsolete == key.as_str())
+            };
+            self.desired
+                .config_selections
+                .retain(|key, _| reported_key.as_deref() != Some(key.as_str()) && !is_saved_selector_key(key));
+            if legacy_model_only {
+                let before = self.observed.config_current.len();
+                self.observed
+                    .config_current
+                    .retain(|key, _| !is_saved_selector_key(key));
+                if self.observed.config_current.len() != before {
+                    self.pending_events.push(AcpSessionEvent::ObservedConfigSynced {
+                        selections: self.observed.config_current.clone(),
+                    });
+                }
+            }
+            self.desired
+                .pending_startup_config
+                .retain(|seed| seed.category != category);
+            self.clear_legacy_desired_for_config_category(&category);
+        }
+    }
+
     /// Adopt state explicitly returned by session/load, without replaying an
     /// older startup permission preference over the restored agent policy.
     /// Fresh sessions and subsequent explicit user changes still reconcile.
