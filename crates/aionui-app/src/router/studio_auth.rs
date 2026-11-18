@@ -61,10 +61,9 @@ impl StudioAuth {
     }
 
     fn accepts_browser_source(&self, headers: &HeaderMap, method: &Method, websocket: bool) -> bool {
-        if matches!(
-            single_header(headers, "sec-fetch-site"),
-            Some("cross-site" | "same-site")
-        ) {
+        if headers.contains_key("sec-fetch-site")
+            && !matches!(single_header(headers, "sec-fetch-site"), Some("none" | "same-origin"))
+        {
             return false;
         }
         if headers.contains_key(header::ORIGIN) {
@@ -98,6 +97,12 @@ async fn admit(
     let path = request.uri().path();
     let websocket = path == "/ws" || request.headers().contains_key(header::UPGRADE);
     if desktop {
+        let headers = request.headers();
+        if (headers.contains_key(header::ORIGIN) || websocket || request.method() == Method::OPTIONS)
+            && single_header(headers, "origin") != Some(state.auth.origin.as_str())
+        {
+            return Err(forbidden());
+        }
         if path == "/ws" {
             let user = state
                 .users
@@ -107,11 +112,7 @@ async fn admit(
                 .ok_or_else(unauthenticated)?;
             let token = state
                 .jwt
-                .sign_with_session_generation(
-                    &user.id,
-                    user.username.as_deref().unwrap_or(OPERATOR),
-                    user.session_generation,
-                )
+                .sign_with_session_generation(&user.id, "studio:desktop", user.session_generation)
                 .map_err(|_| unavailable())?;
             let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| unavailable())?;
             value.set_sensitive(true);
@@ -133,8 +134,11 @@ async fn admit(
         // These routes use their existing method-specific capability verification.
         return Ok(next.run(request).await);
     }
-    if native && !websocket && state.is_conversation_helper(headers) {
-        return Ok(next.run(request).await);
+    if headers.contains_key(RUNTIME_TOKEN_HEADER) {
+        if native && !websocket && state.helper_can_access(headers, request.method(), path) {
+            return Ok(next.run(request).await);
+        }
+        return Err(forbidden());
     }
     if path.starts_with("/api/internal/") || path.starts_with("/api/runtime/") || path.starts_with("/internal/") {
         return Err(forbidden());
@@ -151,7 +155,7 @@ async fn admit(
 
     let token = extract_token_from_headers(headers).ok_or_else(unauthenticated)?;
     let claims = state.jwt.verify_access(&token).map_err(|_| unauthenticated())?;
-    if claims.user_id != OPERATOR {
+    if claims.user_id != OPERATOR || claims.exp <= (aionui_common::now_ms() / 1000) as u64 {
         return Err(unauthenticated());
     }
     let user = state
@@ -163,11 +167,27 @@ async fn admit(
     if claims.session_generation != user.session_generation {
         return Err(unauthenticated());
     }
+    if matches!(path, "/ws" | "/api/stt/stream") {
+        let jwt = Arc::clone(&state.jwt);
+        let users = Arc::clone(&state.users);
+        let expires = claims.exp;
+        let generation = claims.session_generation;
+        request.extensions_mut().insert(aionui_common::WsSessionGuard::new(
+            move || expires > (aionui_common::now_ms() / 1000) as u64 && jwt.verify_access(&token).is_ok(),
+            move || {
+                let users = Arc::clone(&users);
+                async move {
+                    matches!(users.find_active_by_id(OPERATOR).await,
+                        Ok(Some(user)) if user.session_generation == generation)
+                }
+            },
+        ));
+    }
     Ok(next.run(request).await)
 }
 
 impl AdmissionState {
-    fn is_conversation_helper(&self, headers: &HeaderMap) -> bool {
+    fn helper_can_access(&self, headers: &HeaderMap, method: &Method, path: &str) -> bool {
         let (Some(token), Some(OPERATOR), Some(conversation)) = (
             single_header(headers, RUNTIME_TOKEN_HEADER),
             single_header(headers, RUNTIME_USER_ID_HEADER),
@@ -175,15 +195,17 @@ impl AdmissionState {
         ) else {
             return false;
         };
-        self.runtime_tokens
-            .validate(
-                Some(token),
-                OPERATOR,
-                conversation,
-                RuntimeTokenScope::ConversationHelper,
-                TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
-            )
-            .is_ok()
+        super::studio_helper_routes::allows(method, path, conversation)
+            && self
+                .runtime_tokens
+                .validate(
+                    Some(token),
+                    OPERATOR,
+                    conversation,
+                    RuntimeTokenScope::ConversationHelper,
+                    TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
+                )
+                .is_ok()
     }
 }
 

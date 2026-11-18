@@ -582,18 +582,22 @@ Studio starts the host on IPv4 loopback with `--local --studio-auth`.
 The supervisor writes a fresh 64-character hexadecimal credential to stdin
 and closes the pipe. It sends that credential in the
 `x-aionui-studio-auth` header for trusted desktop and setup requests only.
-The host consumes the header before routing.
+The host checks the canonical loopback Origin when present and consumes the
+header before routing. Native supervisor requests can omit Origin.
 
 Browser requests use the existing operator login. The Studio WebUI
 listener checks the browser-facing Host and Origin before forwarding the
 request using the host's loopback authority. The host checks the operator
 session again before serving protected HTTP routes or accepting WebSocket
-upgrades. Existing conversation-helper capabilities continue to use their
-own scoped credentials.
+upgrades. Open browser WebSockets close when the credential expires, the
+user logs out, or the account or session generation is revoked. Conversation
+helpers retain access to their config and diagnose routes and dedicated
+runtime capabilities.
 
 Stop the standalone WebUI before running the offline password command.
 The command acquires the server's data-directory lock before reading a new
-password.
+password. A successful reset replaces the password and revokes old sessions
+in one database write.
 
 ```bash
 aelix-studio-host --data-dir /path/to/webui-data user set-password --require-stopped

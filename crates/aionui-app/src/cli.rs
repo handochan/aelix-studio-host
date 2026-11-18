@@ -722,8 +722,8 @@ pub(crate) struct UserArgs {
 pub(crate) enum UserCommand {
     /// Set (or create) a local user's login password. With no `--username`,
     /// targets the built-in `system_default_user` (login name `admin`) — the
-    /// bootstrap path for a fresh deployment. Does not revoke existing
-    /// sessions; restart the server after a hot password change.
+    /// bootstrap path for a fresh deployment. Use `--require-stopped` to revoke
+    /// existing sessions as part of the password update.
     SetPassword(SetPasswordArgs),
     /// Create a NEW local user with a login password. `--username` is required
     /// and must not already exist — a conflict (including the built-in `admin`
@@ -767,7 +767,7 @@ pub(crate) struct SetPasswordArgs {
     #[arg(long)]
     pub password_stdin: bool,
 
-    /// Require exclusive access to the data directory before reading the password.
+    /// Require a stopped host, then replace the password and revoke existing sessions.
     #[arg(long)]
     pub require_stopped: bool,
 }
