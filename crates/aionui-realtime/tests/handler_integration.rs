@@ -442,3 +442,36 @@ async fn multiple_concurrent_connections() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(manager.client_count(), 10);
 }
+
+#[tokio::test]
+async fn idle_browser_socket_closes_when_its_session_expires() {
+    use aionui_common::WsSessionGuard;
+    use axum::Extension;
+    use std::time::Instant;
+
+    let (state, _) = default_state();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let app = Router::new()
+        .route("/ws", get(ws_upgrade_handler))
+        .with_state(state)
+        .layer(Extension(WsSessionGuard::new(
+            move || Instant::now() < deadline,
+            || async { true },
+        )));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (_sender, mut receiver) = connect_with_token(addr, "valid-token").await;
+    let result = tokio::time::timeout(Duration::from_secs(4), async {
+        while let Some(Ok(frame)) = receiver.next().await {
+            if let tungstenite::Message::Close(Some(frame)) = frame {
+                return Some(frame.code);
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    assert_eq!(result, Some(tungstenite::protocol::frame::coding::CloseCode::Policy));
+}

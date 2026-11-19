@@ -833,6 +833,7 @@ name = "aionui-realtime"
 version = "0.2.2"
 dependencies = [
  "aionui-api-types",
+ "aionui-common",
  "axum",
  "dashmap",
  "futures-util",

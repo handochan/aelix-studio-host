@@ -85,6 +85,9 @@ pub trait IUserRepository: Send + Sync {
     async fn count_users(&self) -> Result<i64, DbError>;
 
     /// Updates a user's password hash.
+    /// Replace the password and increment its session generation atomically.
+    async fn reset_password(&self, user_id: &str, password_hash: &str) -> Result<(), DbError>;
+
     async fn update_password(&self, user_id: &str, password_hash: &str) -> Result<(), DbError>;
 
     /// Updates a user's username.

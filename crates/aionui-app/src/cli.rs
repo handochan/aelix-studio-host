@@ -41,6 +41,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub local: bool,
 
+    /// Protect the Studio loopback listener. Read its 64-character credential from stdin.
+    #[arg(long, requires = "local")]
+    pub studio_auth: bool,
+
     /// Identity source mode. AionPro mode requires AIONCORE_BOOTSTRAP_SECRET.
     #[arg(long, value_enum, default_value_t = IdentityModeArg::Webui)]
     pub identity_mode: IdentityModeArg,
@@ -718,8 +722,8 @@ pub(crate) struct UserArgs {
 pub(crate) enum UserCommand {
     /// Set (or create) a local user's login password. With no `--username`,
     /// targets the built-in `system_default_user` (login name `admin`) — the
-    /// bootstrap path for a fresh deployment. Does not revoke existing
-    /// sessions; restart the server after a hot password change.
+    /// bootstrap path for a fresh deployment. Use `--require-stopped` to revoke
+    /// existing sessions as part of the password update.
     SetPassword(SetPasswordArgs),
     /// Create a NEW local user with a login password. `--username` is required
     /// and must not already exist — a conflict (including the built-in `admin`
@@ -762,6 +766,10 @@ pub(crate) struct SetPasswordArgs {
     /// `echo "$PW" | aelix-studio-host user set-password --password-stdin`.
     #[arg(long)]
     pub password_stdin: bool,
+
+    /// Require a stopped host, then replace the password and revoke existing sessions.
+    #[arg(long)]
+    pub require_stopped: bool,
 }
 
 #[derive(Args, Debug, Clone)]

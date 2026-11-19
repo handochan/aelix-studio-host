@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 aionui-api-types.workspace = true
+aionui-common.workspace = true
 axum.workspace = true
 tokio.workspace = true
 dashmap.workspace = true
