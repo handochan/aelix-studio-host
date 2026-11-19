@@ -35,6 +35,7 @@ async fn fixture(dir: &Path) -> aionui_db::Database {
         ("fixture-aelix", "aelix", "builtin", "aelix-acp"),
         ("custom-aelix", "aelix", "custom", "aelix-acp"),
         ("wrong-name-aelix", "aelix", "builtin", "another-agent"),
+        ("foreign-aelix", "aelix", "builtin", "aelix-acp"),
     ] {
         sqlx::query(
             "INSERT INTO agent_metadata
@@ -47,7 +48,18 @@ async fn fixture(dir: &Path) -> aionui_db::Database {
         .bind(id)
         .bind(backend)
         .bind(source)
-        .bind(json!([script, dir.join("relay-calls"), peer]).to_string())
+        .bind(
+            json!([
+                script,
+                dir.join(if id == "foreign-aelix" {
+                    "foreign-calls"
+                } else {
+                    "relay-calls"
+                }),
+                peer
+            ])
+            .to_string(),
+        )
         .execute(db.pool())
         .await
         .unwrap();
@@ -57,9 +69,10 @@ async fn fixture(dir: &Path) -> aionui_db::Database {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at)
-                 VALUES ('other-conversation', 'other-owner', 'private', 'acp', 1, 1)",
+        "INSERT INTO conversations (id, user_id, name, type, extra, created_at, updated_at)
+                 VALUES ('other-conversation', 'other-owner', 'private', 'acp', ?, 1, 1)",
     )
+    .bind(json!({"agent_id":"foreign-aelix","backend":"aelix","workspace": dir,"is_custom_workspace":true}).to_string())
     .execute(db.pool())
     .await
     .unwrap();
@@ -148,7 +161,7 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     let secret_in_logs = SecretInLogs::default();
     let capture = secret_in_logs.clone();
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::TRACE)
         .with_writer(move || capture.clone())
         .finish();
     let _capture = tracing::subscriber::set_default(subscriber);
@@ -223,6 +236,35 @@ async fn acp_relay_protected_router_and_stdio_contract() {
         StatusCode::NOT_FOUND,
     )
     .await;
+    host.conversations
+        .ensure_runtime("other-owner", "other-conversation", &host.tasks)
+        .await
+        .unwrap();
+    let aionui_ai_agent::AgentInstance::Acp(foreign) = host.tasks.get_task("other-conversation").unwrap() else {
+        panic!("foreign conversation must have a live ACP task");
+    };
+    let foreign_binding = foreign.relay_discovery().unwrap().binding_id;
+    let request = aionui_api_types::AcpExtensionRequest {
+        binding_id: foreign_binding.clone(),
+        method: "_aelix/session/probe/echo".into(),
+        payload: json!({"value":"owner positive control"})
+            .as_object()
+            .unwrap()
+            .to_owned(),
+    };
+    let call = foreign
+        .relay_dispatch(
+            request,
+            aionui_ai_agent::protocol::acp_relay::RelayWriteAdmission::new(
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                |write| write(),
+            ),
+        )
+        .unwrap();
+    assert_eq!(call.reply.await.unwrap().unwrap(), "owner positive control");
+    let foreign_calls = dir.path().join("foreign-calls");
+    let baseline = std::fs::read(&foreign_calls).unwrap();
     let other = format!("{}/api/conversations/other-conversation/acp-extensions", host.url);
     assert_eq!(
         read(
@@ -243,7 +285,7 @@ async fn acp_relay_protected_router_and_stdio_contract() {
                 .post(&other)
                 .header(PRIVATE_HEADER, FIXTURE_TOKEN)
                 .json(&json!({
-                    "bindingId":"unimportant", "method":"_aelix/session/probe/echo", "payload":{}
+                    "bindingId":foreign_binding, "method":"_aelix/session/probe/echo", "payload":{}
                 }))
                 .send()
                 .await
@@ -253,6 +295,10 @@ async fn acp_relay_protected_router_and_stdio_contract() {
         .await,
         missing
     );
+
+    assert_eq!(std::fs::read(&foreign_calls).unwrap(), baseline);
+
+    host.tasks.kill_and_wait("other-conversation", None).await;
 
     let browser = host.login().await;
     let mut websocket = host.upgrade();
@@ -436,7 +482,13 @@ async fn acp_relay_protected_router_and_stdio_contract() {
             StatusCode::OK,
         )
         .await;
-        assert!(result["data"]["result"].as_str().unwrap().starts_with("한\"\\"));
+        let result = &result["data"]["result"];
+        let initial = "한\"\\";
+        let empty_bytes = json!({"jsonrpc":"2.0","id":result["rpcId"],
+            "result":{"rpcId":result["rpcId"],"value":initial}})
+        .to_string()
+        .len();
+        assert_eq!(result["value"], format!("{initial}{}", "x".repeat(bytes - empty_bytes)));
     }
     code(
         desktop(size, json!({"bytes":262145})).send().await.unwrap(),
@@ -576,6 +628,15 @@ async fn acp_relay_protected_router_and_stdio_contract() {
         StatusCode::OK,
     )
     .await;
+    let rows = history["data"]["items"].as_array().unwrap();
+    let index = |predicate: &dyn Fn(&Value) -> bool| rows.iter().position(predicate).unwrap();
+    let tool_index = index(&|row| row["type"] == "acp_tool_call");
+    let last_input = rows
+        .iter()
+        .rposition(|row| row["content"].to_string().contains("same 입력"))
+        .unwrap();
+    assert!(last_input < tool_index);
+    assert!(tool_index < index(&|row| row["content"].to_string().contains("after input")));
     let transcript = history.to_string();
     assert_eq!(transcript.matches("original prompt").count(), 1);
     assert_eq!(transcript.matches("same 입력").count(), 2);
@@ -616,6 +677,38 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     .await;
     assert_eq!(after_replay, history);
 
+    read(
+        host.client
+            .post(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"content":"next ordinary turn"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let next = read(
+        host.client
+            .get(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let rows = next["data"]["items"].as_array().unwrap();
+    let previous = rows
+        .iter()
+        .position(|row| row["content"].to_string().contains("after input"))
+        .unwrap();
+    let ordinary = rows
+        .iter()
+        .position(|row| row["content"].to_string().contains("next ordinary turn"))
+        .unwrap();
+    assert!(previous < ordinary);
+
     code(
         desk_get().header(header::COOKIE, &browser).send().await.unwrap(),
         StatusCode::FORBIDDEN,
@@ -633,4 +726,347 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     )
     .await;
     assert!(!secret_in_logs.0.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+async fn wait_until(mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture phase reached");
+}
+
+async fn ensure_and_discover(host: &StudioHost, root: &str) -> String {
+    read(
+        host.client
+            .post(format!("{root}/runtime/ensure"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    read(
+        host.client
+            .get(format!("{root}/acp-extensions"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await["data"]["bindingId"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn invoke(host: &StudioHost, root: &str, binding: &str, name: &str, payload: Value) -> reqwest::RequestBuilder {
+    host.client.post(format!("{root}/acp-extensions")).json(&json!({
+        "bindingId":binding, "method":format!("_aelix/session/probe/{name}"), "payload": payload,
+    }))
+}
+
+#[tokio::test]
+async fn acp_relay_command_override_does_not_inherit_the_builtin_launch_identity() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(dir.path()).await;
+    let host = StudioHost::start_with_db(dir.path(), db, true).await;
+    let path = dir.path().join("override");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\ntouch \"$(dirname \"$0\")/overridden-launch\"\nexec python3 \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    read(
+        host.client
+            .put(format!("{}/api/agents/fixture-aelix/overrides", host.url))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"command_override":path}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let root = format!("{}/api/conversations/{id}", host.url);
+    read(
+        host.client
+            .post(format!("{root}/runtime/ensure"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(dir.path().join("overridden-launch").is_file());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("relay-calls.initialize")).unwrap(),
+        "standard"
+    );
+    code(
+        host.client
+            .get(format!("{root}/acp-extensions"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::CONFLICT,
+        "EXT_UNAVAILABLE",
+    )
+    .await;
+    assert!(!dir.path().join("relay-calls").exists());
+}
+
+#[derive(Clone, Default)]
+struct QueuedRequest(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Write for QueuedRequest {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let line = String::from_utf8_lossy(buf);
+        if line.contains("outgoing_protocol_actor") && line.contains("probe/queued") {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn acp_relay_logout_rejects_a_request_queued_behind_a_blocked_stdio_prompt() {
+    rejects_queued_request(false).await;
+}
+
+#[tokio::test]
+async fn acp_relay_restart_admission_rejects_a_request_before_the_old_pipe_closes() {
+    rejects_queued_request(true).await;
+}
+
+async fn rejects_queued_request(restarting: bool) {
+    let queued = QueuedRequest::default();
+    let logs = queued.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || logs.clone())
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    let dir = tempfile::tempdir().unwrap();
+    let db = fixture(dir.path()).await;
+    let host = StudioHost::start_with_db(dir.path(), db, true).await;
+    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let root = format!("{}/api/conversations/{id}", host.url);
+    let binding = ensure_and_discover(&host, &root).await;
+    let browser = host.login().await;
+    let discovery = host
+        .client
+        .get(format!("{root}/acp-extensions"))
+        .header(header::COOKIE, &browser)
+        .send()
+        .await
+        .unwrap();
+    let csrf_cookie = discovery
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok()?.split(';').next())
+        .find(|value| value.starts_with("aionui-csrf-token="))
+        .unwrap()
+        .to_owned();
+    read(discovery, StatusCode::OK).await;
+    let cookies = format!("{browser}; {csrf_cookie}");
+    let csrf = csrf_cookie.split_once('=').unwrap().1;
+    read(
+        invoke(&host, &root, &binding, "pause", json!({}))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    read(
+        host.client
+            .post(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"content": "p".repeat(512 * 1024)}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    wait_until(|| dir.path().join("relay-calls.pipe-blocked").exists()).await;
+    let request = invoke(&host, &root, &binding, "queued", json!({"value":"forbidden"}))
+        .header(header::COOKIE, &cookies)
+        .header(header::ORIGIN, &host.url)
+        .header("x-csrf-token", csrf);
+    let pending = tokio::spawn(async move { request.send().await.unwrap() });
+    wait_until(|| queued.0.load(std::sync::atomic::Ordering::Acquire)).await;
+    assert!(!pending.is_finished());
+    let runtime = host.conversations.runtime_state();
+    if restarting {
+        // Hold the real restart gate open while the old task and pipe
+        // remain live, so only the first-write lifecycle check can reject.
+        runtime.begin_restart(&id).unwrap();
+    } else {
+        read(
+            host.client
+                .post(format!("{}/logout", host.url))
+                .header(header::COOKIE, &browser)
+                .header(header::ORIGIN, &host.url)
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    std::fs::write(dir.path().join("relay-calls.resume-read"), "").unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(10), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    if restarting {
+        code(response, StatusCode::CONFLICT, "EXT_STALE_BINDING").await;
+        runtime.clear_restarting(&id);
+    } else {
+        code(response, StatusCode::UNAUTHORIZED, "AUTH_REQUIRED").await;
+    }
+    wait_until(|| dir.path().join("relay-calls.prompt-started").exists()).await;
+    read(
+        invoke(&host, &root, &binding, "finish", json!({}))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let calls = std::fs::read_to_string(dir.path().join("relay-calls")).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        ["_aelix/session/probe/pause", "_aelix/session/probe/finish"]
+    );
+}
+
+#[tokio::test]
+async fn acp_relay_turn_reports_input_loss_for_a_slow_database_and_for_an_insert_failure() {
+    use aionui_conversation::{ConversationAgentTurnRequest, ConversationAgentTurnStatus};
+
+    for scenario in ["lag", "insert"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = fixture(dir.path()).await;
+        let pool = db.pool().clone();
+        if scenario == "insert" {
+            sqlx::query(
+                "CREATE TRIGGER reject_consumed_input BEFORE INSERT ON messages
+                 WHEN NEW.position = 'right' AND instr(NEW.content,'blocked history') > 0
+                 BEGIN SELECT RAISE(ABORT, 'fixture rejected history'); END",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let host = StudioHost::start_with_db(dir.path(), db, true).await;
+        let id = create(&host, dir.path(), "fixture-aelix").await;
+        let root = format!("{}/api/conversations/{id}", host.url);
+        let binding = ensure_and_discover(&host, &root).await;
+        let convo = host.conversations.clone();
+        let turn = tokio::spawn({
+            let id = id.clone();
+            async move {
+                convo
+                    .run_agent_turn(ConversationAgentTurnRequest {
+                        user_id: "system_default_user".into(),
+                        conversation_id: id,
+                        content: "review fixture".into(),
+                        files: vec![],
+                        inject_skills: vec![],
+                        required_runtime_mode: None,
+                        persist_user_message: true,
+                        user_message_hidden: false,
+                        on_started: None,
+                    })
+                    .await
+                    .unwrap()
+            }
+        });
+        wait_until(|| dir.path().join("relay-calls.prompt-started").exists()).await;
+        if scenario == "lag" {
+            read(
+                invoke(&host, &root, &binding, "burst", json!({}))
+                    .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                    .send()
+                    .await
+                    .unwrap(),
+                StatusCode::OK,
+            )
+            .await;
+            // The one-connection pool keeps the relay parked on the first
+            // history write while the adapter overflows the broadcast buffer.
+            let guard = pool.acquire().await.unwrap();
+            let turn_id = host.conversations.runtime_state().active_turn_id_for(&id).unwrap();
+            let aionui_ai_agent::AgentInstance::Acp(agent) = host.tasks.get_task(&id).unwrap() else {
+                panic!("expected live ACP runtime");
+            };
+            let history = agent.relay_input_history();
+            std::fs::write(dir.path().join("relay-calls.emit"), "").unwrap();
+            wait_until(|| {
+                history.received(&turn_id) == 2
+                    && host.tasks.get_task(&id).unwrap().status() == Some(aionui_common::ConversationStatus::Finished)
+            })
+            .await;
+            assert!(!turn.is_finished(), "turn settled before history persistence");
+            drop(guard);
+        } else {
+            read(
+                invoke(&host, &root, &binding, "finish", json!({"failInsert":true}))
+                    .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                    .send()
+                    .await
+                    .unwrap(),
+                StatusCode::OK,
+            )
+            .await;
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(15), turn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.status, ConversationAgentTurnStatus::Failed, "{scenario}");
+        assert!(
+            outcome.error_message.unwrap().contains("Consumed ACP user input"),
+            "{scenario}"
+        );
+        let reloaded = read(
+            host.client
+                .get(format!("{root}/messages"))
+                .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::OK,
+        )
+        .await
+        .to_string();
+        if scenario == "lag" {
+            assert!(reloaded.contains("held input"));
+        }
+        assert!(!reloaded.contains(if scenario == "lag" {
+            "lagged input"
+        } else {
+            "blocked history"
+        }));
+    }
 }

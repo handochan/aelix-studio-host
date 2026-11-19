@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use aionui_ai_agent::AgentInstance;
 use aionui_ai_agent::manager::acp::AcpAgentManager;
-use aionui_ai_agent::protocol::acp_relay::{DEADLINE, RelayCall, RelayError};
+use aionui_ai_agent::protocol::acp_relay::{DEADLINE, RelayCall, RelayError, RelayWriteAdmission};
 use aionui_api_types::{AcpExtensionDiscovery, AcpExtensionRequest, AcpExtensionResult};
 use tokio::time::Instant;
 
@@ -126,7 +126,7 @@ impl ConversationService {
         &self,
         owner: &str,
         conversation: &str,
-        operation: impl FnOnce(&AcpAgentManager) -> Result<T, ExtensionError>,
+        operation: impl FnOnce(&Arc<AcpAgentManager>) -> Result<T, ExtensionError>,
     ) -> Result<T, ExtensionError> {
         let mut operation = Some(operation);
         let mut result = Err(RelayError::NoLiveTask.into());
@@ -137,6 +137,49 @@ impl ConversationService {
             };
         });
         result
+    }
+
+    fn relay_write_admission(
+        &self,
+        owner: &str,
+        conversation: &str,
+        agent: &Arc<AcpAgentManager>,
+        browser: Option<aionui_common::WsSessionGuard>,
+        deadline: Instant,
+    ) -> RelayWriteAdmission {
+        let runtime = self.runtime_state();
+        let manager = Arc::downgrade(self.task_manager());
+        let conversation = conversation.to_owned();
+        let owner = owner.to_owned();
+        let agent = Arc::downgrade(agent);
+        let repo = self.conversation_repo().clone();
+        let checked_owner = owner.clone();
+        let checked_conversation = conversation.clone();
+        RelayWriteAdmission::new(browser.clone(), deadline, move |write| {
+            let (Some(agent), Some(manager)) = (agent.upgrade(), manager.upgrade()) else {
+                return;
+            };
+            runtime.with_relay_admission(&conversation, || {
+                manager.visit_task(&conversation, &mut |current| {
+                    if let AgentInstance::Acp(current) = current
+                        && Arc::ptr_eq(current, &agent)
+                        && current.relay_owned_by(&owner)
+                    {
+                        if let Some(browser) = &browser {
+                            browser.while_current(write);
+                        } else {
+                            write();
+                        }
+                    }
+                });
+            });
+        })
+        .with_owner_recheck(move || {
+            let repo = repo.clone();
+            let owner = checked_owner.clone();
+            let conversation = checked_conversation.clone();
+            Box::pin(async move { matches!(repo.get(&owner, &conversation).await, Ok(Some(_))) })
+        })
     }
 
     pub(crate) fn charge_acp_extension(&self, owner: &str) -> Result<(), ExtensionError> {
@@ -175,6 +218,7 @@ impl ConversationService {
         {
             return Err(ExtensionError::Authentication);
         }
+        let deadline = Instant::now() + DEADLINE;
         let (call, reservation) = self
             .runtime_state()
             .with_relay_admission(conversation, || {
@@ -191,7 +235,8 @@ impl ConversationService {
                         return Err(RelayError::MethodDenied.into());
                     }
                     let reservation = self.acp_extension_limits.reserve(owner, &request.binding_id)?;
-                    let call = agent.relay_dispatch(request)?;
+                    let admission = self.relay_write_admission(owner, conversation, agent, guard.cloned(), deadline);
+                    let call = agent.relay_dispatch(request, admission)?;
                     Ok((call, reservation))
                 })
             })
@@ -199,7 +244,6 @@ impl ConversationService {
 
         // The task keeps the execution/pending budgets across HTTP aborts and
         // releases them only when the session's SDK correlation is recovered.
-        let deadline = Instant::now() + DEADLINE;
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(settle_call(call, reservation, deadline, tx));
         let result = rx.await.map_err(|_| RelayError::TransportUnknown)?;
@@ -238,7 +282,7 @@ async fn settle_call(
         }
         _ = call.binding_generation.changed() => {
             let reason = (*call.binding_generation.borrow()).unwrap_or(RelayError::BindingUnknown);
-            report_result(result_tx.take(), Err(reason));
+            report_result(result_tx.take(), Err(binding_failure(&call, reason)));
         }
         _ = tokio::time::sleep_until(deadline) => {}
     }
@@ -257,10 +301,24 @@ fn response(
     call: &RelayCall,
     reply: Result<Result<serde_json::Value, RelayError>, tokio::sync::oneshot::error::RecvError>,
 ) -> Result<serde_json::Value, RelayError> {
+    if matches!(
+        reply,
+        Ok(Err(RelayError::AuthorizationRevoked | RelayError::StaleBinding))
+    ) {
+        return reply.unwrap();
+    }
     if let Some(reason) = *call.binding_generation.borrow() {
-        return Err(reason);
+        return Err(binding_failure(call, reason));
     }
     reply.map_err(|_| RelayError::TransportUnknown)?
+}
+
+fn binding_failure(call: &RelayCall, reason: RelayError) -> RelayError {
+    if reason == RelayError::BindingUnknown && !call.started.load(std::sync::atomic::Ordering::Acquire) {
+        RelayError::StaleBinding
+    } else {
+        reason
+    }
 }
 
 fn report_result(
@@ -308,6 +366,7 @@ mod tests {
             RelayCall {
                 reply,
                 binding_generation,
+                started: Arc::default(),
             },
             reservation,
             Instant::now() + DEADLINE,

@@ -172,6 +172,7 @@ pub struct StreamRelay {
     adapter: StreamPersistenceAdapter,
     complete_turn: bool,
     defer_clean_terminal_errors: bool,
+    acp_input_history: Option<Arc<aionui_ai_agent::protocol::acp_relay::AcpInputHistory>>,
     superseding_tips: SupersedingTipTotals,
 }
 
@@ -205,8 +206,17 @@ impl StreamRelay {
             adapter,
             complete_turn: true,
             defer_clean_terminal_errors: false,
+            acp_input_history: None,
             superseding_tips: SupersedingTipTotals::default(),
         }
+    }
+
+    pub fn with_acp_input_history(
+        mut self,
+        history: Arc<aionui_ai_agent::protocol::acp_relay::AcpInputHistory>,
+    ) -> Self {
+        self.acp_input_history = Some(history);
+        self
     }
 
     pub fn with_runtime_state(mut self, runtime_state: Arc<ConversationRuntimeStateService>) -> Self {
@@ -296,8 +306,8 @@ impl StreamRelay {
 
         let mut full_text_buffer = String::new();
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
-        let mut last_segment_at = now_ms();
-        let mut next_segment_at = 0;
+        let mut stored_inputs = 0;
+        let mut input_write_failed = false;
         let mut active_text: Option<TextSegmentState> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
         let mut used_primary_segment_msg_id = false;
@@ -349,8 +359,24 @@ impl StreamRelay {
             };
 
             match recv_result {
-                Ok(event) => {
+                Ok(mut event) => {
                     let deleting = self.is_deleting();
+                    if !deleting && matches!(event, AgentStreamEvent::Finish(_)) {
+                        let received = self
+                            .acp_input_history
+                            .as_ref()
+                            .map_or(stored_inputs, |h| h.received(&self.turn_id));
+                        if input_write_failed || received != stored_inputs {
+                            tracing::error!(received, stored_inputs, "Consumed ACP input history incomplete");
+                            attempt.saw_tool_or_side_effect = true;
+                            let mut error = ErrorEventData::legacy(
+                                "Consumed ACP user input could not be saved in the conversation history",
+                                None,
+                            );
+                            error.retryable = Some(false);
+                            event = AgentStreamEvent::Error(error);
+                        }
+                    }
                     if deleting && !matches!(event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)) {
                         debug!(
                             event_type = Self::event_kind(&event),
@@ -389,10 +415,11 @@ impl StreamRelay {
                             }
                             self.complete_active_thinking(&mut active_thinking).await;
                             self.close_active_text_segment(&mut active_text, &mut text_segments, "finish").await;
-                            let created_at = now_ms().max(last_segment_at + 1).max(next_segment_at);
                             attempt.saw_tool_or_side_effect = true;
-                            if self.adapter.persist_consumed_user_input(text, created_at, self.broadcaster.as_ref()).await {
-                                next_segment_at = created_at + 1;
+                            if self.adapter.persist_consumed_user_input(text, self.broadcaster.as_ref()).await {
+                                stored_inputs += 1;
+                            } else {
+                                input_write_failed = true;
                             }
                         }
                         AgentStreamEvent::AcpDialectSignal(_) => {
@@ -457,9 +484,8 @@ impl StreamRelay {
                             let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
                                 id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
                                 buffer: String::new(),
-                                started_at: now_ms().max(next_segment_at),
+                                started_at: self.adapter.message_time(),
                             });
-                            last_segment_at = last_segment_at.max(segment.started_at);
                             segment.buffer.push_str(&data.content);
                             self.forward_to_websocket_with_msg_id(&segment.id, &event);
                         }
@@ -485,11 +511,10 @@ impl StreamRelay {
                             let segment = active_text.get_or_insert_with(|| TextSegmentState {
                                 id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
                                 buffer: String::new(),
-                                created_at: now_ms().max(next_segment_at),
+                                created_at: self.adapter.message_time(),
                                 record_created: false,
                                 flush_counter: 0,
                             });
-                            last_segment_at = last_segment_at.max(segment.created_at);
                             self.forward_to_websocket_with_msg_id(&segment.id, &event);
                             segment.buffer.push_str(&data.content);
                             full_text_buffer.push_str(&data.content);

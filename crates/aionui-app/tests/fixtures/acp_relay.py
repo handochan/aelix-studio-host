@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 
 counter = Path(sys.argv[1])
 binding = None
@@ -12,6 +13,7 @@ writes = {}
 active = 0
 elapsed_ms = 0
 output_lock = threading.Lock()
+pause_next = False
 
 
 def encode(frame):
@@ -34,12 +36,23 @@ def update(kind, text, message_id=None, sid=session):
     send({"method": "session/update", "params": {"sessionId": sid, "update": payload}})
 
 
-for line in sys.stdin:
+while True:
+    first = ""
+    if pause_next:
+        first = sys.stdin.read(1)
+        counter.with_suffix(".pipe-blocked").touch()
+        while not counter.with_suffix(".resume-read").exists():
+            time.sleep(0.01)
+        pause_next = False
+    line = first + sys.stdin.readline()
+    if not line:
+        break
     frame = json.loads(line)
     method, params, rpc_id = frame.get("method"), frame.get("params", {}), frame.get("id")
     if method == "initialize":
         peer = sys.argv[2] if len(sys.argv) > 2 else "aelix-acp"
         relay = params["clientCapabilities"].get("_meta", {}).get("aelix/sessionRelay")
+        counter.with_suffix(".initialize").write_text("relay" if relay else "standard")
         if relay is not None:
             assert relay == {"version": 1, "notifications": False}
         result(rpc_id, {
@@ -48,7 +61,8 @@ for line in sys.stdin:
                 "version": 1, "requests": ["_aelix/session/probe/echo", "_aelix/session/probe/size",
                                            "_aelix/session/probe/finish", "_aelix/session/probe/write",
                                            "_aelix/session/requests/lookup", "_aelix/session/probe/hold",
-                                           "_aelix/session/probe/clock"],
+                                           "_aelix/session/probe/clock", "_aelix/session/probe/pause",
+                                           "_aelix/session/probe/burst", "_aelix/session/probe/queued"],
                 "notifications": []}}},
         })
     elif method in ("session/new", "session/load", "session/fork"):
@@ -73,6 +87,7 @@ for line in sys.stdin:
     elif method == "session/prompt":
         prompt = rpc_id
         update("agent_message_chunk", "before input")
+        counter.with_suffix(".prompt-started").touch()
     elif method == "session/cancel" and prompt is not None:
         result(prompt, {"stopReason": "cancelled"})
         prompt = None
@@ -82,23 +97,52 @@ for line in sys.stdin:
         body = params["payload"]
         with counter.open("a", encoding="utf-8") as calls:
             calls.write(method + "\n")
-        if method.endswith("/echo"):
+        if method.endswith(("/echo", "/queued")):
             result(rpc_id, body.get("value"))
         elif method.endswith("/size"):
-            frame = {"jsonrpc": "2.0", "id": rpc_id, "result": "한\"\\"}
-            frame["result"] += "x" * (body["bytes"] - len(encode(frame).encode("utf-8")))
+            frame = {"jsonrpc": "2.0", "id": rpc_id, "result": {"rpcId": rpc_id, "value": "한\"\\"}}
+            frame["result"]["value"] += "x" * (body["bytes"] - len(encode(frame).encode("utf-8")))
             print(encode(frame), flush=True)
         elif method.endswith("/hold"):
             timer = threading.Timer(2, result, (rpc_id, None))
             timer.daemon = True
             timer.start()
+        elif method.endswith("/pause"):
+            pause_next = True
+            result(rpc_id, None)
+        elif method.endswith("/burst"):
+            active_prompt = prompt
+            prompt = None
+            result(rpc_id, None)
+
+            def burst():
+                while not counter.with_suffix(".emit").exists():
+                    time.sleep(0.01)
+                update("user_message_chunk", "held input", "held")
+                time.sleep(0.2)
+                update("user_message_chunk", "lagged input", "lagged")
+                for _ in range(340):
+                    update("agent_message_chunk", "padding")
+                result(active_prompt, {"stopReason": "end_turn"})
+
+            threading.Thread(target=burst, daemon=True).start()
         elif method.endswith("/finish"):
             assert prompt is not None
+            if body.get("failInsert"):
+                update("user_message_chunk", "blocked history", "rejected")
+                result(prompt, {"stopReason": "end_turn"})
+                prompt = None
+                result(rpc_id, None)
+                continue
             update("user_message_chunk", "ignored no id")
             update("user_message_chunk", "ignored wrong session", "wrong", sid="other")
             update("user_message_chunk", "same 입력", "once")
             update("user_message_chunk", "same 입력", "once")
             update("user_message_chunk", "same 입력", "twice")
+            send({"method": "session/update", "params": {"sessionId": session, "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "ordering-tool",
+                "title": "ordering tool", "kind": "other", "status": "completed",
+            }}})
             update("agent_message_chunk", "after input")
             result(prompt, {"stopReason": "end_turn"})
             prompt = None
@@ -117,6 +161,7 @@ for line in sys.stdin:
                     active += 1
                     writes[key] = (body, elapsed_ms, active)
                 result(rpc_id, {"accepted": True, "effects": writes[key][2]})
+                send({"id": rpc_id, "error": {"code": -32602, "message": "relay-secret", "data": body}})
         elif method.endswith("/lookup"):
             key = body["requestId"]
             saved = writes.get(key)

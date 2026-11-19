@@ -39,15 +39,15 @@ use agent_client_protocol::{
     Agent, Client, ConnectionTo, Lines, Responder, UntypedMessage, on_receive_notification, on_receive_request,
 };
 use aionui_common::ErrorChain;
-use futures_util::{SinkExt, StreamExt, TryStreamExt};
+use futures_util::{StreamExt, TryStreamExt};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
+use tokio_util::codec::FramedRead;
 use tracing::{debug, info, warn};
 
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
-use crate::protocol::acp_relay::{self, RelayCall, RelayConnection, RelayError};
+use crate::protocol::acp_relay::{self, RelayCall, RelayConnection, RelayError, RelayWriteAdmission};
 use crate::protocol::error::AcpError;
 use crate::protocol::events::{self as stream_event, AgentStreamEvent};
 
@@ -481,12 +481,16 @@ impl AcpProtocol {
         self.relay.discovery()
     }
 
-    pub fn relay_dispatch(&self, request: aionui_api_types::AcpExtensionRequest) -> Result<RelayCall, RelayError> {
+    pub fn relay_dispatch(
+        &self,
+        request: aionui_api_types::AcpExtensionRequest,
+        admission: RelayWriteAdmission,
+    ) -> Result<RelayCall, RelayError> {
         if !self.is_connected() {
             return Err(RelayError::StaleBinding);
         }
         let mut sent = None;
-        let mut call = self.relay.dispatch(request, |method| {
+        let mut call = self.relay.dispatch(request, admission, |method| {
             // The SDK allocates and owns the ID. Sensitive params are inserted
             // at the wire sink, after the SDK's outgoing tracing.
             let request = UntypedMessage::new(method, serde_json::json!({})).expect("empty JSON object");
@@ -512,6 +516,10 @@ impl AcpProtocol {
             let _ = reply_tx.send(result);
         });
         Ok(call)
+    }
+
+    pub fn relay_input_history(&self) -> Arc<acp_relay::AcpInputHistory> {
+        self.relay.input_history()
     }
 
     pub(crate) fn invalidate_relay(&self) {
@@ -779,26 +787,29 @@ async fn run_sdk_background(
                 }
             }
         });
-    // Pin the sink item type to `String` (LinesCodec encodes any `AsRef<str>`,
-    // so the item type would otherwise be ambiguous) — `Lines` requires a
-    // `Sink<String>`.
-    let outgoing_alive = Arc::clone(&alive);
-    let outgoing = SinkExt::<String>::sink_map_err(FramedWrite::new(stdin, LinesCodec::new()), move |err| {
-        outgoing_alive.store(false, Ordering::Release);
-        std::io::Error::other(err)
+    let (local_tx, local_rx) = mpsc::unbounded_channel();
+    let incoming = futures_util::stream::unfold((Box::pin(incoming), local_rx), |(mut wire, mut local)| async move {
+        let item = tokio::select! {
+            biased;
+            Some(line) = local.recv() => Some(Ok(line)),
+            item = wire.next() => item,
+        };
+        item.map(|item| (item, (wire, local)))
     });
     let wire_out = relay.clone();
-    let outgoing = outgoing.with(move |line| {
-        let line = wire_out.outgoing(line).and_then(|line| {
-            if wire_out.candidate {
-                acp_relay::check_stdio_line(line).map_err(std::io::Error::other)
-            } else {
-                Ok(line)
-            }
-        });
-        futures_util::future::ready(line)
+    let outgoing_alive = alive.clone();
+    let outgoing = futures_util::sink::unfold(stdin, move |mut writer, line: String| {
+        let relay = wire_out.clone();
+        let local = local_tx.clone();
+        let alive = outgoing_alive.clone();
+        async move {
+            super::acp_relay_writer::write_line(&mut writer, &relay, &local, line)
+                .await
+                .inspect_err(|_| alive.store(false, Ordering::Release))?;
+            Ok::<_, std::io::Error>(writer)
+        }
     });
-    let transport = Lines::new(outgoing, incoming);
+    let transport = Lines::new(Box::pin(outgoing), Box::pin(incoming));
 
     // `init_tx` / `ready_tx` are consumed inside the main_fn closure; wrap
     // them in Option so we can .take() without moving out of captured state.

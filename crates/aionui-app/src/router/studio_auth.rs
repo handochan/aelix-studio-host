@@ -219,6 +219,8 @@ async fn admit(
             },
         );
         if acp_relay {
+            let jwt = state.jwt.clone();
+            let guard = guard.with_revocation_fence(move |write| jwt.with_revocation_fence(write));
             request.extensions_mut().insert(AcpExtensionAdmission {
                 owner: OPERATOR.into(),
                 browser_session: Some(guard),

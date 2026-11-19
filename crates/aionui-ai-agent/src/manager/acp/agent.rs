@@ -643,8 +643,13 @@ impl AcpAgentManager {
     pub fn relay_dispatch(
         &self,
         request: aionui_api_types::AcpExtensionRequest,
+        admission: crate::protocol::acp_relay::RelayWriteAdmission,
     ) -> Result<crate::protocol::acp_relay::RelayCall, crate::protocol::acp_relay::RelayError> {
-        self.protocol.relay_dispatch(request)
+        self.protocol.relay_dispatch(request, admission)
+    }
+
+    pub fn relay_input_history(&self) -> Arc<crate::protocol::acp_relay::AcpInputHistory> {
+        self.protocol.relay_input_history()
     }
 
     pub fn with_session_repository(mut self, repo: Arc<dyn aionui_db::IAcpSessionRepository>) -> Self {

@@ -1,6 +1,7 @@
 //! Host-side ACP session relay. Feature payloads stay opaque at this boundary.
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
@@ -39,7 +40,10 @@ pub(crate) fn check_stdio_line(line: String) -> Result<String, tokio_util::codec
 }
 
 pub(crate) fn is_builtin_aelix(metadata: &AgentMetadata) -> bool {
-    metadata.agent_source == AgentSource::Builtin && metadata.backend.as_deref() == Some("aelix")
+    metadata.agent_source == AgentSource::Builtin
+        && metadata.backend.as_deref() == Some("aelix")
+        && !metadata.has_command_override
+        && metadata.env_override_key_count == 0
 }
 
 pub fn valid_method(method: &str) -> bool {
@@ -85,6 +89,7 @@ pub enum RelayError {
     StaleBinding,
     MethodDenied,
     RateLimited,
+    AuthorizationRevoked,
     TransportUnknown,
     BindingUnknown,
     DeadlineUnknown,
@@ -96,6 +101,8 @@ pub(crate) struct RelayConnection {
     requests: OnceLock<Vec<String>>,
     session: Mutex<RelaySession>,
     wire: Mutex<HashMap<RequestId, WireRequest>>,
+    standard_pending: Mutex<HashSet<RequestId>>,
+    input_history: Arc<AcpInputHistory>,
 }
 
 struct RelaySession {
@@ -130,8 +137,89 @@ struct ActivePrompt {
     written: bool,
 }
 
+/// Checks carried from authenticated admission to the first stdio write.
+type RecheckOwner = dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync;
+type CommitFirstWrite = dyn Fn(&mut dyn FnMut()) + Send + Sync;
+pub struct RelayWriteAdmission {
+    pub browser: Option<aionui_common::WsSessionGuard>,
+    pub deadline: tokio::time::Instant,
+    commit: Box<CommitFirstWrite>,
+    recheck_owner: Option<Box<RecheckOwner>>,
+}
+
+impl RelayWriteAdmission {
+    pub fn new(
+        browser: Option<aionui_common::WsSessionGuard>,
+        deadline: tokio::time::Instant,
+        commit: impl Fn(&mut dyn FnMut()) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            browser,
+            deadline,
+            commit: Box::new(commit),
+            recheck_owner: None,
+        }
+    }
+
+    pub fn with_owner_recheck(
+        mut self,
+        recheck: impl Fn() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync + 'static,
+    ) -> Self {
+        self.recheck_owner = Some(Box::new(recheck));
+        self
+    }
+
+    pub(super) async fn recheck(&self) -> Result<(), RelayError> {
+        if let Some(check) = &self.recheck_owner
+            && !check().await
+        {
+            return Err(RelayError::StaleBinding);
+        }
+        if let Some(browser) = &self.browser
+            && !browser.recheck().await
+        {
+            return Err(RelayError::AuthorizationRevoked);
+        }
+        Ok(())
+    }
+
+    pub(super) fn commit(&self, write: &mut dyn FnMut()) {
+        (self.commit)(write);
+    }
+}
+
+#[derive(Default)]
+pub struct AcpInputHistory {
+    latest: Mutex<Option<(String, usize)>>,
+}
+
+impl AcpInputHistory {
+    pub fn received(&self, turn_id: &str) -> usize {
+        self.latest
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(turn, _)| turn == turn_id)
+            .map_or(0, |(_, count)| *count)
+    }
+}
+
+pub(super) struct RelayFrame {
+    pub id: RequestId,
+    pub line: String,
+    pub generation: u64,
+    pub admission: RelayWriteAdmission,
+}
+
+pub(super) enum OutgoingFrame {
+    Standard(String),
+    Relay(RelayFrame),
+    Drop,
+}
+
 struct WireRequest {
-    params: Option<Value>,
+    frame: Option<(Value, u64, RelayWriteAdmission)>,
+    started: Arc<AtomicBool>,
     reply: oneshot::Sender<Result<Value, RelayError>>,
 }
 
@@ -155,6 +243,7 @@ impl FrameHeader<'_> {
 pub struct RelayCall {
     pub reply: oneshot::Receiver<Result<Value, RelayError>>,
     pub binding_generation: watch::Receiver<Option<RelayError>>,
+    pub started: Arc<AtomicBool>,
 }
 
 impl RelayConnection {
@@ -170,6 +259,8 @@ impl RelayConnection {
                 prompt: None,
             }),
             wire: Mutex::new(HashMap::new()),
+            standard_pending: Mutex::new(HashSet::new()),
+            input_history: Arc::default(),
         }
     }
 
@@ -239,6 +330,7 @@ impl RelayConnection {
     pub(crate) fn dispatch(
         &self,
         request: AcpExtensionRequest,
+        admission: RelayWriteAdmission,
         send: impl FnOnce(&str) -> RequestId,
     ) -> Result<RelayCall, RelayError> {
         let session = self.session.lock().unwrap();
@@ -256,59 +348,96 @@ impl RelayConnection {
         }
         let params = json!({ "sessionId": session_id, "bindingId": binding_id, "payload": request.payload });
         let (reply, receiver) = oneshot::channel();
+        let started = Arc::new(AtomicBool::new(false));
         let mut wire = self.wire.lock().unwrap();
         // The transport sink takes the same lock before it writes the SDK frame.
         let id = send(&request.method);
         wire.insert(
             id,
             WireRequest {
-                params: Some(params),
+                frame: Some((params, session.open_generation, admission)),
+                started: started.clone(),
                 reply,
             },
         );
         Ok(RelayCall {
             reply: receiver,
             binding_generation: session.binding_generation.subscribe(),
+            started,
         })
     }
 
-    pub(crate) fn outgoing(&self, line: String) -> std::io::Result<String> {
-        if self.candidate && line.contains("\"session/prompt\"") {
-            // Wait for the ordered reply callback to be installed before the
-            // peer can see this request, then arm receipt for this prompt.
+    pub(super) fn outgoing(&self, line: String) -> std::io::Result<OutgoingFrame> {
+        if !self.candidate {
+            return Ok(OutgoingFrame::Standard(line));
+        }
+        let Ok(header) = serde_json::from_str::<FrameHeader>(&line) else {
+            return Ok(OutgoingFrame::Standard(line));
+        };
+        let (Some(id), Some(method)) = (header.id.as_ref(), header.method) else {
+            return Ok(OutgoingFrame::Standard(line));
+        };
+        if header.is_relay_method() {
+            let Some((params, generation, admission)) = self
+                .wire
+                .lock()
+                .unwrap()
+                .get_mut(id)
+                .and_then(|request| request.frame.take())
+            else {
+                return Ok(OutgoingFrame::Drop);
+            };
+            let method: String = serde_json::from_str(method.get()).map_err(std::io::Error::other)?;
+            let line =
+                serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+                    .map_err(std::io::Error::other)?;
+            return Ok(OutgoingFrame::Relay(RelayFrame {
+                id: id.clone(),
+                line,
+                generation,
+                admission,
+            }));
+        }
+        if method.get() == "\"session/prompt\"" {
+            // Ordering barrier with the prompt callback registration.
             let mut session = self.session.lock().unwrap();
             if let Some(prompt) = session.prompt.as_mut()
-                && let Ok(header) = serde_json::from_str::<FrameHeader>(&line)
-                && header.id.as_ref() == Some(&prompt.request_id)
-                && header.method.is_some_and(|method| method.get() == "\"session/prompt\"")
+                && &prompt.request_id == id
             {
                 prompt.written = true;
             }
         }
-        if !line.contains(METHOD_PREFIX) {
-            return Ok(line);
+        self.standard_pending.lock().unwrap().insert(id.clone());
+        Ok(OutgoingFrame::Standard(line))
+    }
+
+    pub(super) fn first_write(
+        &self,
+        id: &RequestId,
+        generation: u64,
+        write: impl FnOnce() -> std::task::Poll<std::io::Result<usize>>,
+    ) -> Option<std::task::Poll<std::io::Result<usize>>> {
+        let session = self.session.lock().unwrap();
+        if session.open_generation != generation || session.binding.is_none() {
+            return None;
         }
-        let Ok(header) = serde_json::from_str::<FrameHeader>(&line) else {
-            return Ok(line);
-        };
-        if !header.is_relay_method() {
-            return Ok(line);
+        let mut wire = self.wire.lock().unwrap();
+        let request = wire.get_mut(id)?;
+        let result = write();
+        if matches!(result, std::task::Poll::Ready(Ok(bytes)) if bytes > 0) {
+            request.started.store(true, Ordering::Release);
         }
-        let Some(id) = header.id else {
-            return Ok(line);
-        };
-        let params = self
-            .wire
-            .lock()
-            .unwrap()
-            .get_mut(&id)
-            .and_then(|request| request.params.take());
-        let Some(params) = params else {
-            return Ok(line);
-        };
-        let method: String = serde_json::from_str(header.method.unwrap().get()).map_err(std::io::Error::other)?;
-        serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-            .map_err(std::io::Error::other)
+        Some(result)
+    }
+
+    pub(super) fn reject_unsent(&self, id: &RequestId, error: RelayError) -> Option<String> {
+        let request = self.wire.lock().unwrap().remove(id)?;
+        let _ = request.reply.send(Err(error));
+        Some(sdk_ack(id))
+    }
+
+    pub(crate) fn input_history(&self) -> Arc<AcpInputHistory> {
+        self.input_history.clone()
     }
 
     pub(crate) fn incoming(&self, line: String) -> Option<String> {
@@ -334,8 +463,16 @@ impl RelayConnection {
         let Some(id) = header.id else {
             return Some(line);
         };
-        let Some(request) = self.wire.lock().unwrap().remove(&id) else {
-            return Some(line);
+        let request = {
+            let mut wire = self.wire.lock().unwrap();
+            match wire.get(&id) {
+                Some(request) if !request.started.load(Ordering::Acquire) => return None,
+                Some(_) => wire.remove(&id).unwrap(),
+                // Only responses to standard requests actually written on this
+                // transport may reach SDK tracing. This also drops duplicates
+                // after the extension's correlation entry has been reclaimed.
+                None => return self.standard_pending.lock().unwrap().remove(&id).then_some(line),
+            }
         };
         let reply = if frame_bytes <= EXT_FRAME_LIMIT {
             decode_reply(&line)
@@ -345,7 +482,7 @@ impl RelayConnection {
         let _ = request.reply.send(reply);
         // Resolve the SDK's correlation slot without sending agent data into
         // its tracing, error mapping, or serde diagnostics.
-        Some(json!({ "jsonrpc": "2.0", "id": id, "result": null }).to_string())
+        Some(sdk_ack(&id))
     }
 
     pub(crate) fn discard_request(&self, id: &RequestId) {
@@ -355,12 +492,14 @@ impl RelayConnection {
     pub(crate) fn disconnected(&self) {
         self.session.lock().unwrap().close(RelayError::TransportUnknown);
         self.wire.lock().unwrap().clear();
+        self.standard_pending.lock().unwrap().clear();
     }
 
     pub(crate) fn begin_prompt<T>(&self, sid: &SessionId, turn_id: &str, send: impl FnOnce() -> (RequestId, T)) -> T {
         let mut session = self.session.lock().unwrap();
         let (request_id, result) = send();
         if session.binding.as_ref().is_some_and(|(bound, _)| bound == sid) {
+            *self.input_history.latest.lock().unwrap() = Some((turn_id.to_owned(), 0));
             session.prompt = Some(ActivePrompt {
                 turn_id: turn_id.to_owned(),
                 seen: HashSet::new(),
@@ -394,14 +533,21 @@ impl RelayConnection {
             return None;
         }
         let prompt = session.prompt.as_mut().filter(|prompt| prompt.written)?;
-        prompt
-            .seen
-            .insert(id.to_string())
-            .then(|| AgentStreamEvent::AcpConsumedUserInput {
-                turn_id: prompt.turn_id.clone(),
-                text: text.text.clone(),
-            })
+        if !prompt.seen.insert(id.to_string()) {
+            return None;
+        }
+        if let Some((_, count)) = self.input_history.latest.lock().unwrap().as_mut() {
+            *count += 1;
+        }
+        Some(AgentStreamEvent::AcpConsumedUserInput {
+            turn_id: prompt.turn_id.clone(),
+            text: text.text.clone(),
+        })
     }
+}
+
+fn sdk_ack(id: &RequestId) -> String {
+    json!({ "jsonrpc": "2.0", "id": id, "result": null }).to_string()
 }
 
 fn decode_reply(line: &str) -> Result<Value, RelayError> {

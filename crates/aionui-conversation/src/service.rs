@@ -3740,7 +3740,7 @@ impl ConversationService {
                 position: Some("right".into()),
                 status: Some(MIDTURN_STATUS_QUEUED.into()),
                 hidden,
-                created_at: now_ms(),
+                created_at: self.runtime_persistence().message_time(conversation_id, false),
                 backend_turn_id: None,
             };
             if let Err(e) = self.conversation_repo.insert_message(user_id, &user_msg).await {
@@ -4005,7 +4005,7 @@ impl ConversationService {
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: req.hidden,
-            created_at: now_ms(),
+            created_at: self.runtime_persistence().message_time(conversation_id, false),
             backend_turn_id: None,
         };
         if !self
@@ -4130,7 +4130,7 @@ impl ConversationService {
                 position: Some("right".into()),
                 status: Some("finish".into()),
                 hidden: request.user_message_hidden,
-                created_at: now_ms(),
+                created_at: self.runtime_persistence().message_time(&request.conversation_id, false),
                 backend_turn_id: None,
             };
             if self

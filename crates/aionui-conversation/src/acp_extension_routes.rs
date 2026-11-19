@@ -138,6 +138,7 @@ fn extension_error(error: ExtensionError) -> Response {
             "Could not check conversation ownership",
         ),
         ExtensionError::Relay(error) => match error {
+            RelayError::AuthorizationRevoked => auth_required(),
             RelayError::NoLiveTask => coded(StatusCode::CONFLICT, "EXT_NO_LIVE_TASK", "No live ACP session"),
             RelayError::Unavailable => coded(
                 StatusCode::CONFLICT,

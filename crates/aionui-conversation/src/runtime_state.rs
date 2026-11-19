@@ -19,6 +19,7 @@ pub struct ConversationRuntimeStateService {
 #[derive(Debug, Default)]
 struct ConversationRuntimeState {
     active_turns: HashMap<String, String>,
+    ordered_message_times: HashMap<String, i64>,
     deleting_conversations: HashSet<String>,
     cancelling_conversations: HashSet<String>,
     restarting_conversations: HashSet<String>,
@@ -186,6 +187,22 @@ impl ConversationRuntimeStateService {
                 return;
             }
             notified.await;
+        }
+    }
+
+    /// After an ACP input is interleaved, carry its ordering floor across
+    /// every subsequent message row, including the next prompt's first row.
+    pub(crate) fn message_time(&self, id: &str, now: i64, consumed_input: bool) -> i64 {
+        let Ok(mut state) = self.state.lock() else { return now };
+        if let Some(last) = state.ordered_message_times.get_mut(id) {
+            *last = (*last).saturating_add(1).max(now);
+            *last
+        } else if consumed_input {
+            let first = now.saturating_add(1);
+            state.ordered_message_times.insert(id.to_owned(), first);
+            first
+        } else {
+            now
         }
     }
 
@@ -429,6 +446,7 @@ impl ConversationRuntimeStateService {
                 let had_cancelling = state.cancelling_conversations.remove(conversation_id);
                 let had_restarting = state.restarting_conversations.remove(conversation_id);
                 state.deferred_cancels.remove(conversation_id);
+                state.ordered_message_times.remove(conversation_id);
                 state
                     .logged_once_per_turn
                     .retain(|(_, conversation), _| conversation != conversation_id);
@@ -634,6 +652,20 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn acp_relay_message_order_survives_turn_boundary_within_one_clock_tick() {
+        let state = Arc::new(ConversationRuntimeStateService::default());
+        let turn = state.try_claim_turn("relay", "first").unwrap();
+        assert_eq!(state.message_time("relay", 100, false), 100);
+        assert_eq!(state.message_time("relay", 100, true), 101);
+        assert_eq!(state.message_time("relay", 100, true), 102);
+        assert_eq!(state.message_time("relay", 100, false), 103);
+        drop(turn);
+        let _turn = state.try_claim_turn("relay", "next").unwrap();
+        assert_eq!(state.message_time("relay", 100, false), 104);
+        assert_eq!(state.message_time("other", 100, false), 100);
+    }
 
     #[test]
     fn claim_records_active_turn_id_in_summary() {

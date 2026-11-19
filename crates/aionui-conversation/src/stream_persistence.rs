@@ -162,12 +162,13 @@ impl StreamPersistenceAdapter {
             .is_none_or(|persistence| persistence.allows(&self.conversation_id, kind))
     }
 
-    pub(crate) async fn persist_consumed_user_input(
-        &self,
-        text: &str,
-        created_at: i64,
-        broadcaster: &dyn EventBroadcaster,
-    ) -> bool {
+    pub(crate) fn message_time(&self) -> i64 {
+        self.persistence
+            .as_ref()
+            .map_or_else(now_ms, |p| p.message_time(&self.conversation_id, false))
+    }
+
+    pub(crate) async fn persist_consumed_user_input(&self, text: &str, broadcaster: &dyn EventBroadcaster) -> bool {
         if self.persistence.as_ref().is_some_and(|persistence| {
             matches!(
                 persistence.lifecycle_for(&self.conversation_id),
@@ -187,7 +188,10 @@ impl StreamPersistenceAdapter {
             position: Some("right".into()),
             status: Some("finish".into()),
             hidden: false,
-            created_at,
+            created_at: self.persistence.as_ref().map_or_else(
+                || now_ms().saturating_add(1),
+                |p| p.message_time(&self.conversation_id, true),
+            ),
             backend_turn_id: self.current_backend_turn_id(),
         };
         if self.repo.insert_message(&self.user_id, &row).await.is_err() {
@@ -368,7 +372,7 @@ impl StreamPersistenceAdapter {
                 position: Some("left".into()),
                 status: Some(status.to_owned()),
                 hidden: false,
-                created_at: now_ms(),
+                created_at: self.message_time(),
                 backend_turn_id: self.current_backend_turn_id(),
             };
             if let Err(e) = self.repo.insert_message(&self.user_id, &row).await {
@@ -395,7 +399,7 @@ impl StreamPersistenceAdapter {
             position: Some("left".into()),
             status: Some("error".into()),
             hidden: false,
-            created_at: now_ms(),
+            created_at: self.message_time(),
             backend_turn_id: self.current_backend_turn_id(),
         };
         if let Err(e) = self.repo.insert_message(&self.user_id, &row).await {
@@ -434,7 +438,7 @@ impl StreamPersistenceAdapter {
             position: Some("left".into()),
             status: Some(status.into()),
             hidden: false,
-            created_at: now_ms(),
+            created_at: self.message_time(),
             backend_turn_id: self.current_backend_turn_id(),
         };
         if let Err(e) = self.repo.insert_message(&self.user_id, &row).await {
@@ -513,7 +517,7 @@ impl StreamPersistenceAdapter {
             position: Some("left".into()),
             status: Some(status.to_owned()),
             hidden: false,
-            created_at: now_ms(),
+            created_at: self.message_time(),
             backend_turn_id: self.current_backend_turn_id(),
         };
         if let Err(e) = self.repo.upsert_message(&self.user_id, &row).await {
@@ -577,7 +581,7 @@ impl StreamPersistenceAdapter {
             position: Some("left".into()),
             status: Some("finish".into()),
             hidden: false,
-            created_at: now_ms(),
+            created_at: self.message_time(),
             backend_turn_id: self.current_backend_turn_id(),
         };
 
@@ -616,7 +620,7 @@ impl StreamPersistenceAdapter {
             position: Some("left".into()),
             status: Some(status.to_owned()),
             hidden: false,
-            created_at: now_ms(),
+            created_at: self.message_time(),
             backend_turn_id: self.current_backend_turn_id(),
         };
         if let Err(e) = self.repo.upsert_message(&self.user_id, &row).await {
@@ -692,7 +696,7 @@ impl StreamPersistenceAdapter {
                 position: Some("left".into()),
                 status: Some(status.to_owned()),
                 hidden: false,
-                created_at: now_ms(),
+                created_at: self.message_time(),
                 backend_turn_id: self.current_backend_turn_id(),
             };
             if let Err(e) = self.repo.insert_message(&self.user_id, &row).await {

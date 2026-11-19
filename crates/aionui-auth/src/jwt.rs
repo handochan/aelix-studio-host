@@ -82,6 +82,7 @@ pub struct JwtService {
     secret: RwLock<String>,
     /// Blacklisted token hashes -> expiry timestamps.
     blacklist: DashMap<String, u64>,
+    revocation: RwLock<()>,
 }
 
 impl JwtService {
@@ -92,6 +93,7 @@ impl JwtService {
         Self {
             secret: RwLock::new(secret),
             blacklist: DashMap::new(),
+            revocation: RwLock::new(()),
         }
     }
 
@@ -223,6 +225,13 @@ impl JwtService {
         Ok(payload)
     }
 
+    /// Serialize a nonblocking commit with explicit token revocation.
+    pub fn with_revocation_fence(&self, commit: &mut dyn FnMut()) {
+        if let Ok(_guard) = self.revocation.read() {
+            commit();
+        }
+    }
+
     /// Add a token to the blacklist.
     ///
     /// Stores the token's SHA-256 hash with its expiry time for automatic cleanup.
@@ -233,6 +242,7 @@ impl JwtService {
             // Fallback when the token cannot be parsed: keep the entry at least
             // as long as the longest-lived token could survive.
             .unwrap_or_else(|| now_secs().unwrap_or(0) + REFRESH_TOKEN_EXPIRY.as_secs());
+        let _guard = self.revocation.write().unwrap_or_else(|error| error.into_inner());
         self.blacklist.insert(hash, exp);
     }
 
@@ -241,6 +251,7 @@ impl JwtService {
     /// Returns the new secret string for database persistence.
     pub fn rotate_secret(&self) -> Result<String, AuthError> {
         let new_secret = generate_random_secret_string();
+        let _guard = self.revocation.write().unwrap_or_else(|error| error.into_inner());
         let mut secret = self
             .secret
             .write()
