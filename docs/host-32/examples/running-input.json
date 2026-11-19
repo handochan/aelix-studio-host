@@ -1,4 +1,5 @@
 {
+  "fixtureClock": "2026-11-19T12:00:00Z",
   "postUrl": "/api/conversations/c-17/acp-extensions",
   "exchanges": [
     {
@@ -24,7 +25,8 @@
         "method": "_aelix/session/input/steer",
         "payload": {
           "turnId": "turn-8",
-          "message": "비교 범위를 두 파일로 좁혀 주세요."
+          "message": "비교 범위를 두 파일로 좁혀 주세요.",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000001"
         }
       },
       "acpRequest": {
@@ -36,7 +38,8 @@
           "bindingId": "b-21",
           "payload": {
             "turnId": "turn-8",
-            "message": "비교 범위를 두 파일로 좁혀 주세요."
+            "message": "비교 범위를 두 파일로 좁혀 주세요.",
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000001"
           }
         }
       },
@@ -70,7 +73,8 @@
         "method": "_aelix/session/input/follow-up",
         "payload": {
           "turnId": "turn-8",
-          "message": "끝나면 차이를 표로 정리해 주세요."
+          "message": "끝나면 차이를 표로 정리해 주세요.",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000002"
         }
       },
       "acpResponse": {
@@ -90,15 +94,110 @@
         "method": "_aelix/session/input/steer",
         "payload": {
           "turnId": "turn-7",
-          "message": "이전 턴 입력"
+          "message": "이전 턴 입력",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000003"
         }
       },
       "acpResponse": {
         "jsonrpc": "2.0",
         "id": 13,
+        "result": {
+          "accepted": false,
+          "reason": "stale-turn"
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "accepted": false,
+              "reason": "stale-turn"
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "manual recheck after a lost HTTP receipt with the original write key",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/steer",
+        "payload": {
+          "turnId": "turn-8",
+          "message": "비교 범위를 두 파일로 좁혀 주세요.",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000001"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "_aelix/session/input/steer",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "turnId": "turn-8",
+            "message": "비교 범위를 두 파일로 좁혀 주세요.",
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000001"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "result": {
+          "turnId": "turn-8",
+          "accepted": true,
+          "delivery": "native-queue"
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "turnId": "turn-8",
+              "accepted": true,
+              "delivery": "native-queue"
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "same key with changed input",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/steer",
+        "payload": {
+          "turnId": "turn-8",
+          "message": "수정된 다른 입력",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000001"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 15,
+        "method": "_aelix/session/input/steer",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "turnId": "turn-8",
+            "message": "수정된 다른 입력",
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000001"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 15,
         "error": {
-          "code": -33101,
-          "message": "Turn is no longer active."
+          "code": -32602,
+          "message": "Conflicting requestId."
         }
       },
       "rendererResponse": {
@@ -108,10 +207,323 @@
           "error": "Extension request failed.",
           "code": "EXT_AGENT_ERROR",
           "details": {
-            "rpcCode": -33101
+            "rpcCode": -32602
+          }
+        }
+      }
+    },
+    {
+      "case": "no running turn before the next new user action",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/state",
+        "payload": {}
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 16,
+        "result": {
+          "active": false,
+          "turnId": null
+        }
+      }
+    },
+    {
+      "case": "native reads the write after the last drain of turn-8",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/steer",
+        "payload": {
+          "turnId": "turn-8",
+          "message": "늦게 도착한 지시입니다.",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000017"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "_aelix/session/input/steer",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "turnId": "turn-8",
+            "message": "늦게 도착한 지시입니다.",
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000017"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "result": {
+          "turnId": "turn-8",
+          "accepted": true,
+          "delivery": "native-queue"
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "turnId": "turn-8",
+              "accepted": true,
+              "delivery": "native-queue"
+            }
           }
         }
       }
     }
-  ]
+  ],
+  "dedupAssertions": {
+    "rpcIds": [
+      11,
+      14,
+      15
+    ],
+    "nativeSteerEnqueues": 1,
+    "userChunksOnReceipt": 0,
+    "automaticRetries": 0
+  },
+  "consumedWithinPrompt": {
+    "bindingId": "b-21",
+    "hostTurn": "host-turn-8",
+    "admittedWriteRpcIds": [
+      11,
+      12
+    ],
+    "orderedAcpFrames": [
+      {
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "session/prompt",
+        "params": {
+          "sessionId": "s-42",
+          "prompt": [
+            {
+              "type": "text",
+              "text": "두 파일을 검토해 주세요."
+            }
+          ]
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "s-42",
+          "update": {
+            "sessionUpdate": "user_message_chunk",
+            "messageId": "u-81",
+            "content": {
+              "type": "text",
+              "text": "비교 범위를 두 파일로 좁혀 주세요."
+            }
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "s-42",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "a-81",
+            "content": {
+              "type": "text",
+              "text": "두 파일을 비교했습니다."
+            }
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "s-42",
+          "update": {
+            "sessionUpdate": "user_message_chunk",
+            "messageId": "u-82",
+            "content": {
+              "type": "text",
+              "text": "끝나면 차이를 표로 정리해 주세요."
+            }
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+          "sessionId": "s-42",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "messageId": "a-82",
+            "content": {
+              "type": "text",
+              "text": "요청한 표입니다."
+            }
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "id": 100,
+        "result": {
+          "stopReason": "end_turn"
+        }
+      }
+    ],
+    "expectedHost": {
+      "originalPromptUserRows": 1,
+      "additionalUserRowsInOrder": [
+        {
+          "messageId": "u-81",
+          "content": "비교 범위를 두 파일로 좁혀 주세요."
+        },
+        {
+          "messageId": "u-82",
+          "content": "끝나면 차이를 표로 정리해 주세요."
+        }
+      ],
+      "followUpHostTurn": "host-turn-8",
+      "releaseClaimAfterPromptResponseAndPersistedUpdates": true,
+      "newTurnClaimsFromRelay": 0,
+      "additionalUserRowsAfterReopen": 2,
+      "newRowsFromLoadReplay": 0,
+      "liveAndReopenedRowOrder": [
+        {
+          "role": "user",
+          "text": "두 파일을 검토해 주세요."
+        },
+        {
+          "role": "user",
+          "text": "비교 범위를 두 파일로 좁혀 주세요."
+        },
+        {
+          "role": "assistant",
+          "text": "두 파일을 비교했습니다."
+        },
+        {
+          "role": "user",
+          "text": "끝나면 차이를 표로 정리해 주세요."
+        },
+        {
+          "role": "assistant",
+          "text": "요청한 표입니다."
+        }
+      ]
+    },
+    "consumptionCheckpoints": [
+      {
+        "afterNative": "first additional user message consumed by this prompt",
+        "emitExactlyOnce": "u-81"
+      },
+      {
+        "afterNative": "follow-up drained by this prompt before idle",
+        "emitExactlyOnce": "u-82"
+      }
+    ]
+  },
+  "lateConsumptionInNextPrompt": {
+    "bindingId": "b-21",
+    "queuedWriteRpcId": 17,
+    "endedPrompt": {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 101,
+        "method": "session/prompt",
+        "params": {
+          "sessionId": "s-42",
+          "prompt": [
+            {
+              "type": "text",
+              "text": "첫 작업을 시작해 주세요."
+            }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 101,
+        "result": {
+          "stopReason": "end_turn"
+        }
+      }
+    },
+    "stateAfterEnd": {
+      "active": false,
+      "turnId": null
+    },
+    "userRowsForLateInputAtEnd": 0,
+    "autoPromptRequests": 0,
+    "onExplicitNewSend": {
+      "route": "POST /api/conversations/c-17/messages",
+      "orderedAcpFrames": [
+        {
+          "jsonrpc": "2.0",
+          "id": 102,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "새 작업을 시작해 주세요."
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "user_message_chunk",
+              "messageId": "u-91",
+              "content": {
+                "type": "text",
+                "text": "늦게 도착한 지시입니다."
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "agent_message_chunk",
+              "messageId": "a-91",
+              "content": {
+                "type": "text",
+                "text": "새 작업에 반영했습니다."
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 102,
+          "result": {
+            "stopReason": "end_turn"
+          }
+        }
+      ],
+      "hostTurn": "host-turn-9",
+      "additionalUserRowsAfterReopen": 1,
+      "originalNewPromptUserRows": 1,
+      "newUserAction": true
+    },
+    "rendererOnTurnEnd": {
+      "scope": "session",
+      "notice": "큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음",
+      "attributesConsumptionToRequestId": false
+    }
+  }
 }

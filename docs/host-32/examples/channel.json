@@ -1,5 +1,51 @@
 {
   "discoveryUrl": "/api/conversations/c-17/acp-extensions",
+  "activation": {
+    "hostResolvedConversationBackend": "built-in Aelix",
+    "initializeAgentInfoName": "aelix-acp",
+    "requiresBoth": true
+  },
+  "h1RequestOnly": {
+    "initializeRequestFragment": {
+      "clientCapabilities": {
+        "_meta": {
+          "aelix/sessionRelay": {
+            "version": 1,
+            "notifications": false
+          }
+        }
+      }
+    },
+    "initializeResultFragment": {
+      "agentCapabilities": {
+        "_meta": {
+          "aelix/sessionRelay": {
+            "version": 1,
+            "requests": [
+              "_aelix/session/input/state",
+              "_aelix/session/input/steer",
+              "_aelix/session/input/follow-up"
+            ],
+            "notifications": []
+          }
+        }
+      }
+    },
+    "discoveryResponse": {
+      "success": true,
+      "data": {
+        "version": 1,
+        "bindingId": "b-21",
+        "requests": [
+          "_aelix/session/input/state",
+          "_aelix/session/input/steer",
+          "_aelix/session/input/follow-up"
+        ],
+        "notifications": []
+      }
+    }
+  },
+  "h2FixtureStatus": "Illustrative full negotiation for fixture tests only. Advertise children methods and activity only after native #612 is supported.",
   "initializeRequestFragment": {
     "clientCapabilities": {
       "_meta": {
@@ -94,7 +140,7 @@
     "data": {
       "conversationId": "c-17",
       "bindingId": "b-21",
-      "seq": 7
+      "relaySeq": 7
     }
   },
   "acpNotification": {
@@ -117,7 +163,6 @@
     "data": {
       "conversationId": "c-17",
       "bindingId": "b-21",
-      "seq": 8,
       "method": "_aelix/session/children/activity",
       "payload": {
         "epoch": "native-e3",
@@ -125,7 +170,8 @@
         "seq": 12,
         "state": "running",
         "event": "activity"
-      }
+      },
+      "relaySeq": 8
     }
   },
   "unsubscribe": {

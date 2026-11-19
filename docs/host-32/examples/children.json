@@ -1,4 +1,5 @@
 {
+  "fixtureClock": "2026-11-19T12:00:00Z",
   "postUrl": "/api/conversations/c-17/acp-extensions",
   "status": "candidate ACP contract pending aelix-ai #612",
   "exchanges": [
@@ -36,7 +37,8 @@
         "payload": {
           "epoch": "native-e3",
           "childId": "child-b",
-          "message": "두 번째 결과만 확인해 주세요."
+          "message": "두 번째 결과만 확인해 주세요.",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000031"
         }
       },
       "acpRequest": {
@@ -49,7 +51,8 @@
           "payload": {
             "epoch": "native-e3",
             "childId": "child-b",
-            "message": "두 번째 결과만 확인해 주세요."
+            "message": "두 번째 결과만 확인해 주세요.",
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000031"
           }
         }
       },
@@ -83,7 +86,8 @@
         "method": "_aelix/session/children/wrap-up",
         "payload": {
           "epoch": "native-e3",
-          "childId": "child-b"
+          "childId": "child-b",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000032"
         }
       },
       "acpResponse": {
@@ -103,7 +107,8 @@
         "method": "_aelix/session/children/stop",
         "payload": {
           "epoch": "native-e3",
-          "childId": "child-b"
+          "childId": "child-b",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000033"
         }
       },
       "acpResponse": {
@@ -124,7 +129,7 @@
         "payload": {
           "epoch": "native-e3",
           "childId": "child-b",
-          "afterSeq": 11
+          "afterSeq": 10
         }
       },
       "acpResponse": {
@@ -137,12 +142,19 @@
             {
               "epoch": "native-e3",
               "childId": "child-b",
+              "seq": 11,
+              "state": "running",
+              "event": "started"
+            },
+            {
+              "epoch": "native-e3",
+              "childId": "child-b",
               "seq": 12,
               "state": "running",
               "event": "activity"
             }
           ],
-          "nextSeq": 12
+          "lastSeq": 12
         }
       }
     },
@@ -153,25 +165,27 @@
         "method": "_aelix/session/children/stop",
         "payload": {
           "epoch": "native-e2",
-          "childId": "child-b"
+          "childId": "child-b",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000035"
         }
       },
       "acpResponse": {
         "jsonrpc": "2.0",
         "id": 35,
-        "error": {
-          "code": -33103,
-          "message": "Child binding is no longer current."
+        "result": {
+          "accepted": false,
+          "reason": "stale-epoch"
         }
       },
       "rendererResponse": {
-        "status": 422,
+        "status": 200,
         "body": {
-          "success": false,
-          "error": "Extension request failed.",
-          "code": "EXT_AGENT_ERROR",
-          "details": {
-            "rpcCode": -33103
+          "success": true,
+          "data": {
+            "result": {
+              "accepted": false,
+              "reason": "stale-epoch"
+            }
           }
         }
       }

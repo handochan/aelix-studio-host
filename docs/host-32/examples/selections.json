@@ -1,4 +1,5 @@
 {
+  "fixtureClock": "2026-11-19T12:00:00Z",
   "postUrl": "/api/conversations/c-17/acp-extensions",
   "exchanges": [
     {
@@ -19,8 +20,8 @@
           "scopes": {
             "global": {
               "path": "<fixture>/agent/settings.json",
-              "writable": true,
-              "reason": null,
+              "writable": false,
+              "reason": "management-helper",
               "exists": true
             },
             "project": {
@@ -79,7 +80,8 @@
               "key": "read",
               "on": false
             }
-          ]
+          ],
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000021"
         }
       },
       "acpRequest": {
@@ -97,7 +99,8 @@
                 "key": "read",
                 "on": false
               }
-            ]
+            ],
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000021"
           }
         }
       },
@@ -105,6 +108,7 @@
         "jsonrpc": "2.0",
         "id": 21,
         "result": {
+          "accepted": true,
           "kind": "tool",
           "scope": "project",
           "effect": "next_request",
@@ -135,6 +139,7 @@
           "success": true,
           "data": {
             "result": {
+              "accepted": true,
               "kind": "tool",
               "scope": "project",
               "effect": "next_request",
@@ -180,8 +185,8 @@
           "scopes": {
             "global": {
               "path": "<fixture>/agent/settings.json",
-              "writable": true,
-              "reason": null,
+              "writable": false,
+              "reason": "management-helper",
               "exists": true
             },
             "project": {
@@ -240,7 +245,8 @@
               "key": "read",
               "on": false
             }
-          ]
+          ],
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000023"
         }
       },
       "acpResponse": {
@@ -262,6 +268,97 @@
           }
         }
       }
+    },
+    {
+      "case": "current project selection is locked before any write",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/selections/set",
+        "payload": {
+          "kind": "tool",
+          "scope": "project",
+          "changes": [
+            {
+              "key": "read",
+              "on": false
+            }
+          ],
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000024"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "_aelix/session/selections/set",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "kind": "tool",
+            "scope": "project",
+            "changes": [
+              {
+                "key": "read",
+                "on": false
+              }
+            ],
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000024"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "result": {
+          "accepted": false,
+          "reason": "selection-locked",
+          "scope": "project",
+          "mismatches": [
+            {
+              "key": "read",
+              "reason": "locked"
+            }
+          ],
+          "written": []
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "accepted": false,
+              "reason": "selection-locked",
+              "scope": "project",
+              "mismatches": [
+                {
+                  "key": "read",
+                  "reason": "locked"
+                }
+              ],
+              "written": []
+            }
+          }
+        }
+      }
     }
-  ]
+  ],
+  "beforeFirstPrompt": {
+    "discovery": {
+      "status": 409,
+      "body": {
+        "success": false,
+        "error": "Session is not open.",
+        "code": "EXT_NO_LIVE_TASK"
+      }
+    },
+    "renderer": {
+      "sessionControlsEnabled": false,
+      "notice": "세션을 연 뒤 이 대화의 도구·스킬을 변경할 수 있습니다.",
+      "globalWrites": "management-helper",
+      "rediscoverOn": "session-attached"
+    },
+    "tasksStartedByDiscovery": 0
+  }
 }
