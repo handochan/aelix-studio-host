@@ -5181,6 +5181,7 @@ mod build_mapping_tests {
                 parent_message_id: "msg_9".into(),
                 parent_session_id: "parent-sid".into(),
                 last_turn_id: Some("turn-4".into()),
+                expected_native_head: None,
             }),
             ..Default::default()
         };

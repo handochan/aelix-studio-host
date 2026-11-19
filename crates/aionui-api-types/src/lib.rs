@@ -93,15 +93,16 @@ pub use chat_file::ChatFileRef;
 pub use confirmation::{ApprovalCheckQuery, ApprovalCheckResponse, ConfirmRequest, ConfirmationListResponse};
 pub use connection_test::TestBedrockConnectionRequest;
 pub use conversation::{
-    ActiveCountResponse, AssistantConversationOverridesRequest, AssistantConversationRequest,
+    AELIX_EXPECTED_FORK_HEAD, ActiveCountResponse, AssistantConversationOverridesRequest, AssistantConversationRequest,
     CancelConversationRequest, CancelConversationResponse, CloneConversationRequest, ConversationArtifactKind,
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationArtifactStatus,
     ConversationAssistantIdentityResponse, ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
     ConversationNameUpdatedPayload, ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
-    CreateConversationRequest, EnsureConversationRuntimeResponse, ForkCapabilityView, ForkConversationRequest,
-    ListConversationsQuery, ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse, MessageResponse,
-    MessageSearchItem, MessageSearchResponse, MessageStatusChangedPayload, PromptCapabilityView, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, SessionRef, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    CreateConversationRequest, EnsureConversationRuntimeResponse, FORK_HEAD_CHANGED, ForkCapabilityView,
+    ForkConversationRequest, ListConversationsQuery, ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse,
+    MessageResponse, MessageSearchItem, MessageSearchResponse, MessageStatusChangedPayload, PromptCapabilityView,
+    SearchMessagesQuery, SendMessageRequest, SendMessageResponse, SessionRef, UpdateConversationArtifactRequest,
+    UpdateConversationRequest,
 };
 pub use conversation_tools::{
     CONVERSATION_TOOLS_SCHEMA_VERSION, ConversationCliEnvelope, ConversationCliMeta, ConversationCreateAssistant,

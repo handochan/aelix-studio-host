@@ -96,6 +96,9 @@ pub struct CreateConversationRequest {
 pub struct ForkConversationRequest {
     /// The fork point: a message in the parent conversation (inclusive).
     pub message_id: String,
+    /// The native turn reference shown on the selected message.
+    #[serde(default)]
+    pub expected_native_head: Option<String>,
     /// Optional name for the forked conversation; defaults to the parent's.
     #[serde(default)]
     pub name: Option<String>,
@@ -129,7 +132,12 @@ pub struct ForkCapabilityView {
     /// entry point only on the last turn's messages.
     #[serde(default)]
     pub at_turn: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_native_head: bool,
 }
+
+pub const AELIX_EXPECTED_FORK_HEAD: &str = "aelix/expectedHead";
+pub const FORK_HEAD_CHANGED: &str = "FORK_HEAD_CHANGED";
 
 /// Body for `PATCH /api/conversations/:id`.
 ///

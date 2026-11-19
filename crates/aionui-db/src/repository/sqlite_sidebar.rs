@@ -1,5 +1,6 @@
 use sqlx::{Row, SqlitePool};
 
+use super::sqlite_conversation::PUBLISHED_FORK_OR_CONVERSATION;
 use crate::error::DbError;
 use crate::models::ConversationRow;
 use crate::repository::sidebar::{
@@ -66,8 +67,8 @@ impl ISidebarStore for SqliteSidebarStore {
                     json_extract(extra, '$.workspace') AS workspace, \
                     COALESCE(NULLIF(json_extract(extra, '$.team_id'), ''), NULLIF(json_extract(extra, '$.teamId'), '')) AS team_id, \
                     updated_at, created_at \
-             FROM conversations \
-             WHERE user_id = ? AND {archived} AND {HEALTH_CHECK_KEEP}"
+             FROM conversations c \
+             WHERE user_id = ? AND {archived} AND {HEALTH_CHECK_KEEP} AND {PUBLISHED_FORK_OR_CONVERSATION}"
         );
         let rows = sqlx::query(&sql).bind(user_id).fetch_all(&self.pool).await?;
 
@@ -140,8 +141,8 @@ impl ISidebarStore for SqliteSidebarStore {
         }
         let archived = archived_predicate(scope);
         let sql = format!(
-            "SELECT * FROM conversations \
-             WHERE user_id = ? AND {archived} AND {HEALTH_CHECK_KEEP} AND id IN ({})",
+            "SELECT c.* FROM conversations c \
+             WHERE user_id = ? AND {archived} AND {HEALTH_CHECK_KEEP} AND {PUBLISHED_FORK_OR_CONVERSATION} AND id IN ({})",
             placeholders(ids.len())
         );
         let mut query = sqlx::query_as::<_, ConversationRow>(&sql);
