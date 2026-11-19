@@ -267,12 +267,18 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
     ) -> Result<bool, DbError> {
         let now = now_ms();
         let result = sqlx::query(
-            "UPDATE acp_session SET session_id = ?, last_active_at = ? \
+            "UPDATE acp_session SET session_id = ?, last_active_at = ?, \
+             session_config = CASE WHEN NULLIF(?, '') IS NOT NULL AND EXISTS (SELECT 1 FROM conversations c \
+                 WHERE c.id = acp_session.conversation_id \
+                 AND json_type(CASE WHEN json_valid(c.extra) THEN c.extra ELSE '{}' END, \
+                               '$.fork.expected_native_head') IS 'text') AND json_valid(session_config) \
+                 THEN json_set(session_config, '$.fork_published', 1) ELSE session_config END \
              WHERE conversation_id = ? \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
         )
         .bind(session_id)
         .bind(now)
+        .bind(session_id)
         .bind(conversation_id)
         .bind(user_id)
         .execute(&self.pool)
@@ -283,7 +289,12 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
     async fn clear_session_id_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError> {
         let now = now_ms();
         let result = sqlx::query(
-            "UPDATE acp_session SET session_id = NULL, last_active_at = ? \
+            "UPDATE acp_session SET session_id = NULL, last_active_at = ?, \
+             session_config = CASE WHEN NULLIF(session_id, '') IS NOT NULL AND EXISTS (SELECT 1 FROM conversations c \
+                 WHERE c.id = acp_session.conversation_id \
+                 AND json_type(CASE WHEN json_valid(c.extra) THEN c.extra ELSE '{}' END, \
+                               '$.fork.expected_native_head') IS 'text') AND json_valid(session_config) \
+                 THEN json_set(session_config, '$.fork_published', 1) ELSE session_config END \
              WHERE conversation_id = ? \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
         )
@@ -357,7 +368,9 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         let new_config = merge_runtime_state(&raw, params)?;
         let now = now_ms();
         let result = sqlx::query(
-            "UPDATE acp_session SET session_config = ?, last_active_at = ? \
+            "UPDATE acp_session SET session_config = json_set( \
+                 CASE WHEN json_valid(session_config) THEN session_config ELSE '{}' END, \
+                 '$.runtime', json_extract(?, '$.runtime')), last_active_at = ? \
              WHERE conversation_id = ? \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
         )

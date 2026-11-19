@@ -2222,6 +2222,7 @@ mod tests {
             parent_message_id: "m2".to_owned(),
             parent_session_id: parent_conversation_id.to_owned(),
             last_turn_id: None,
+            expected_native_head: None,
         }
     }
 

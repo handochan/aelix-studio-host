@@ -13,6 +13,14 @@ use crate::repository::conversation::{
     StaleRuntimeMessageRow,
 };
 
+/// Guarded display copies become discoverable once their ACP session binds.
+/// The outer query must alias `conversations` as `c`.
+pub(super) const PUBLISHED_FORK_OR_CONVERSATION: &str = "(json_type(CASE WHEN json_valid(c.extra) THEN c.extra ELSE '{}' END, '$.fork.expected_native_head') IS NOT 'text' \
+      OR EXISTS (SELECT 1 FROM acp_session a WHERE a.conversation_id = c.id \
+                 AND (NULLIF(a.session_id, '') IS NOT NULL OR \
+                      json_extract(CASE WHEN json_valid(a.session_config) THEN a.session_config ELSE '{}' END, \
+                                   '$.fork_published') IS 1)))";
+
 /// Bump `conversations.updated_at` so the conversation-list sort
 /// (ORDER BY conversations.updated_at DESC) floats a conversation with fresh
 /// activity to the top. Persisting a message never used to touch this column,
@@ -439,6 +447,7 @@ impl IConversationRepository for SqliteConversationRepository {
         // The active conversation feed never shows archived rows; those live only
         // in the sidebar archive read model (`sqlite_sidebar`, `archived_at IS NOT NULL`).
         where_parts.push("c.archived_at IS NULL".to_string());
+        where_parts.push(PUBLISHED_FORK_OR_CONVERSATION.to_owned());
         let mut binds: Vec<BindValue> = vec![BindValue::Str(user_id.to_string())];
 
         // Cursor-based pagination: use updated_at of the cursor row
@@ -510,7 +519,7 @@ impl IConversationRepository for SqliteConversationRepository {
         // apply. Filtered in SQL, not by the caller: a Rust-side filter would
         // punch holes in the page the way the team/self filters do, and the
         // scan-past-holes machinery exists for predicates SQL cannot express.
-        let mut where_clause = String::from("c.user_id = ? AND c.archived_at IS NULL");
+        let mut where_clause = format!("c.user_id = ? AND c.archived_at IS NULL AND {PUBLISHED_FORK_OR_CONVERSATION}");
         let mut binds: Vec<BindValue> = vec![BindValue::Str(user_id.to_owned())];
         if let Some(ref needle) = needle {
             where_clause.push_str(r" AND lower(c.name) LIKE ? ESCAPE '\'");
@@ -594,17 +603,18 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn list_by_cron_job(&self, user_id: &str, cron_job_id: &str) -> Result<Vec<ConversationRow>, DbError> {
-        let rows = sqlx::query_as::<_, ConversationRow>(
-            "SELECT * FROM conversations \
-             WHERE user_id = ? \
-             AND (json_extract(extra, '$.cronJobId') = ? OR json_extract(extra, '$.cron_job_id') = ?) \
-             ORDER BY updated_at DESC",
-        )
-        .bind(user_id)
-        .bind(cron_job_id)
-        .bind(cron_job_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let sql = format!(
+            "SELECT c.* FROM conversations c \
+             WHERE c.user_id = ? AND {PUBLISHED_FORK_OR_CONVERSATION} \
+             AND (json_extract(c.extra, '$.cronJobId') = ? OR json_extract(c.extra, '$.cron_job_id') = ?) \
+             ORDER BY c.updated_at DESC"
+        );
+        let rows = sqlx::query_as::<_, ConversationRow>(&sql)
+            .bind(user_id)
+            .bind(cron_job_id)
+            .bind(cron_job_id)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows)
     }
@@ -1257,18 +1267,19 @@ impl IConversationRepository for SqliteConversationRepository {
 
         let like_pattern = format!("%{keyword}%");
 
-        let count_row: (i64,) = sqlx::query_as(
+        let count_sql = format!(
             "SELECT COUNT(*) FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.id \
-             WHERE c.user_id = ? AND m.content LIKE ?",
-        )
-        .bind(user_id)
-        .bind(&like_pattern)
-        .fetch_one(&self.pool)
-        .await?;
+             WHERE c.user_id = ? AND m.content LIKE ? AND {PUBLISHED_FORK_OR_CONVERSATION}"
+        );
+        let count_row: (i64,) = sqlx::query_as(&count_sql)
+            .bind(user_id)
+            .bind(&like_pattern)
+            .fetch_one(&self.pool)
+            .await?;
         let total = count_row.0 as u64;
 
-        let rows = sqlx::query_as::<_, MessageSearchRow>(
+        let rows_sql = format!(
             "SELECT \
                 m.id AS message_id, \
                 m.type, \
@@ -1288,16 +1299,17 @@ impl IConversationRepository for SqliteConversationRepository {
                 c.updated_at AS conversation_updated_at \
              FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.id \
-             WHERE c.user_id = ? AND m.content LIKE ? \
+             WHERE c.user_id = ? AND m.content LIKE ? AND {PUBLISHED_FORK_OR_CONVERSATION} \
              ORDER BY m.created_at DESC \
-             LIMIT ? OFFSET ?",
-        )
-        .bind(user_id)
-        .bind(&like_pattern)
-        .bind(fetch_limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+             LIMIT ? OFFSET ?"
+        );
+        let rows = sqlx::query_as::<_, MessageSearchRow>(&rows_sql)
+            .bind(user_id)
+            .bind(&like_pattern)
+            .bind(fetch_limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         let has_more = rows.len() as u32 > effective_size;
         let items = if has_more {
@@ -1583,6 +1595,7 @@ fn build_count_sql(user_id: &str, filters: &ConversationFilters) -> (String, Vec
     let mut where_parts = vec!["c.user_id = ?".to_string()];
     // Keep the total in step with `list_paginated`: exclude archived rows.
     where_parts.push("c.archived_at IS NULL".to_string());
+    where_parts.push(PUBLISHED_FORK_OR_CONVERSATION.to_owned());
     let mut binds: Vec<BindValue> = vec![BindValue::Str(user_id.to_string())];
 
     append_filter_conditions(filters, &mut where_parts, &mut binds);
