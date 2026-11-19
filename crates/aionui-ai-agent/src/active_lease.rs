@@ -1,11 +1,19 @@
+use std::collections::HashMap;
+
 use aionui_common::{TimestampMs, now_ms};
 use dashmap::DashMap;
 
 pub const ACTIVE_LEASE_TTL_MS: TimestampMs = 90_000;
 
+#[derive(Debug, Default)]
+struct ConversationLeases {
+    legacy: TimestampMs,
+    views: HashMap<String, TimestampMs>,
+}
+
 #[derive(Debug)]
 pub struct ActiveLeaseRegistry {
-    leases: DashMap<String, TimestampMs>,
+    leases: DashMap<String, ConversationLeases>,
     ttl_ms: TimestampMs,
 }
 
@@ -23,28 +31,52 @@ impl ActiveLeaseRegistry {
 
     pub fn renew(&self, conversation_id: &str) -> TimestampMs {
         let expires_at = now_ms().saturating_add(self.ttl_ms);
-        self.leases.insert(conversation_id.to_owned(), expires_at);
+        self.leases.entry(conversation_id.to_owned()).or_default().legacy = expires_at;
         expires_at
+    }
+
+    pub fn renew_view(&self, conversation_id: &str, view_id: &str) -> TimestampMs {
+        let now = now_ms();
+        let expires_at = now.saturating_add(self.ttl_ms);
+        let mut leases = self.leases.entry(conversation_id.to_owned()).or_default();
+        leases.views.retain(|_, expiry| *expiry > now);
+        leases.views.insert(view_id.to_owned(), expires_at);
+        expires_at
+    }
+
+    /// Retire one view. Return whether any other foreground lease remains.
+    pub fn retire_view(&self, conversation_id: &str, view_id: &str) -> bool {
+        if let Some(mut leases) = self.leases.get_mut(conversation_id) {
+            leases.views.remove(view_id);
+        }
+        self.is_active(conversation_id)
     }
 
     pub fn renew_many<'a>(&self, conversation_ids: impl IntoIterator<Item = &'a str>) -> (usize, TimestampMs) {
         let expires_at = now_ms().saturating_add(self.ttl_ms);
         let mut count = 0;
         for conversation_id in conversation_ids {
-            self.leases.insert(conversation_id.to_owned(), expires_at);
+            self.leases.entry(conversation_id.to_owned()).or_default().legacy = expires_at;
             count += 1;
         }
         (count, expires_at)
     }
 
     pub fn active_until(&self, conversation_id: &str) -> Option<TimestampMs> {
-        let expires_at = *self.leases.get(conversation_id)?;
-        if expires_at > now_ms() {
-            Some(expires_at)
-        } else {
-            self.leases.remove(conversation_id);
-            None
-        }
+        let now = now_ms();
+        let mut expires_at = None;
+        self.leases.remove_if_mut(conversation_id, |_, leases| {
+            leases.views.retain(|_, expiry| *expiry > now);
+            expires_at = leases
+                .views
+                .values()
+                .copied()
+                .chain([leases.legacy])
+                .max()
+                .filter(|expiry| *expiry > now);
+            expires_at.is_none()
+        });
+        expires_at
     }
 
     pub fn is_active(&self, conversation_id: &str) -> bool {
@@ -82,6 +114,17 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(registry.active_until("conv-1"), Some(expires_at));
         assert_eq!(registry.active_until("conv-2"), Some(expires_at));
+    }
+
+    #[test]
+    fn retiring_a_view_preserves_other_foreground_leases() {
+        let registry = ActiveLeaseRegistry::new();
+        registry.renew_view("conv", "a");
+        registry.renew_view("conv", "b");
+        assert!(registry.retire_view("conv", "a"));
+        assert!(!registry.retire_view("conv", "b"));
+        registry.renew("conv");
+        assert!(registry.retire_view("conv", "a"));
     }
 
     #[test]

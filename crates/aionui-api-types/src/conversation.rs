@@ -47,6 +47,26 @@ pub struct McpRuntimeSnapshot {
     pub mcp_statuses: Vec<ConversationMcpStatus>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationViewRequest {
+    pub view_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeReleaseOutcome {
+    Released,
+    Inactive,
+    ViewActive,
+    Busy,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReleaseConversationRuntimeResponse {
+    pub outcome: RuntimeReleaseOutcome,
+}
+
 // ── Request types ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]

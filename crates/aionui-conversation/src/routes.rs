@@ -10,9 +10,10 @@ use aionui_api_types::{
     ActiveCountResponse, ApiResponse, ApprovalCheckQuery, ApprovalCheckResponse, CancelConversationRequest,
     CancelConversationResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse, ConversationResponse,
-    CreateConversationRequest, EnsureConversationRuntimeResponse, ForkConversationRequest, ListConversationsQuery,
-    ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    ConversationViewRequest, CreateConversationRequest, EnsureConversationRuntimeResponse, ForkConversationRequest,
+    ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse,
+    ReleaseConversationRuntimeResponse, SearchMessagesQuery, SendMessageRequest, SendMessageResponse,
+    UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::ApiError;
@@ -147,6 +148,7 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         )
         .route("/api/conversations/{id}/runtime/ensure", post(ensure_runtime))
         .route("/api/conversations/{id}/runtime/restart", post(restart_runtime))
+        .route("/api/conversations/{id}/runtime/release", post(release_runtime))
         .route("/api/conversations/{id}/active-lease", post(active_lease))
         // Confirmation system
         .route("/api/conversations/{id}/confirmations", get(list_confirmations))
@@ -447,13 +449,46 @@ async fn active_lease(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
+    body: Result<Option<Json<ConversationViewRequest>>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, ApiError> {
+    if let Some(Json(request)) = body.map_err(ApiError::from)? {
+        validate_view_id(&request.view_id)?;
+        state
+            .service
+            .renew_active_view(&user.id, &id, &request.view_id, &state.active_leases)
+            .await
+            .map_err(ApiError::from)?;
+        return Ok(Json(ApiResponse::success()));
+    }
     state
         .service
         .renew_active_lease(&user.id, &id, &state.active_leases)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::success()))
+}
+
+async fn release_runtime(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<ConversationViewRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<ReleaseConversationRuntimeResponse>>, ApiError> {
+    let Json(request) = body.map_err(ApiError::from)?;
+    validate_view_id(&request.view_id)?;
+    let outcome = state
+        .service
+        .release_runtime(&user.id, &id, &request.view_id, &state.active_leases)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(ReleaseConversationRuntimeResponse { outcome })))
+}
+
+fn validate_view_id(view_id: &str) -> Result<(), ApiError> {
+    if view_id.is_empty() || view_id.len() > 64 || !view_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(ApiError::BadRequest("Invalid conversation view id".into()));
+    }
+    Ok(())
 }
 
 async fn search_messages(

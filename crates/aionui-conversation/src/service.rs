@@ -22,9 +22,9 @@ use aionui_api_types::{
     ConversationNameUpdatedPayload, ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest,
     EnsureConversationRuntimeResponse, ForkCapabilityView, ForkConversationRequest, ListConversationsQuery,
     ListMessagesQuery, McpRuntimeSnapshot, MessageListResponse, MessageResponse, MessageSearchResponse,
-    PromptCapabilityView, SearchMessagesQuery, SendMessageRequest, SendMessageResponse, SessionMcpServer,
-    SessionMcpTransport, TEAM_MCP_SERVER_NAME, TeamMcpSelection, TeamSessionBinding, UpdateConversationArtifactRequest,
-    UpdateConversationRequest, WebSocketMessage, assistant_avatar_response_value,
+    PromptCapabilityView, RuntimeReleaseOutcome, SearchMessagesQuery, SendMessageRequest, SendMessageResponse,
+    SessionMcpServer, SessionMcpTransport, TEAM_MCP_SERVER_NAME, TeamMcpSelection, TeamSessionBinding,
+    UpdateConversationArtifactRequest, UpdateConversationRequest, WebSocketMessage, assistant_avatar_response_value,
     assistant_avatar_response_value_with_version, assistant_mcp_binding_fingerprint,
 };
 use aionui_api_types::{ChatFileRef, SessionRef};
@@ -4535,6 +4535,105 @@ impl ConversationService {
         Ok(())
     }
 
+    pub async fn renew_active_view(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        view_id: &str,
+        active_leases: &ActiveLeaseRegistry,
+    ) -> Result<(), ConversationError> {
+        let row = self
+            .conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+        active_leases.renew_view(&row.id, view_id);
+        Ok(())
+    }
+
+    pub async fn release_runtime(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        view_id: &str,
+        active_leases: &ActiveLeaseRegistry,
+    ) -> Result<RuntimeReleaseOutcome, ConversationError> {
+        let row = self
+            .conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+        if team_id_from_extra(&row.extra).is_some() {
+            return Ok(RuntimeReleaseOutcome::Inactive);
+        }
+        if active_leases.retire_view(conversation_id, view_id) {
+            return Ok(RuntimeReleaseOutcome::ViewActive);
+        }
+        let Some(AgentInstance::Acp(agent)) = self.task_manager.get_task(conversation_id) else {
+            return Ok(RuntimeReleaseOutcome::Inactive);
+        };
+        if !agent.supports_studio_release() {
+            return Ok(RuntimeReleaseOutcome::Inactive);
+        }
+        if self.runtime_state.is_claimed(conversation_id) || self.runtime_state.is_restarting(conversation_id) {
+            return Ok(RuntimeReleaseOutcome::Busy);
+        }
+        match self.runtime_state.begin_restart(conversation_id) {
+            Ok(()) => {}
+            Err(ConversationError::RuntimeRestarting { .. }) => return Ok(RuntimeReleaseOutcome::Busy),
+            Err(error) => return Err(error),
+        }
+
+        // Finish cache retirement even if the renderer disconnects after sending close.
+        let service = self.clone();
+        let conversation_id = conversation_id.to_owned();
+        tokio::spawn(async move {
+            let result = service.release_admitted_runtime(&conversation_id, &agent).await;
+            service.runtime_state.clear_restarting(&conversation_id);
+            result
+        })
+        .await
+        .map_err(|_| ConversationError::internal("Runtime release task failed"))?
+    }
+
+    async fn release_admitted_runtime(
+        &self,
+        conversation_id: &str,
+        agent: &Arc<aionui_ai_agent::manager::acp::AcpAgentManager>,
+    ) -> Result<RuntimeReleaseOutcome, ConversationError> {
+        // begin_restart fences new turn claims. Recheck for a claim that won before it.
+        if self.runtime_state.is_claimed(conversation_id)
+            || self.runtime_state.is_cancelling(conversation_id)
+            || self.task_manager.get_task(conversation_id).is_some_and(|task| {
+                task.status() == Some(ConversationStatus::Running) || task.live_background_tasks() > 0
+            })
+        {
+            return Ok(RuntimeReleaseOutcome::Busy);
+        }
+        match agent.close_studio_session().await {
+            Ok(false) => return Ok(RuntimeReleaseOutcome::Busy),
+            Err(error) => {
+                warn!(conversation_id, %error, "Aelix session close failed");
+                return Err(ConversationError::BadGateway {
+                    reason: "Aelix session close failed".into(),
+                });
+            }
+            Ok(true) => {}
+        }
+        if matches!(self.task_manager.get_task(conversation_id), Some(AgentInstance::Acp(current)) if Arc::ptr_eq(&current, agent))
+        {
+            self.task_manager
+                .kill_and_wait(conversation_id, Some(AgentKillReason::RuntimeRestart))
+                .await;
+        }
+        info!(conversation_id, "Released the Aelix conversation runtime");
+        Ok(RuntimeReleaseOutcome::Released)
+    }
+
     /// Pre-initialize an agent task for a conversation (warmup).
     ///
     /// This builds the agent task without sending a message, so the
@@ -4578,6 +4677,11 @@ impl ConversationService {
             });
         }
 
+        if self.runtime_state.is_restarting(conversation_id) {
+            return Err(ConversationError::RuntimeRestarting {
+                conversation_id: conversation_id.to_owned(),
+            });
+        }
         let pending_fork = self.awaiting_guarded_fork(user_id, &row).await?;
         let (agent, recovered) = self
             .ensure_runtime_agent(user_id, conversation_id, task_manager, "runtime_ensure")

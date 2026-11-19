@@ -14,10 +14,14 @@
 //! must NEVER be Display'd into HTTP responses or WebSocket events; it
 //! is logged via `tracing` only.
 
+use std::time::Duration;
+
+use agent_client_protocol::schema::v1::{CloseSessionRequest, SessionId};
+
 use crate::error::AgentError;
 use crate::manager::acp::AcpAgentManager;
 use crate::manager::acp::agent::{exit_status_parts, user_facing_message};
-use crate::protocol::error::CloseReason;
+use crate::protocol::error::{AcpError, CloseReason};
 
 /// How many trailing stderr lines we hand to the extractor.
 /// 32 lines is well below the 8 KiB ring-buffer cap and comfortably
@@ -44,6 +48,46 @@ fn log_acp_process_exit(
 }
 
 impl AcpAgentManager {
+    /// Only an Aelix ACP connection that advertised session/close is eligible.
+    pub fn supports_studio_release(&self) -> bool {
+        self.protocol.initialize_response().is_some_and(|response| {
+            response.agent_info.is_some_and(|info| info.name == "aelix-acp")
+                && response.agent_capabilities.session_capabilities.close.is_some()
+        })
+    }
+
+    /// Return false if a runtime operation already owns the ACP session.
+    pub async fn close_studio_session(&self) -> Result<bool, AcpError> {
+        let Ok(_session_guard) = self.session_lock.try_lock() else {
+            return Ok(false);
+        };
+        let session = self.session.read().await;
+        if !session.is_opened() {
+            return Ok(true);
+        }
+        let Some(session_id) = session.session_id().map(ToOwned::to_owned) else {
+            return Ok(true);
+        };
+        drop(session);
+        let deadline = Duration::from_secs(20);
+        match tokio::time::timeout(
+            deadline,
+            self.protocol
+                .close_session(CloseSessionRequest::new(SessionId::new(session_id))),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(true),
+            // ACP #34 reuses the adapter's existing activity/turn admission error.
+            Ok(Err(AcpError::ApplicationError { code: -32000, .. })) => Ok(false),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(AcpError::RequestTimeout {
+                method: "session/close".to_owned(),
+                timeout_secs: deadline.as_secs(),
+            }),
+        }
+    }
+
     /// If `err` is the "SDK gave us default Internal error with no data" shape,
     /// peek the child's recent stderr and try to surface a more informative
     /// message. Returns `None` when augmentation does not apply or finds nothing.
