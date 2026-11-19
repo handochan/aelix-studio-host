@@ -9,6 +9,8 @@ mod routes;
 mod runtime_team_tools;
 mod scm_monitor;
 mod state;
+mod studio_auth;
+mod studio_helper_routes;
 mod system_file_opener;
 mod team_capability_resolver;
 mod team_conversation_adapters;
@@ -16,8 +18,10 @@ mod trace;
 
 pub use routes::{
     RouterRuntime, create_router, create_router_with_all_state, create_router_with_runtime, create_router_with_states,
+    create_studio_router,
 };
 pub use state::{
     ChannelOrchestratorComponents, ModuleStates, RouterBuildError, build_assistant_state, build_conversation_state,
     build_extension_states, build_module_states, build_ws_state,
 };
+pub use studio_auth::StudioAuth;

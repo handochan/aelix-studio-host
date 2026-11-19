@@ -108,6 +108,21 @@ pub async fn create_router(services: &AppServices) -> Result<Router, RouterBuild
 /// Create the application router and return runtime handles needed by
 /// background services started outside the router tree.
 pub async fn create_router_with_runtime(services: &AppServices) -> Result<(Router, RouterRuntime), RouterBuildError> {
+    build_router(services, None).await
+}
+
+/// Assemble Studio's loopback router with principal-aware admission at every route.
+pub async fn create_studio_router(
+    services: &AppServices,
+    studio_auth: super::StudioAuth,
+) -> Result<(Router, RouterRuntime), RouterBuildError> {
+    build_router(services, Some(studio_auth)).await
+}
+
+async fn build_router(
+    services: &AppServices,
+    studio_auth: Option<super::StudioAuth>,
+) -> Result<(Router, RouterRuntime), RouterBuildError> {
     let boot = Instant::now();
     tracing::info!("startup: router assembly started");
 
@@ -175,8 +190,16 @@ pub async fn create_router_with_runtime(services: &AppServices) -> Result<(Route
         Some(scm) => Arc::new(CompositeMessageRouter::new(vec![fs_router, scm])),
         None => fs_router,
     };
-    let ws_state = build_ws_state(services, inbound_router);
+    let ws_state = if studio_auth.is_some() {
+        super::state::build_session_ws_state(services, inbound_router)
+    } else {
+        build_ws_state(services, inbound_router)
+    };
     let router = create_router_with_all_state(services, states, ws_state);
+    let router = match studio_auth {
+        Some(auth) => auth.protect(router, services),
+        None => router,
+    };
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: router assembly completed"

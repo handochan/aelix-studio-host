@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 
 use aionui_api_types::WebSocketMessage;
-use axum::extract::WebSocketUpgrade;
+use aionui_common::WsSessionGuard;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::{Extension, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
@@ -45,6 +46,7 @@ pub struct WsHandlerState {
 pub async fn ws_upgrade_handler(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
+    session: Option<Extension<WsSessionGuard>>,
     axum::extract::State(state): axum::extract::State<WsHandlerState>,
 ) -> impl IntoResponse {
     let token = (state.token_extractor)(&headers);
@@ -62,14 +64,19 @@ pub async fn ws_upgrade_handler(
     };
 
     ws.on_upgrade(move |socket| async move {
-        handle_socket(socket, token, state).await;
+        handle_socket(socket, token, state, session.map(|Extension(guard)| guard)).await;
     })
 }
 
 /// Post-upgrade connection handler.
 ///
 /// Validates the token, registers the client, spawns send/recv loops.
-async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandlerState) {
+async fn handle_socket(
+    socket: WebSocket,
+    token: Option<String>,
+    state: WsHandlerState,
+    session: Option<WsSessionGuard>,
+) {
     let Some(token) = token else {
         send_realtime_error_and_close(socket, RealtimeError::AuthMissing, "authentication required").await;
         return;
@@ -92,11 +99,13 @@ async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandle
 
     let (ws_sender, ws_receiver) = socket.split();
 
-    let send_handle = tokio::spawn(send_loop(conn_id, rx, ws_sender));
-    recv_loop(conn_id, &user_id, ws_receiver, &state).await;
-
-    // Recv loop exited — client disconnected or errored.
-    send_handle.abort();
+    let mut send_handle = tokio::spawn(send_loop(conn_id, rx, ws_sender, session.clone()));
+    tokio::select! {
+        _ = &mut send_handle => {},
+        _ = recv_loop(conn_id, &user_id, ws_receiver, &state, session.as_ref()) => {
+            send_handle.abort();
+        }
+    }
     state.manager.remove_client(conn_id);
     // Let stateful routers release per-connection state (e.g. fs subscriptions).
     state.router.on_disconnect(conn_id);
@@ -125,8 +134,29 @@ async fn send_loop(
     conn_id: ConnectionId,
     mut rx: mpsc::Receiver<WsOutbound>,
     mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    session: Option<WsSessionGuard>,
 ) {
-    while let Some(outbound) = rx.recv().await {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let outgoing = tokio::select! {
+            msg = rx.recv() => msg,
+            _ = interval.tick(), if session.is_some() => {
+                if let Some(guard) = &session
+                    && !guard.recheck().await
+                {
+                    close_expired_session(&mut sender).await;
+                    break;
+                }
+                continue;
+            },
+        };
+        let Some(outbound) = outgoing else { break };
+        if session.as_ref().is_some_and(|guard| !guard.valid()) {
+            close_expired_session(&mut sender).await;
+            break;
+        }
+        let close = matches!(outbound, WsOutbound::Close(..) | WsOutbound::TextThenClose(..));
         let msg = match outbound {
             WsOutbound::Text(text) => Message::Text(text.into()),
             WsOutbound::Close(code, reason) => Message::Close(Some(CloseFrame {
@@ -148,7 +178,22 @@ async fn send_loop(
             debug!(%conn_id, "send loop: socket write failed, exiting");
             break;
         }
+        if close {
+            break;
+        }
     }
+}
+
+async fn close_expired_session(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>) {
+    if let Ok(text) = serde_json::to_string(&RealtimeError::AuthExpired.into_event()) {
+        let _ = sender.send(Message::Text(text.into())).await;
+    }
+    let _ = sender
+        .send(Message::Close(Some(CloseFrame {
+            code: WebSocketCloseCode::PolicyViolation.as_u16(),
+            reason: "session expired".into(),
+        })))
+        .await;
 }
 
 // -------------------------------------------------------------------
@@ -161,8 +206,13 @@ async fn recv_loop(
     user_id: &str,
     mut receiver: futures_util::stream::SplitStream<WebSocket>,
     state: &WsHandlerState,
+    session: Option<&WsSessionGuard>,
 ) {
     while let Some(result) = receiver.next().await {
+        if session.is_some_and(|guard| !guard.valid()) {
+            // Let the send loop deliver the session error and close frame.
+            std::future::pending::<()>().await;
+        }
         let msg = match result {
             Ok(m) => m,
             Err(e) => {

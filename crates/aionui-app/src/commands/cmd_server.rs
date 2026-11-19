@@ -14,7 +14,9 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use aionui_api_types::{RuntimeStatusScope, RuntimeStatusScopeKind};
-use aionui_app::{AppConfig, AppServices, RouterBuildError, create_router_with_runtime};
+use aionui_app::{
+    AppConfig, AppServices, RouterBuildError, StudioAuth, create_router_with_runtime, create_studio_router,
+};
 use aionui_system::RuntimePrepareService;
 use aionui_team::TeamIdleCleanupCoordinator;
 
@@ -258,6 +260,7 @@ pub(crate) async fn run_server(
     services: AppServices,
     bound: BoundHttpListener,
     parent_exit: Option<ParentExitSignal>,
+    studio_auth: Option<StudioAuth>,
 ) -> Result<ExitCode, BootstrapError> {
     let boot = Instant::now();
 
@@ -273,9 +276,11 @@ pub(crate) async fn run_server(
         info!("No configured users detected — initial setup required via /api/auth/status");
     }
 
-    let (router, router_runtime) = create_router_with_runtime(&services)
-        .await
-        .map_err(router_build_error_to_bootstrap)?;
+    let (router, router_runtime) = match studio_auth {
+        Some(auth) => create_studio_router(&services, auth).await,
+        None => create_router_with_runtime(&services).await,
+    }
+    .map_err(router_build_error_to_bootstrap)?;
     info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: router ready for bound socket"

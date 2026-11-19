@@ -296,16 +296,24 @@ const STT_STREAM_CHANNEL_CAPACITY: usize = 32;
 async fn speech_to_text_stream(
     State(state): State<ShellRouterState>,
     Extension(user): Extension<CurrentUser>,
+    session: Option<Extension<aionui_common::WsSessionGuard>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| speech_to_text_stream_socket(socket, state, user.id))
+    ws.on_upgrade(move |socket| {
+        speech_to_text_stream_socket(socket, state, user.id, session.map(|Extension(guard)| guard))
+    })
 }
 
 /// Pump WebSocket frames in/out of the transport-agnostic streaming session.
 ///
 /// This stays a pure frame adapter: all protocol and business logic lives in
 /// `stt_stream::run_stream_session`.
-async fn speech_to_text_stream_socket(socket: WebSocket, state: ShellRouterState, user_id: String) {
+async fn speech_to_text_stream_socket(
+    socket: WebSocket,
+    state: ShellRouterState,
+    user_id: String,
+    session: Option<aionui_common::WsSessionGuard>,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     let config = match load_stt_config(&state.client_pref_service, &user_id).await {
@@ -329,8 +337,12 @@ async fn speech_to_text_stream_socket(socket: WebSocket, state: ShellRouterState
 
     // Inbound pump: WS messages → ClientFrame, ending with `Closed` when the
     // client goes away. A send failure means the session already returned.
+    let inbound_session = session.clone();
     let read_task = tokio::spawn(async move {
         while let Some(msg) = ws_rx.next().await {
+            if inbound_session.as_ref().is_some_and(|guard| !guard.valid()) {
+                break;
+            }
             let frame = match msg {
                 Ok(Message::Text(text)) => ClientFrame::Text(text.to_string()),
                 Ok(Message::Binary(bytes)) => ClientFrame::Binary(bytes.to_vec()),
@@ -346,8 +358,25 @@ async fn speech_to_text_stream_socket(socket: WebSocket, state: ShellRouterState
 
     // Outbound pump: server frames → WS text, then a clean close once the
     // session drops its sender.
-    let write_task = tokio::spawn(async move {
-        while let Some(msg) = server_rx.recv().await {
+    let mut write_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let output = tokio::select! {
+                output = server_rx.recv() => output,
+                _ = interval.tick(), if session.is_some() => {
+                    if let Some(guard) = &session
+                        && !guard.recheck().await
+                    {
+                        break;
+                    }
+                    continue;
+                },
+            };
+            let Some(msg) = output else { break };
+            if session.as_ref().is_some_and(|guard| !guard.valid()) {
+                break;
+            }
             let Ok(text) = serde_json::to_string(&msg) else {
                 break;
             };
@@ -358,10 +387,14 @@ async fn speech_to_text_stream_socket(socket: WebSocket, state: ShellRouterState
         let _ = ws_tx.send(Message::Close(None)).await;
     });
 
-    run_stream_session(client_rx, server_tx, config, &ProviderUpstreamFactory).await;
-    // `server_tx` was moved into the session and dropped on return: the write
-    // pump drains any remaining frames and closes the socket cleanly.
-    let _ = write_task.await;
+    tokio::select! {
+        _ = run_stream_session(client_rx, server_tx, config, &ProviderUpstreamFactory) => {
+            // Drain remaining frames after the session drops its sender.
+            let _ = write_task.await;
+        }
+        // The browser session ended or transport closed. Drop the upstream session.
+        _ = &mut write_task => {}
+    }
     // The session no longer reads `client_rx`; stop the reader (abort is safe
     // mid-await — the WS read half is simply dropped).
     read_task.abort();

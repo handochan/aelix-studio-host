@@ -15,6 +15,7 @@ mod id;
 mod pagination;
 mod timestamp;
 mod types;
+mod ws_session_guard;
 
 pub use backend_capabilities::{CapabilityOrigin, McpTransportCapabilities, ResolvedBackendCapabilities};
 pub use case_convert::{camel_to_snake, normalize_keys_to_snake_case};
@@ -34,3 +35,5 @@ pub use pagination::PaginatedResult;
 pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, Confirmation, ConfirmationOption, EnvVar, ProviderWithModel, UpdateType, VersionInfo};
 pub use user_paths::{UserDirNameError, user_dir_name};
+
+pub use ws_session_guard::WsSessionGuard;
