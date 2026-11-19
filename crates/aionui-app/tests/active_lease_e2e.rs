@@ -85,6 +85,7 @@ async fn insert_team(services: &aionui_app::AppServices, user_id: &str, team_id:
         agents: serde_json::to_string(&agents).unwrap(),
         lead_agent_id: agents.first().map(|agent| agent.slot_id.clone()),
         session_mode: None,
+        aelix_permission_mode: None,
         agents_version: "1.0.1".to_owned(),
         created_at: now_ms(),
         updated_at: now_ms(),

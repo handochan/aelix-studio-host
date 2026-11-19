@@ -43,6 +43,7 @@ fn make_team_for_user(id: &str, user_id: &str, name: &str) -> TeamRow {
                 .into(),
         lead_agent_id: Some("a1".into()),
         session_mode: None,
+        aelix_permission_mode: None,
         agents_version: "1.0.1".into(),
         created_at: now,
         updated_at: now,

@@ -803,6 +803,7 @@ impl TeamSessionService {
             agents: agents_json,
             lead_agent_id: lead_agent_id.clone(),
             session_mode: None,
+            aelix_permission_mode: None,
             agents_version: "1.0.1".into(),
             created_at: now,
             updated_at: now,
@@ -1885,7 +1886,15 @@ impl TeamSessionService {
         option_id: &str,
         request: SetConfigOptionRequest,
     ) -> Result<SetConfigOptionResponse, TeamError> {
-        let row = self.load_owned_team_row(user_id, team_id).await?;
+        let option_id = option_id.trim();
+        let mut row = self.load_owned_team_row(user_id, team_id).await?;
+        let _mode_guard = if matches!(option_id, "mode" | "permission_mode") {
+            let guard = self.lock_permission_selection(team_id).await;
+            row = self.load_owned_team_row(user_id, team_id).await?;
+            Some(guard)
+        } else {
+            None
+        };
         let team = Team::from_row(&row)?;
         let member = team
             .agents
@@ -1897,10 +1906,12 @@ impl TeamSessionService {
         }
 
         let options = self.conversation_port.get_config_options(conversation_id).await?;
-        let is_global_mode = member.role == TeammateRole::Lead
-            && options.config_options.iter().any(|option| {
-                option.id == option_id && (option.category.as_deref() == Some("mode") || option.id == "mode")
-            });
+        let is_mode_option = option_id == "mode"
+            || options
+                .config_options
+                .iter()
+                .any(|option| option.id == option_id && option.category.as_deref() == Some("mode"));
+        let is_global_mode = member.role == TeammateRole::Lead && is_mode_option;
         if is_global_mode
             && let Some(starting_member) = team
                 .agents
@@ -1920,11 +1931,26 @@ impl TeamSessionService {
         // confirmation deliberately still reads back the OLD value, so echoing the
         // readback would persist the model the user just switched away from.
         let requested_model = is_model_option.then(|| request.value.trim().to_owned());
+        let requested_permission_mode = (is_mode_option && matches!(request.value.trim(), "default" | "yolo"))
+            .then(|| request.value.trim().to_owned());
 
         let response = self
             .conversation_port
             .set_config_option(conversation_id, option_id, request)
             .await?;
+
+        if let Some(mode) = requested_permission_mode
+            && response.confirmation == aionui_api_types::ConfigOptionConfirmation::Observed
+            && response.config_options.as_deref().is_some_and(|options| {
+                options.iter().any(|option| {
+                    option.id == "permission_mode" && option.current_value.as_deref() == Some(mode.as_str())
+                })
+            })
+        {
+            self.conversation_port
+                .save_team_permission_mode(conversation_id, &mode)
+                .await?;
+        }
 
         // The runtime accepted the switch, so the roster and the persisted
         // conversation state must follow — including for `PendingNextTurn`, where
@@ -2662,6 +2688,7 @@ impl TeamSessionService {
         if allow_queued {
             self.ensure_session_inner(team_id, Some(user_id)).await?;
         }
+        let mode_guard = self.lock_permission_selection(team_id).await;
         let session = {
             let entry = self.sessions.get(team_id).ok_or_else(|| TeamError::RuntimeNotReady {
                 conversation_id: requested_agent.conversation_id.clone(),
@@ -2733,6 +2760,7 @@ impl TeamSessionService {
             }
         };
 
+        drop(mode_guard);
         self.broadcast_agent_runtime_status(user_id, team_id, &agent, TeamAgentRuntimeStatus::Pending, None);
         info!(
             team_id,
@@ -2845,6 +2873,7 @@ impl TeamSessionService {
             slot_id: slot_id.to_owned(),
             conversation_id: agent.conversation_id.clone(),
         };
+        let mode_guard = self.lock_permission_selection(team_id).await;
         let restart_gate = session
             .work_coordinator()
             .begin_runtime_restart(slot_id)
@@ -2897,6 +2926,7 @@ impl TeamSessionService {
                 });
             }
         };
+        drop(mode_guard);
         let operation_id = lease.operation_id();
 
         self.broadcast_agent_runtime_status(user_id, team_id, &agent, TeamAgentRuntimeStatus::Pending, None);
@@ -3103,7 +3133,21 @@ impl TeamSessionService {
         session.pause_slot_work(team_run_id, slot_id, reason).await
     }
 
+    // Keep permission RPCs and their durable writes ordered with other
+    // choices and with adding members that inherit the Team selection.
+    pub(crate) async fn lock_permission_selection(&self, team_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .add_agent_locks
+            .entry(team_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
+    }
+
     pub async fn set_session_mode(&self, user_id: &str, team_id: &str, mode: &str) -> Result<(), TeamError> {
+        let mode = mode.trim();
+        self.load_owned_team_row(user_id, team_id).await?;
+        let _mode_guard = self.lock_permission_selection(team_id).await;
         let team = self.load_owned_team(user_id, team_id).await?;
         if let Some(starting_member) = team
             .agents
@@ -3119,21 +3163,40 @@ impl TeamSessionService {
                 team_id,
                 &UpdateTeamParams {
                     session_mode: Some(mode.to_owned()),
+                    aelix_permission_mode: Some(if mode == "yolo" { "yolo" } else { "default" }.to_owned()),
                     ..Default::default()
                 },
             )
             .await?;
 
+        let mut incomplete = false;
         for agent in &team.agents {
-            let mode_applied = match self.task_manager.get_task(&agent.conversation_id) {
+            let instance = self.task_manager.get_task(&agent.conversation_id);
+            // A Ready Aelix slot without a task may be rebuilding in the
+            // turn executor. Persist the selection for rebuild and report the
+            // live application as incomplete.
+            if instance.is_none()
+                && matches!(mode, "default" | "yolo")
+                && self.sessions.get(team_id).is_some_and(|entry| {
+                    entry
+                        .session
+                        .member_runtimes()
+                        .ready_uses_aelix_permission_policy(&agent.slot_id)
+                })
+            {
+                incomplete = true;
+            }
+            let protects_aelix =
+                matches!(&instance, Some(AgentInstance::Acp(manager)) if manager.has_team_permission_policy());
+            let mode_applied = match instance {
                 Some(instance) => match set_active_agent_session_mode(&instance, mode).await {
                     Ok(()) => true,
-                    Err(e) => {
+                    Err(error) => {
                         warn!(
                             team_id,
                             slot_id = %agent.slot_id,
                             conversation_id = %agent.conversation_id,
-                            error = %e,
+                            %error,
                             "failed to set session mode on agent"
                         );
                         false
@@ -3141,15 +3204,34 @@ impl TeamSessionService {
                 },
                 None => true,
             };
-            if mode_applied && let Err(e) = provisioner.update_session_mode_seed(agent, mode).await {
+
+            if protects_aelix && !mode_applied {
+                incomplete = true;
+                if mode == "default" {
+                    // The live slot may be busy. Record Ask for the next build
+                    // without reporting that the current turn changed mode.
+                    self.conversation_port
+                        .save_team_permission_mode(&agent.conversation_id, mode)
+                        .await?;
+                }
+                continue;
+            }
+            if mode_applied && let Err(error) = provisioner.update_session_mode_seed(agent, mode).await {
+                incomplete |= protects_aelix || matches!(mode, "default" | "yolo");
                 warn!(
                     team_id,
                     slot_id = %agent.slot_id,
                     conversation_id = %agent.conversation_id,
-                    error = %e,
+                    %error,
                     "failed to persist team session mode seed"
                 );
             }
+        }
+
+        if incomplete {
+            return Err(TeamError::InvalidRequest(
+                "Team permission change could not be applied to every Aelix slot".to_owned(),
+            ));
         }
 
         Ok(())
@@ -3226,7 +3308,13 @@ impl TeamSessionService {
 async fn set_active_agent_session_mode(instance: &AgentInstance, mode: &str) -> Result<(), AgentError> {
     #[allow(unreachable_patterns)]
     match instance {
-        AgentInstance::Acp(_) => instance.set_config_option("mode", mode).await.map(|_| ()),
+        AgentInstance::Acp(manager) if manager.has_team_permission_policy() => {
+            let response = instance.set_config_option("permission_mode", mode).await?;
+            if response.confirmation != aionui_api_types::ConfigOptionConfirmation::Observed {
+                return Err(AgentError::conflict("Team permission mode could not be confirmed"));
+            }
+            Ok(())
+        }
         AgentInstance::Aionrs(manager) => manager.set_mode(mode).await,
         _ => instance.set_config_option("mode", mode).await.map(|_| ()),
     }
@@ -3378,6 +3466,7 @@ mod tests {
             assert_eq!(value, "read-only");
             match self.mode_result.lock().unwrap().clone() {
                 Ok(()) => Ok(SetConfigOptionResponse {
+                    backend_accepted: None,
                     confirmation: ConfigOptionConfirmation::Observed,
                     config_options: None,
                 }),
@@ -3518,12 +3607,12 @@ mod tests {
         request
     }
 
-    fn mark_member_runtime_ready(session: &TeamSession, slot_id: &str) {
+    fn mark_member_runtime_ready(session: &TeamSession, slot_id: &str, aelix_permission_policy: bool) {
         let lease = match session.member_runtimes().reserve_attach(slot_id, false) {
             ReserveAttach::Start(lease) => lease,
             other => panic!("ready-state seed must start, got {other:?}"),
         };
-        assert!(session.member_runtimes().commit_ready(&lease));
+        assert!(session.member_runtimes().commit_ready(&lease, aelix_permission_policy));
         session
             .work_coordinator()
             .set_runtime_constraint(slot_id, RuntimeConstraint::Ready);
@@ -3998,6 +4087,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dormant_attach_does_not_begin_warmup_before_permission_storage() {
+        let (svc, _repo, task_manager, conv_repo) = setup_with_factory_metadata_team_repo_and_conversation_repo();
+        let created = svc
+            .create_team("user-test", two_agent_team_request("Dormant Permission Gate"))
+            .await
+            .unwrap();
+        svc.ensure_session("user-test", &created.id).await.unwrap();
+        let worker = created
+            .assistants
+            .iter()
+            .find(|agent| agent.role == "teammate")
+            .unwrap();
+        let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
+        let agent = session.scheduler().get_agent(&worker.slot_id).await.unwrap();
+
+        svc.provisioner()
+            .update_session_mode_seed(&agent, "yolo")
+            .await
+            .unwrap();
+
+        // Park the permission writer after it has already checked that no
+        // runtime is starting, and before it has persisted Ask.
+        let guard = svc.lock_permission_selection(&created.id).await;
+        let ReserveAttach::Start(lease) = session.member_runtimes().reserve_attach(&worker.slot_id, false) else {
+            panic!("a dormant teammate must be attachable");
+        };
+        let attach = super::attach_member_runtime(
+            svc.clone(),
+            session.clone(),
+            "user-test".to_owned(),
+            agent.clone(),
+            task_manager,
+            lease,
+            false,
+        );
+        tokio::pin!(attach);
+
+        assert!(futures_util::poll!(&mut attach).is_pending());
+        assert!(!svc.member_runtime_is_starting(&created.id, &worker.slot_id));
+        assert_eq!(
+            conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_team_permission"],
+            "yolo"
+        );
+
+        svc.provisioner()
+            .update_session_mode_seed(&agent, "default")
+            .await
+            .unwrap();
+        drop(guard);
+        assert!(matches!(attach.await, super::AttachOutcome::Ready));
+        assert_eq!(
+            conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_warmup_permission"],
+            "default"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_ready_task_reports_partial_permission_change_only_for_aelix_slots() {
+        for aelix_permission_policy in [false, true] {
+            let (svc, _repo, _task_manager, conv_repo) = setup_with_factory_metadata_team_repo_and_conversation_repo();
+            let created = svc
+                .create_team("user-test", two_agent_team_request("Rebuilding slot"))
+                .await
+                .unwrap();
+            svc.ensure_session("user-test", &created.id).await.unwrap();
+            let worker = created
+                .assistants
+                .iter()
+                .find(|agent| agent.role == "teammate")
+                .unwrap();
+            let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
+            mark_member_runtime_ready(&session, &worker.slot_id, aelix_permission_policy);
+            assert!(svc.task_manager.get_task(&worker.conversation_id).is_none());
+            let worker_agent = session.scheduler().get_agent(&worker.slot_id).await.unwrap();
+            svc.provisioner()
+                .update_session_mode_seed(&worker_agent, "yolo")
+                .await
+                .unwrap();
+
+            let result = svc.set_session_mode("user-test", &created.id, "default").await;
+            if aelix_permission_policy {
+                assert!(
+                    matches!(result, Err(TeamError::InvalidRequest(reason)) if reason.contains("every Aelix slot"))
+                );
+            } else {
+                result.expect("seed-only updates retain their success for non-Aelix runtimes");
+            }
+            assert_eq!(
+                conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_team_permission"],
+                "default"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn session_mode_update_is_rejected_before_persistence_when_any_member_is_starting() {
         let (svc, repo, _task_manager, _conv_repo) = setup_with_factory_metadata_team_repo_and_conversation_repo();
         let created = svc
@@ -4055,7 +4239,7 @@ mod tests {
             .unwrap();
         svc.ensure_session("user-test", &created.id).await.unwrap();
         let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
-        mark_member_runtime_ready(&session, &worker.slot_id);
+        mark_member_runtime_ready(&session, &worker.slot_id, false);
         assert!(session.scheduler().take_needs_role_prompt(&worker.slot_id).await);
         session
             .mailbox()
@@ -4153,7 +4337,7 @@ mod tests {
             .unwrap();
         svc.ensure_session("user-test", &created.id).await.unwrap();
         let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
-        mark_member_runtime_ready(&session, &worker.slot_id);
+        mark_member_runtime_ready(&session, &worker.slot_id, false);
         let lease = session
             .work_coordinator()
             .acquire_enqueue(EnqueueRequest {
@@ -4239,7 +4423,7 @@ mod tests {
             .unwrap();
         svc.ensure_session("user-test", &created.id).await.unwrap();
         let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
-        mark_member_runtime_ready(&session, &worker.slot_id);
+        mark_member_runtime_ready(&session, &worker.slot_id, false);
         task_manager.insert_mode_agent(&worker.conversation_id);
         conv_repo.mark_runtime_attach_failed(&worker.conversation_id);
 

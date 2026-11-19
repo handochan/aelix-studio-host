@@ -231,7 +231,7 @@ impl<'a> SessionContextBuilder<'a> {
         &self,
         row: &ConversationRow,
         extra: serde_json::Value,
-        team: Option<TeamSessionBinding>,
+        mut team: Option<TeamSessionBinding>,
     ) -> Result<AcpSessionBuildContext, ConversationError> {
         let mut config: AcpBuildExtra =
             serde_json::from_value(extra.clone()).map_err(|e| ConversationError::BadRequest {
@@ -262,6 +262,10 @@ impl<'a> SessionContextBuilder<'a> {
             .map_err(|e| ConversationError::internal(format!("Failed to load acp_session row: {e}")))?;
         self.resolve_acp_identity(row, &mut config, &extra, session_row.as_ref())
             .await?;
+        if let Some(binding) = &mut team {
+            binding.runtime_seed.selected_permission_mode =
+                session_row.as_ref().and_then(|row| row.team_permission_mode.clone());
+        }
         let session_id = guarded_resume_id(&config, session_row.as_ref())?;
         let session_snapshot = self
             .load_acp_session_snapshot(&row.user_id, &row.id, &config, session_id.as_deref())

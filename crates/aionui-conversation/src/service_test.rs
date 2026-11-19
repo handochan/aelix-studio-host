@@ -1106,6 +1106,7 @@ impl StubAcpSessionRepo {
             session_id: self.session_id.lock().unwrap().clone(),
             session_status: "idle".into(),
             session_config: "{}".into(),
+            team_permission_mode: None,
             last_active_at: None,
             suspended_at: None,
         }
@@ -1122,6 +1123,15 @@ struct CreateAcpSessionCall {
 
 #[async_trait::async_trait]
 impl IAcpSessionRepository for StubAcpSessionRepo {
+    async fn set_team_permission_mode(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _mode: &str,
+    ) -> Result<bool, aionui_db::DbError> {
+        Ok(false)
+    }
+
     async fn get_for_user(&self, _user_id: &str, conversation_id: &str) -> Result<Option<AcpSessionRow>, DbError> {
         Ok(Some(self.row_for(conversation_id)))
     }
@@ -1141,6 +1151,7 @@ impl IAcpSessionRepository for StubAcpSessionRepo {
             session_id: self.session_id.lock().unwrap().clone(),
             session_status: "idle".into(),
             session_config: "{}".into(),
+            team_permission_mode: None,
             last_active_at: None,
             suspended_at: None,
         })
@@ -3261,6 +3272,7 @@ impl IMockAgent for MockAgent {
             return Ok(response);
         }
         let response = SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::Observed,
             config_options: Some(self.config_options.lock().unwrap().clone()),
         };
@@ -5060,6 +5072,7 @@ async fn command_ack_does_not_persist_assistant_preference_in_core_service() {
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let agent = Arc::new(
         MockAgent::new(&conv.id).with_set_config_option_response(SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::CommandAck,
             config_options: None,
         }),
@@ -5119,6 +5132,7 @@ async fn pending_next_turn_still_persists_the_users_choice() {
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "assistant-acp-auto").await;
     let agent = Arc::new(
         MockAgent::new(&conv.id).with_set_config_option_response(SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::PendingNextTurn,
             config_options: Some(vec![AcpConfigOptionDto {
                 id: "mode".to_owned(),
@@ -5493,6 +5507,7 @@ async fn set_config_option_command_ack_does_not_persist_assistant_preference() {
     let conv = create_assistant_backed_conversation(&svc, "user_1", Some("acp"), "codex", "assistant-acp-ack").await;
     let agent = Arc::new(
         MockAgent::new(&conv.id).with_set_config_option_response(SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::CommandAck,
             config_options: None,
         }),

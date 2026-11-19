@@ -608,6 +608,7 @@ impl AionrsAgentManager {
 
         self.set_mode(value).await?;
         Ok(SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::Observed,
             config_options: Some(self.config_options().await?.config_options),
         })

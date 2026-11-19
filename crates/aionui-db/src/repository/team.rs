@@ -27,6 +27,7 @@ pub struct UpdateTeamParams {
     pub agents: Option<String>,
     pub lead_agent_id: Option<String>,
     pub session_mode: Option<String>,
+    pub aelix_permission_mode: Option<String>,
     /// Project binding (project-bind side branch); `Some` sets the column.
     pub project_id: Option<String>,
     pub folder_id: Option<String>,

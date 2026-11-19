@@ -18,11 +18,11 @@ use aionui_cron::{CronEventEmitter, CronRouterState, service::CronServiceDeps};
 use aionui_db::{
     IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
     IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository, IConversationRepository,
-    IProviderRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
-    SqliteAssistantRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
-    SqliteFeedbackDiagnosticsRepository, SqliteProviderRepository, SqliteRemoteAgentRepository,
-    SqliteSettingsRepository,
+    IProviderRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
+    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository,
+    SqliteAssistantPreferenceRepository, SqliteAssistantRepository, SqliteClientPreferenceRepository,
+    SqliteConversationRepository, SqliteFeedbackDiagnosticsRepository, SqliteProviderRepository,
+    SqliteRemoteAgentRepository, SqliteSettingsRepository,
 };
 use aionui_extension::{
     AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
@@ -963,6 +963,7 @@ pub fn build_team_state(
         conv_service,
         conv_repo,
         Arc::new(SqliteAgentMetadataRepository::new(services.database.pool().clone())),
+        Arc::new(SqliteAcpSessionRepository::new(services.database.pool().clone())),
         services.worker_task_manager.clone(),
     ));
     let conversation_port: Arc<dyn TeamConversationProvisioningPort> = adapters.clone();

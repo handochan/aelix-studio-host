@@ -740,6 +740,7 @@ impl TeamConversationProvisioningPort for FakeConversationPorts {
             });
         }
         Ok(SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::PendingNextTurn,
             config_options: Some(options),
         })
@@ -2843,6 +2844,7 @@ async fn renew_active_lease_allows_empty_team_without_unrelated_lease() {
             agents: "[]".into(),
             lead_agent_id: None,
             session_mode: None,
+            aelix_permission_mode: None,
             agents_version: "1.0.1".into(),
             created_at: aionui_common::now_ms(),
             updated_at: aionui_common::now_ms(),
@@ -8483,6 +8485,7 @@ fn activity_team_row(id: &str, user_id: &str) -> aionui_db::models::TeamRow {
         agents: "[]".into(),
         lead_agent_id: None,
         session_mode: None,
+        aelix_permission_mode: None,
         agents_version: "1.0.1".into(),
         created_at: aionui_common::now_ms(),
         updated_at: aionui_common::now_ms(),

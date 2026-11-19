@@ -234,6 +234,7 @@ impl TeamSessionBinding {
             runtime_seed: TeamRuntimeSeed {
                 backend: extra_string_field(extra, "backend"),
                 session_mode: extra_string_field(extra, "session_mode"),
+                selected_permission_mode: None,
                 current_model_id: extra_string_field(extra, "current_model_id"),
             },
             mcp,
@@ -261,6 +262,9 @@ pub struct TeamRuntimeSeed {
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<String>,
+    /// Explicit Team selection, separate from the historical backend default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_model_id: Option<String>,
 }

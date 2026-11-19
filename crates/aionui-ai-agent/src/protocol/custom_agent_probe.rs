@@ -58,10 +58,8 @@ pub async fn try_connect_custom_agent(
 /// As [`try_connect_custom_agent`], plus the catalog the probe's `session/new`
 /// advertised. The probe already pays for a full spawn + `initialize` +
 /// `session/new`; callers that persist agent metadata use this variant so that
-/// data is stored instead of thrown away. The partial is `Some` only on a
-/// successful session whose agent advertised at least one of modes / models /
-/// config options — an auth-gated or failing probe yields `None`, never an
-/// empty write that would blank an existing catalog.
+/// data is stored instead of thrown away. Auth-gated or failed probes do not
+/// provide a catalog.
 pub async fn try_connect_custom_agent_with_catalog(
     command: &str,
     args: &[String],
@@ -276,14 +274,16 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
             let models = legacy_models
                 .as_ref()
                 .and_then(crate::manager::acp::legacy_session_model::LegacySessionModelState::from_state_value);
-            ProbeOutcome::Ok(
-                crate::manager::acp::catalog_forwarder::catalog_partial_from_session_new(
-                    response.modes.as_ref(),
-                    models.as_ref(),
-                    response.config_options.as_deref(),
-                )
-                .map(Box::new),
+            let mut catalog = crate::manager::acp::catalog_forwarder::catalog_partial_from_session_new(
+                response.modes.as_ref(),
+                models.as_ref(),
+                response.config_options.as_deref(),
             )
+            .unwrap_or_default();
+            catalog.agent_capabilities = protocol
+                .agent_capabilities()
+                .and_then(|caps| crate::manager::acp::sdk_to_snake_value(&caps));
+            ProbeOutcome::Ok(Some(Box::new(catalog)))
         }
         Err(AcpError::AuthRequired) => {
             ProbeOutcome::Auth("Agent reachable but requires login/authorization".to_string())
