@@ -2293,6 +2293,36 @@ for line in sys.stdin:
     attach(&roster[0], "runtime/restart").await;
     assert_eq!(mode(&roster[0]).await, "default");
 
+    // A stored full-auto request on the shared Cron turn path must preserve
+    // the Aelix Team policy as well.
+    let conversation_id = roster[1]["conversation_id"].as_str().unwrap();
+    let owner = services
+        .conversation_repo
+        .owner_user_id(conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let scheduled = services
+        .conversation_service
+        .run_agent_turn(aionui_conversation::ConversationAgentTurnRequest {
+            user_id: owner,
+            conversation_id: conversation_id.to_owned(),
+            content: "Run the scheduled Team turn".to_owned(),
+            files: vec![],
+            inject_skills: vec![],
+            required_runtime_mode: Some("yolo".to_owned()),
+            persist_user_message: true,
+            user_message_hidden: true,
+            on_started: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduled.status,
+        aionui_conversation::ConversationAgentTurnStatus::Completed
+    );
+    assert_eq!(mode(&roster[1]).await, "default");
+
     let added = app
         .clone()
         .oneshot(json_with_token(

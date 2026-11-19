@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use aionui_ai_agent::IWorkerTaskManager;
+use aionui_ai_agent::{AgentInstance, IWorkerTaskManager};
 use aionui_api_types::{
     AssistantConversationRequest, CreateConversationRequest, GetConfigOptionsResponse, McpRuntimeSnapshot,
     SetConfigOptionRequest, SetConfigOptionResponse, TeamMcpSelection,
@@ -739,6 +739,13 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
             self.conversation_repo
                 .set_aionrs_team_permission_mode(&user_id, conversation_id, mode)
                 .await?;
+            if let Some(AgentInstance::Aionrs(manager)) = self.task_manager.get_task(conversation_id) {
+                manager
+                    .refresh_team_permission_mode()
+                    .await
+                    .map_err(ConversationError::from)
+                    .map_err(map_conversation_update_error)?;
+            }
             return Ok(());
         }
         if self.ensure_team_permission_storage(&user_id, conversation_id).await?

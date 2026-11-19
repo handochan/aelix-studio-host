@@ -54,17 +54,18 @@ pub(super) async fn build(
 ) -> Result<AgentInstance, AgentError> {
     let mut overrides = build_context.config;
     let team_managed_permissions = build_context.belongs_to_team;
-    if team_managed_permissions {
-        let repository = deps
-            .conversation_repo
-            .as_ref()
-            .ok_or_else(|| AgentError::internal("Aionrs Team permission storage is unavailable"))?;
-        let selected = repository
-            .aionrs_team_permission_mode(&ctx.user_id, &ctx.conversation_id)
-            .await
-            .map_err(|error| AgentError::internal(format!("Failed to load Aionrs Team permission: {error}")))?;
-        overrides.session_mode = Some(selected.unwrap_or_else(|| "default".to_owned()));
-    }
+    let team_permission_repo = if team_managed_permissions {
+        // Bootstrap can await MCP initialization. Load the committed permission
+        // at use time, after bootstrap, so a selection during that wait wins.
+        overrides.session_mode = Some("default".to_owned());
+        Some(
+            deps.conversation_repo
+                .clone()
+                .ok_or_else(|| AgentError::internal("Aionrs Team permission storage is unavailable"))?,
+        )
+    } else {
+        None
+    };
     let resolved_skills = overrides.skills.clone();
 
     // Merge preset assistant rules into system_prompt (used as custom_prompt
@@ -250,7 +251,10 @@ pub(super) async fn build(
         }
     }
 
-    let agent = AionrsAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session).await?;
+    let mut agent = AionrsAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session).await?;
+    if let Some(repository) = team_permission_repo {
+        agent = agent.with_team_permission_store(ctx.user_id, repository);
+    }
     Ok(AgentInstance::Aionrs(Arc::new(agent)))
 }
 
