@@ -338,6 +338,7 @@ pub struct ConversationService {
     /// conversation create/read behaves exactly as before.
     project_service: Arc<RwLock<Option<Arc<ProjectService>>>>,
     runtime_state: Arc<ConversationRuntimeStateService>,
+    pub(crate) acp_extension_limits: Arc<crate::acp_extension::ExtensionLimits>,
     runtime_helper_bin: Option<String>,
     runtime_base_url: Option<String>,
     runtime_token_service: Option<Arc<RuntimeTokenService>>,
@@ -422,6 +423,7 @@ impl ConversationService {
             agent_availability_feedback: Arc::new(RwLock::new(None)),
             project_service: Arc::new(RwLock::new(None)),
             runtime_state: Arc::new(ConversationRuntimeStateService::default()),
+            acp_extension_limits: Arc::default(),
             runtime_helper_bin: None,
             runtime_base_url: None,
             runtime_token_service: None,
@@ -4027,19 +4029,12 @@ impl ConversationService {
 
             info!(msg_id = %user_msg_id, "User message persisted");
 
-            self.broadcaster.broadcast(WebSocketMessage::new(
-                "message.userCreated",
-                serde_json::json!({
-                    "user_id": user_id,
-                    "conversation_id": conversation_id,
-                    "msg_id": &user_msg_id,
-                    "content": &resolved.content,
-                    "position": "right",
-                    "status": "finish",
-                    "hidden": req.hidden,
-                    "created_at": user_msg.created_at,
-                }),
-            ));
+            crate::message_persistence::broadcast_finished_user_message(
+                self.broadcaster.as_ref(),
+                user_id,
+                &user_msg,
+                &resolved.content,
+            );
         }
 
         // Build task options from conversation row

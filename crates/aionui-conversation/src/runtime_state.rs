@@ -189,6 +189,18 @@ impl ConversationRuntimeStateService {
         }
     }
 
+    /// Serialize the SDK handoff with delete, restart and shutdown admission.
+    pub(crate) fn with_relay_admission<T>(&self, id: &str, dispatch: impl FnOnce() -> T) -> Option<T> {
+        let state = self.state.lock().ok()?;
+        if state.shutting_down
+            || state.deleting_conversations.contains(id)
+            || state.restarting_conversations.contains(id)
+        {
+            return None;
+        }
+        Some(dispatch())
+    }
+
     pub fn mark_deleting(&self, conversation_id: &str) -> bool {
         match self.state.lock() {
             Ok(mut state) => {

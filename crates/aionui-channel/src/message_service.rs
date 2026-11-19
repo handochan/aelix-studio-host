@@ -251,6 +251,7 @@ impl ChannelMessageService {
             | AgentStreamEvent::AcpDialectSignal(_)
             // Internal-only correlation frame for mid-turn interjection; never
             // user-facing (consumed by the conversation layer's watcher).
+            | AgentStreamEvent::AcpConsumedUserInput { .. }
             | AgentStreamEvent::MessageLifecycle(_) => None,
         }
     }

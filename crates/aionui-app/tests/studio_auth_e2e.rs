@@ -513,3 +513,7 @@ async fn helper_rename_changes_only_the_name_of_its_own_conversation() {
     assert_eq!(current["data"]["name"], "Renamed");
     assert_eq!(current["data"]["extra"]["fixture_key"], "original");
 }
+
+#[cfg(unix)]
+#[path = "studio_auth_e2e/acp_relay.rs"]
+mod acp_relay;

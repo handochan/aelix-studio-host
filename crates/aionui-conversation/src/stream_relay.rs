@@ -296,6 +296,8 @@ impl StreamRelay {
 
         let mut full_text_buffer = String::new();
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
+        let mut last_segment_at = now_ms();
+        let mut next_segment_at = 0;
         let mut active_text: Option<TextSegmentState> = None;
         let mut active_thinking: Option<ThinkingSegmentState> = None;
         let mut used_primary_segment_msg_id = false;
@@ -381,6 +383,18 @@ impl StreamRelay {
                             self.close_active_text_segment(&mut active_text, &mut text_segments, "finish")
                                 .await;
                         }
+                        AgentStreamEvent::AcpConsumedUserInput { turn_id, text } => {
+                            if turn_id != &self.turn_id {
+                                continue;
+                            }
+                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.close_active_text_segment(&mut active_text, &mut text_segments, "finish").await;
+                            let created_at = now_ms().max(last_segment_at + 1).max(next_segment_at);
+                            attempt.saw_tool_or_side_effect = true;
+                            if self.adapter.persist_consumed_user_input(text, created_at, self.broadcaster.as_ref()).await {
+                                next_segment_at = created_at + 1;
+                            }
+                        }
                         AgentStreamEvent::AcpDialectSignal(_) => {
                             // Internal-only turn/near-window signal (see
                             // AgentStreamEvent::AcpDialectSignal): consumed by the ACP
@@ -443,8 +457,9 @@ impl StreamRelay {
                             let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
                                 id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
                                 buffer: String::new(),
-                                started_at: now_ms(),
+                                started_at: now_ms().max(next_segment_at),
                             });
+                            last_segment_at = last_segment_at.max(segment.started_at);
                             segment.buffer.push_str(&data.content);
                             self.forward_to_websocket_with_msg_id(&segment.id, &event);
                         }
@@ -470,10 +485,11 @@ impl StreamRelay {
                             let segment = active_text.get_or_insert_with(|| TextSegmentState {
                                 id: Self::mint_segment_msg_id(&mut used_primary_segment_msg_id, &self.msg_id),
                                 buffer: String::new(),
-                                created_at: now_ms(),
+                                created_at: now_ms().max(next_segment_at),
                                 record_created: false,
                                 flush_counter: 0,
                             });
+                            last_segment_at = last_segment_at.max(segment.created_at);
                             self.forward_to_websocket_with_msg_id(&segment.id, &event);
                             segment.buffer.push_str(&data.content);
                             full_text_buffer.push_str(&data.content);
@@ -822,6 +838,7 @@ impl StreamRelay {
             AgentStreamEvent::WorkflowProgress(_) => "WorkflowProgress",
             AgentStreamEvent::AcpDialectSignal(_) => "AcpDialectSignal",
             AgentStreamEvent::MessageLifecycle(_) => "MessageLifecycle",
+            AgentStreamEvent::AcpConsumedUserInput { .. } => "AcpConsumedUserInput",
         }
     }
 

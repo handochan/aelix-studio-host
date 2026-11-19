@@ -142,7 +142,7 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 
 | PR | 선행과 완료 조건 |
 | --- | --- |
-| H1 · host 요청과 표준 입력 이력 | U5-b의 두 조건, protected admission, binding, v1 발견/POST, 동시 요청·결과 불명 경계를 구현한다. U6-a의 live user chunk 저장·표시, 원래 prompt 중복 방지, load 억제, prompt 종료 fence를 **같은 PR**에서 검증한다. H1은 요청만 협상한다. 바이트 측정과 큰 표준 프레임 회귀를 이 PR에 첨부한다. |
+| H1 · host 요청과 표준 입력 이력 | U5-b의 두 조건, protected admission, binding, v1 발견/POST, 동시 요청·결과 불명 경계를 구현한다. U6-a의 live user chunk 저장·표시, 원래 prompt 중복 방지, load 억제, prompt 종료 fence를 **같은 PR**에서 검증한다. H1은 요청만 협상한다. [바이트 측정과 큰 표준 프레임 회귀](stdio-measurement.md)를 이 PR에 첨부한다. |
 | A1 · #24 ACP | H1 계약을 기준으로 state/steer/follow-up, 쓰기 requestId 처리와 기존 결과 전용 requests/lookup, 소비 시 표준 chunk와 prompt 완료 순서, 승인된 광고 snapshot을 구현한다. H2와 병행할 수 있다. |
 | Studio #24 | **H1 + A1의 branch SHA**로 독립 클라이언트와 기존 입력 UI를 연결한다. desktop·로그인 WebUI에서 실제 입력, 늦은 큐 표시, 소유자의 재열기 이력, 표준 Stop을 검증한다. H2와 supervisor 변경은 선행이 아니다. |
 | H2 · host 확장 알림 | H1 위에 기존 realtime router의 인증된 구독·nonce 검사·ordered unicast·폐기·backpressure를 붙인다. 통과한 조합만 notifications=true를 광고한다. H2 병합 전에도 #24는 H1으로 검증한다. `AppServices`가 조립하며 별도 port·worker는 두지 않는다(D12). |

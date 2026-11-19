@@ -23,6 +23,10 @@ impl CliAgentProcess {
     /// - stderr buffering
     /// - Process exit monitoring
     pub async fn spawn_for_sdk(config: CommandSpec) -> Result<Self, AgentError> {
+        Self::spawn_sdk(config, true).await
+    }
+
+    pub(crate) async fn spawn_sdk(config: CommandSpec, capture_stderr: bool) -> Result<Self, AgentError> {
         let mut cmd = CmdBuilder::new(&config.command);
         let agent_env = aionui_runtime::agent_process_env().await;
         cmd.args(&config.args)
@@ -31,7 +35,11 @@ impl CliAgentProcess {
             .envs(config.env.iter().map(|e| (&e.name, &e.value)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(if capture_stderr {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            });
 
         if let Some(ref cwd) = config.cwd {
             cmd.current_dir(prepare_command_cwd(cwd)?);
@@ -53,10 +61,7 @@ impl CliAgentProcess {
             error!(pid, "Failed to capture stdout from child process");
             AgentError::internal("Failed to capture stdout from child process")
         })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            error!(pid, "Failed to capture stderr from child process");
-            AgentError::internal("Failed to capture stderr from child process")
-        })?;
+        let stderr = child.stderr.take();
         let stdin = child.stdin.take().ok_or_else(|| {
             error!(pid, "Failed to capture stdin for child process");
             AgentError::internal("Failed to capture stdin for child process")
@@ -68,6 +73,7 @@ impl CliAgentProcess {
         let stderr_buffer = Arc::new(Mutex::new(String::new()));
         let stderr_buf_clone = Arc::clone(&stderr_buffer);
         let stderr_handle = tokio::spawn(async move {
+            let Some(stderr) = stderr else { return };
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
 

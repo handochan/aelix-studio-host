@@ -1,6 +1,7 @@
 pub(crate) mod acp;
 pub(crate) mod acp_dialect;
 pub(crate) mod acp_init_budget;
+pub mod acp_relay;
 
 pub(crate) mod custom_agent_probe;
 pub(crate) mod error;

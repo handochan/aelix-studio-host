@@ -390,3 +390,26 @@ mod tests {
         }
     }
 }
+
+/// Negotiated request-only ACP session extension surface.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpExtensionDiscovery {
+    pub version: u32,
+    pub binding_id: String,
+    pub requests: Vec<String>,
+    pub notifications: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcpExtensionRequest {
+    pub binding_id: String,
+    pub method: String,
+    pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct AcpExtensionResult {
+    pub result: serde_json::Value,
+}

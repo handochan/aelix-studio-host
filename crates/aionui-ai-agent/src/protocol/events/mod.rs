@@ -78,6 +78,13 @@ pub enum AgentStreamEvent {
     /// under one turn). The relay consumes it internally and never forwards it
     /// to the WebSocket, so no frontend renderer is required.
     SegmentBreak,
+    /// A complete standard user chunk received during the bound ACP prompt.
+    /// The conversation relay persists it through the normal user history path.
+    #[serde(skip)]
+    AcpConsumedUserInput {
+        turn_id: String,
+        text: String,
+    },
     /// Internal-only: the backend's OWN id for the turn that just started
     /// (codex `turn/started` → `Turn.id`). The relay consumes it to stamp
     /// `messages.backend_turn_id` on every row it persists for this turn — the

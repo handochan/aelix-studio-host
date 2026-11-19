@@ -27,14 +27,13 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AGENT_METHOD_NAMES, AuthenticateResponse, ClientCapabilities, ClientNotification, ClientRequest,
-    ClientSessionCapabilities, CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse, ExtResponse,
-    ForkSessionResponse, Implementation, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
-    LoadSessionResponse, PromptResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome,
-    SessionConfigOptionsCapabilities, SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse,
-    TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse,
+    AGENT_METHOD_NAMES, AuthenticateResponse, ClientCapabilities, ClientNotification, ClientSessionCapabilities,
+    CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse, ForkSessionResponse, Implementation,
+    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionResponse, PromptResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigOptionsCapabilities,
+    SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse, TerminalExitStatus,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Lines, Responder, UntypedMessage, on_receive_notification, on_receive_request,
@@ -48,12 +47,13 @@ use tracing::{debug, info, warn};
 
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
+use crate::protocol::acp_relay::{self, RelayCall, RelayConnection, RelayError};
 use crate::protocol::error::AcpError;
 use crate::protocol::events::{self as stream_event, AgentStreamEvent};
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, CloseSessionRequest, ExtNotification,
-    ExtRequest, ForkSessionRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    ForkSessionRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
     SetSessionModeRequest,
 };
@@ -162,6 +162,7 @@ pub struct AcpProtocol {
     /// Shared with the SDK background task's request handlers; torn down
     /// (all processes killed) when the protocol drops.
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
+    relay: Arc<RelayConnection>,
 }
 
 #[allow(dead_code)] // Full ACP method set; some methods await wiring (fork, close, list, auth, ext).
@@ -185,8 +186,10 @@ impl AcpProtocol {
         terminal_label: &str,
         terminal_cwd: Option<std::path::PathBuf>,
         init_budget: InitBudget,
+        relay_candidate: bool,
     ) -> Result<Self, AcpError> {
         let alive = Arc::new(AtomicBool::new(true));
+        let relay = Arc::new(RelayConnection::new(relay_candidate));
         let replay_suppression = Arc::new(AtomicBool::new(false));
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
@@ -215,6 +218,7 @@ impl AcpProtocol {
             Arc::clone(&alive),
             Arc::clone(&replay_suppression),
             Arc::clone(&terminal_registry),
+            Arc::clone(&relay),
         ));
 
         // Wait for init to complete with timeout.
@@ -253,6 +257,7 @@ impl AcpProtocol {
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
             replay_suppression,
             terminal_registry,
+            relay,
         })
     }
 
@@ -291,10 +296,16 @@ impl AcpProtocol {
     /// parsing (typed parsing alone would silently drop it).
     pub async fn new_session(
         &self,
-        req: NewSessionRequest,
+        mut req: NewSessionRequest,
     ) -> Result<(NewSessionResponse, Option<serde_json::Value>), AcpError> {
-        self.send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
-            .await
+        let nonce = self.relay.prepare_open(&mut req.meta);
+        let (response, models) = self
+            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
+            .await?;
+        let response: NewSessionResponse = response;
+        self.relay
+            .opened(response.session_id.clone(), nonce, response.meta.as_ref());
+        Ok((response, models))
     }
 
     /// Load (resume) an existing ACP session.
@@ -315,16 +326,26 @@ impl AcpProtocol {
     /// alongside the typed response for legacy-surface agents.
     pub async fn load_session(
         &self,
-        req: LoadSessionRequest,
+        mut req: LoadSessionRequest,
     ) -> Result<(LoadSessionResponse, Option<serde_json::Value>), AcpError> {
         let _guard = ReplaySuppressionGuard::new(&self.replay_suppression);
-        self.send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
-            .await
+        let nonce = self.relay.prepare_open(&mut req.meta);
+        let sid = req.session_id.clone();
+        let (response, models) = self
+            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
+            .await?;
+        let response: LoadSessionResponse = response;
+        self.relay.opened(sid, nonce, response.meta.as_ref());
+        Ok((response, models))
     }
 
     /// Fork an existing ACP session into a new session.
-    pub async fn fork_session(&self, req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_fork).await
+    pub async fn fork_session(&self, mut req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
+        let nonce = self.relay.prepare_open(&mut req.meta);
+        let response = self.send_request(req, AGENT_METHOD_NAMES.session_fork).await?;
+        self.relay
+            .opened(response.session_id.clone(), nonce, response.meta.as_ref());
+        Ok(response)
     }
 
     /// Resume an existing ACP session.
@@ -334,6 +355,7 @@ impl AcpProtocol {
 
     /// Close an ACP session.
     pub async fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, AcpError> {
+        self.relay.invalidate();
         self.send_request(req, AGENT_METHOD_NAMES.session_close).await
     }
 
@@ -341,14 +363,40 @@ impl AcpProtocol {
     ///
     /// Blocks until the agent returns a `PromptResponse` (turn completed).
     /// Streaming events arrive via the `event_tx` broadcast channel.
-    pub async fn prompt(&self, req: PromptRequest) -> Result<PromptResponse, AcpError> {
+    pub async fn prompt(&self, req: PromptRequest, turn_id: Option<&str>) -> Result<PromptResponse, AcpError> {
         // A failure observed before handing the prompt to the SDK retains the
         // existing retry policy. After handoff there is no delivery receipt:
         // connection loss cannot prove that the agent did not execute it.
         self.ensure_connected()?;
         let method = AGENT_METHOD_NAMES.session_prompt;
         log_client_request(method, &json_str(&req));
-        let rsp = self.connection.send_request(req).block_task().await;
+        let rsp = if let Some(turn_id) = turn_id.filter(|_| self.relay.candidate) {
+            let (tx, rx) = oneshot::channel();
+            let relay = self.relay.clone();
+            let turn_id = turn_id.to_owned();
+            let reply_turn = turn_id.clone();
+            let sid = req.session_id.clone();
+            let registered = self.relay.begin_prompt(&sid, &turn_id, || {
+                let sent = self.connection.send_request(req);
+                let id = sent.id().clone();
+                let registered = sent.on_receiving_result(async move |result| {
+                    relay.end_prompt(&reply_turn);
+                    let _ = tx.send(result);
+                    Ok(())
+                });
+                (id, registered)
+            });
+            let result = match registered {
+                Ok(()) => rx
+                    .await
+                    .unwrap_or_else(|_| Err(agent_client_protocol::Error::internal_error())),
+                Err(error) => Err(error),
+            };
+            self.relay.end_prompt(&turn_id);
+            result
+        } else {
+            self.connection.send_request(req).block_task().await
+        };
         log_agent_response(method, &json_or_err(&rsp));
         rsp.map_err(|err| {
             let transport_closed = agent_client_protocol::is_incoming_transport_closed(&err) || !self.is_connected();
@@ -426,20 +474,48 @@ impl AcpProtocol {
         self.send_request(req, AGENT_METHOD_NAMES.authenticate).await
     }
 
-    /// Send an extension request (method name must start with `_`).
-    ///
-    /// Returns the raw JSON response value from the agent.
-    pub async fn ext_request(&self, req: ExtRequest) -> Result<ExtResponse, AcpError> {
-        self.ensure_connected()?;
-        let method = format!("_{}", req.method);
-        let wrapped = ClientRequest::ExtMethodRequest(req);
-        let value = self.send_request(wrapped, &method).await?;
-        let raw = serde_json::value::to_raw_value(&value).map_err(|e| AcpError::AgentInternal {
-            message: format!("Failed to convert ext response: {e}"),
-            code: -32603,
-            data: None,
+    pub fn relay_discovery(&self) -> Result<aionui_api_types::AcpExtensionDiscovery, RelayError> {
+        if !self.is_connected() {
+            return Err(RelayError::NoLiveTask);
+        }
+        self.relay.discovery()
+    }
+
+    pub fn relay_dispatch(&self, request: aionui_api_types::AcpExtensionRequest) -> Result<RelayCall, RelayError> {
+        if !self.is_connected() {
+            return Err(RelayError::StaleBinding);
+        }
+        let mut sent = None;
+        let mut call = self.relay.dispatch(request, |method| {
+            // The SDK allocates and owns the ID. Sensitive params are inserted
+            // at the wire sink, after the SDK's outgoing tracing.
+            let request = UntypedMessage::new(method, serde_json::json!({})).expect("empty JSON object");
+            let sdk_request = self.connection.send_request(request);
+            let id = sdk_request.id().clone();
+            sent = Some(sdk_request);
+            id
         })?;
-        Ok(ExtResponse::new(raw.into()))
+        let sent = sent.expect("dispatched SDK request");
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let wire_reply = std::mem::replace(&mut call.reply, reply_rx);
+        let relay = self.relay.clone();
+        tokio::spawn(async move {
+            let id = sent.id().clone();
+            // Retain the budget until the SDK has actually reclaimed its
+            // pending ID, including when a standard update holds dispatch.
+            let result = if sent.block_task().await.is_ok() {
+                wire_reply.await.unwrap_or(Err(RelayError::TransportUnknown))
+            } else {
+                relay.discard_request(&id);
+                Err(RelayError::TransportUnknown)
+            };
+            let _ = reply_tx.send(result);
+        });
+        Ok(call)
+    }
+
+    pub(crate) fn invalidate_relay(&self) {
+        self.relay.invalidate();
     }
 
     /// Send an extension notification (fire-and-forget, method name must start with `_`).
@@ -641,6 +717,7 @@ async fn run_sdk_background(
     alive: Arc<AtomicBool>,
     replay_suppression: Arc<AtomicBool>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
+    relay: Arc<RelayConnection>,
 ) {
     // Tolerant transport: intercept incoming lines *before* the SDK parses them
     // so CodeBuddy's non-standard dialect notifications (`session_end` /
@@ -654,7 +731,16 @@ async fn run_sdk_background(
     let dialect_event_tx = event_tx.clone();
     let incoming_alive = Arc::clone(&alive);
     let eof_alive = Arc::clone(&alive);
-    let incoming = FramedRead::new(stdout, LinesCodec::new())
+    let wire_in = relay.clone();
+    let candidate = relay.candidate;
+    let incoming = FramedRead::new(stdout, acp_relay::stdio_codec(candidate))
+        .map(move |line| {
+            if candidate {
+                line.and_then(acp_relay::check_stdio_line)
+            } else {
+                line
+            }
+        })
         .map_err(std::io::Error::other)
         .inspect(move |line| {
             if line.is_err() {
@@ -669,7 +755,12 @@ async fn run_sdk_background(
         }))
         .filter_map(move |line: std::io::Result<String>| {
             let dialect_event_tx = dialect_event_tx.clone();
+            let wire = wire_in.clone();
             async move {
+                let line = match line {
+                    Ok(line) if wire.candidate => Ok(wire.incoming(line)?),
+                    other => other,
+                };
                 match line {
                     Ok(line) => match acp_dialect::classify_incoming_line(&line) {
                         acp_dialect::LineDisposition::Forward(line) => Some(Ok(line)),
@@ -696,6 +787,17 @@ async fn run_sdk_background(
         outgoing_alive.store(false, Ordering::Release);
         std::io::Error::other(err)
     });
+    let wire_out = relay.clone();
+    let outgoing = outgoing.with(move |line| {
+        let line = wire_out.outgoing(line).and_then(|line| {
+            if wire_out.candidate {
+                acp_relay::check_stdio_line(line).map_err(std::io::Error::other)
+            } else {
+                Ok(line)
+            }
+        });
+        futures_util::future::ready(line)
+    });
     let transport = Lines::new(outgoing, incoming);
 
     // `init_tx` / `ready_tx` are consumed inside the main_fn closure; wrap
@@ -706,6 +808,7 @@ async fn run_sdk_background(
     let phase = Arc::new(Mutex::new(AcpConnectionPhase::Starting));
     let phase_for_main = Arc::clone(&phase);
 
+    let handshake_relay = relay.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -713,6 +816,7 @@ async fn run_sdk_background(
                 let event_tx = event_tx.clone();
                 let notification_tx = notification_tx.clone();
                 let replay_suppression = Arc::clone(&replay_suppression);
+                let relay = relay.clone();
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
                     // Fan out the raw SDK notification to the manager's apply-loop
                     // FIRST, so session state is consistent by the time the UI
@@ -728,7 +832,16 @@ async fn run_sdk_background(
                     // notification_tx (event_tracker still needs metadata like
                     // available_commands_update), but skip the UI broadcast.
                     if !replay_suppression.load(Ordering::Acquire) {
-                        handle_session_notification(notification, &event_tx).await;
+                        if matches!(
+                            notification.update,
+                            agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(_)
+                        ) {
+                            if let Some(event) = relay.consumed_input(&notification) {
+                                let _ = event_tx.send(event);
+                            }
+                        } else {
+                            handle_session_notification(notification, &event_tx).await;
+                        }
                     }
                     Ok(())
                 }
@@ -800,7 +913,13 @@ async fn run_sdk_background(
             // Step 1 — initialize handshake. main_fn is the canonical place
             // to call `block_task` (see SDK `connect_with` doc example).
             let init_result = {
-                let req = build_initialize_request();
+                let mut req = build_initialize_request();
+                if handshake_relay.candidate {
+                    req.client_capabilities.meta = Some(serde_json::Map::from_iter([(
+                        acp_relay::META_KEY.into(),
+                        serde_json::json!({ "version": 1, "notifications": false }),
+                    )]));
+                }
                 log_client_request("initialize", &json_str(&req));
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::Initializing;
                 let raw = connection.send_request(req).block_task().await;
@@ -813,6 +932,7 @@ async fn run_sdk_background(
             };
             match init_result {
                 Ok(resp) => {
+                    handshake_relay.negotiate(&resp);
                     let _ = tx.send(Ok(resp));
                 }
                 Err(err) => {
@@ -843,6 +963,7 @@ async fn run_sdk_background(
         .await;
 
     alive.store(false, Ordering::Release);
+    relay.disconnected();
 
     let close_phase = *phase.lock().unwrap();
     match result {

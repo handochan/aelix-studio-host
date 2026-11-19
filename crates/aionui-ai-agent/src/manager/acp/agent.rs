@@ -235,8 +235,10 @@ async fn spawn_and_connect_acp_once(
     params: &AcpSessionParams,
     runtime: &AgentRuntime,
 ) -> Result<AcpStartupConnection, AcpStartupConnectError> {
+    let relay_candidate = crate::protocol::acp_relay::is_builtin_aelix(&params.metadata);
+    // Extension content must not reach raw stderr logs or crash diagnostics.
     let process = Arc::new(
-        CliAgentProcess::spawn_for_sdk(params.command_spec.clone())
+        CliAgentProcess::spawn_sdk(params.command_spec.clone(), !relay_candidate)
             .await
             .map_err(AcpStartupConnectError::Agent)?,
     );
@@ -277,6 +279,7 @@ async fn spawn_and_connect_acp_once(
         &params.conversation_id,
         Some(std::path::PathBuf::from(&params.workspace.path)),
         crate::protocol::acp_init_budget::init_budget(&params.command_spec),
+        relay_candidate,
     );
     tokio::pin!(connect_fut);
     let protocol = tokio::select! {
@@ -627,6 +630,23 @@ pub struct AcpAgentManager {
 }
 
 impl AcpAgentManager {
+    pub fn relay_owned_by(&self, owner: &str) -> bool {
+        self.params.user_id == owner
+    }
+
+    pub fn relay_discovery(
+        &self,
+    ) -> Result<aionui_api_types::AcpExtensionDiscovery, crate::protocol::acp_relay::RelayError> {
+        self.protocol.relay_discovery()
+    }
+
+    pub fn relay_dispatch(
+        &self,
+        request: aionui_api_types::AcpExtensionRequest,
+    ) -> Result<crate::protocol::acp_relay::RelayCall, crate::protocol::acp_relay::RelayError> {
+        self.protocol.relay_dispatch(request)
+    }
+
     pub fn with_session_repository(mut self, repo: Arc<dyn aionui_db::IAcpSessionRepository>) -> Self {
         self.session_repo = Some(repo);
         self
@@ -1689,6 +1709,7 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
 
         // Mark closing to prevent reconnect attempts
         self.permission_router.set_closing();
+        self.protocol.invalidate_relay();
 
         let backend = self.params.metadata.backend.as_deref().unwrap_or("unknown");
         let pid = self.process.pid();
