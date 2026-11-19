@@ -7,7 +7,7 @@ use aionui_ai_agent::session_context::{AgentSessionContext, AgentSessionKind};
 use aionui_ai_agent::types::BuildTaskOptions;
 use aionui_ai_agent::{
     ActiveLeaseRegistry, AgentAvailabilityFeedbackPort, AgentError, AgentInstance, AgentSendError, IWorkerTaskManager,
-    RuntimeTokenScope, RuntimeTokenService, TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
+    RuntimeTokenScope, RuntimeTokenService, TEAM_RUNTIME_TOKEN_SESSION_GENERATION, ViewDeparture,
 };
 
 use crate::message_cursor::{decode_message_cursor, encode_message_cursor};
@@ -4525,6 +4525,7 @@ impl ConversationService {
             });
         };
 
+        let _view_lifecycle = active_leases.lock_conversation(&row.id).await;
         let expires_at = active_leases.renew(&row.id);
         debug!(
             kind = "conversation",
@@ -4549,7 +4550,12 @@ impl ConversationService {
             .ok_or_else(|| ConversationError::NotFound {
                 id: conversation_id.to_owned(),
             })?;
-        active_leases.renew_view(&row.id, view_id);
+        let _view_lifecycle = active_leases.lock_conversation(&row.id).await;
+        if !active_leases.renew_view(&row.id, view_id) {
+            return Err(ConversationError::Busy {
+                reason: "Conversation view is no longer available".into(),
+            });
+        }
         Ok(())
     }
 
@@ -4558,7 +4564,7 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
         view_id: &str,
-        active_leases: &ActiveLeaseRegistry,
+        active_leases: &Arc<ActiveLeaseRegistry>,
     ) -> Result<RuntimeReleaseOutcome, ConversationError> {
         let row = self
             .conversation_repo
@@ -4570,68 +4576,147 @@ impl ConversationService {
         if team_id_from_extra(&row.extra).is_some() {
             return Ok(RuntimeReleaseOutcome::Inactive);
         }
-        if active_leases.retire_view(conversation_id, view_id) {
-            return Ok(RuntimeReleaseOutcome::ViewActive);
-        }
-        let Some(AgentInstance::Acp(agent)) = self.task_manager.get_task(conversation_id) else {
-            return Ok(RuntimeReleaseOutcome::Inactive);
+
+        // Own the departure even if the page closes or its HTTP deadline expires.
+        let service = self.clone();
+        let leases = Arc::clone(active_leases);
+        let view_id = view_id.to_owned();
+        let (first_result, reply) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let id = row.id;
+            let mut lifecycle = leases.lock_conversation(&id).await;
+            let departure = match leases.depart_view(&id, &view_id) {
+                ViewDeparture::LastView(departure) => departure,
+                ViewDeparture::Inactive => {
+                    let _ = first_result.send(Ok(RuntimeReleaseOutcome::Inactive));
+                    return;
+                }
+                ViewDeparture::ViewActive => {
+                    let _ = first_result.send(Ok(RuntimeReleaseOutcome::ViewActive));
+                    return;
+                }
+            };
+            let Some(AgentInstance::Acp(agent)) = service.task_manager.get_task(&id) else {
+                leases.finish_release(&id, departure);
+                let _ = first_result.send(Ok(RuntimeReleaseOutcome::Inactive));
+                return;
+            };
+            if !agent.supports_studio_release() {
+                leases.finish_release(&id, departure);
+                let _ = first_result.send(Ok(RuntimeReleaseOutcome::Inactive));
+                return;
+            }
+
+            let mut first_result = Some(first_result);
+            loop {
+                let result = if leases.release_pending(&id, departure) && service.is_current_release_agent(&id, &agent)
+                {
+                    service.try_release_runtime(&id, &agent).await
+                } else {
+                    Ok(RuntimeReleaseOutcome::Inactive)
+                };
+                let deferred = matches!(result, Ok(RuntimeReleaseOutcome::Deferred));
+                if !deferred {
+                    leases.finish_release(&id, departure);
+                }
+                if let Some(reply) = first_result.take() {
+                    let _ = reply.send(result);
+                }
+                drop(lifecycle);
+                if !deferred {
+                    return;
+                }
+                // Recheck the pending departure and exact runtime after yielding:
+                // a new view, replacement runtime or completed operation can win.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                lifecycle = leases.lock_conversation(&id).await;
+            }
+        });
+        reply
+            .await
+            .map_err(|_| ConversationError::internal("Runtime release task failed"))?
+    }
+
+    fn is_current_release_agent(&self, id: &str, agent: &Arc<aionui_ai_agent::manager::acp::AcpAgentManager>) -> bool {
+        matches!(self.task_manager.get_task(id), Some(AgentInstance::Acp(current)) if Arc::ptr_eq(&current, agent))
+    }
+
+    async fn try_release_runtime(
+        &self,
+        id: &str,
+        agent: &Arc<aionui_ai_agent::manager::acp::AcpAgentManager>,
+    ) -> Result<RuntimeReleaseOutcome, ConversationError> {
+        let busy = || {
+            self.runtime_state.is_claimed(id)
+                || self.runtime_state.is_cancelling(id)
+                || self.task_manager.get_task(id).is_some_and(|task| {
+                    task.status() == Some(ConversationStatus::Running) || task.live_background_tasks() > 0
+                })
         };
-        if !agent.supports_studio_release() {
-            return Ok(RuntimeReleaseOutcome::Inactive);
+        if busy() {
+            return Ok(RuntimeReleaseOutcome::Deferred);
         }
-        if self.runtime_state.is_claimed(conversation_id) || self.runtime_state.is_restarting(conversation_id) {
-            return Ok(RuntimeReleaseOutcome::Busy);
-        }
-        match self.runtime_state.begin_restart(conversation_id) {
+        match self.runtime_state.begin_restart(id) {
             Ok(()) => {}
-            Err(ConversationError::RuntimeRestarting { .. }) => return Ok(RuntimeReleaseOutcome::Busy),
+            Err(ConversationError::RuntimeRestarting { .. }) => return Ok(RuntimeReleaseOutcome::Deferred),
             Err(error) => return Err(error),
         }
-
-        // Finish cache retirement even if the renderer disconnects after sending close.
-        let service = self.clone();
-        let conversation_id = conversation_id.to_owned();
-        tokio::spawn(async move {
-            let result = service.release_admitted_runtime(&conversation_id, &agent).await;
-            service.runtime_state.clear_restarting(&conversation_id);
-            result
-        })
-        .await
-        .map_err(|_| ConversationError::internal("Runtime release task failed"))?
+        // begin_restart fences new turn claims. Recheck for a claim that won before it.
+        let result = if busy() {
+            Ok(RuntimeReleaseOutcome::Deferred)
+        } else {
+            self.release_admitted_runtime(id, agent).await
+        };
+        self.runtime_state.clear_restarting(id);
+        result
     }
 
     async fn release_admitted_runtime(
         &self,
-        conversation_id: &str,
+        id: &str,
         agent: &Arc<aionui_ai_agent::manager::acp::AcpAgentManager>,
     ) -> Result<RuntimeReleaseOutcome, ConversationError> {
-        // begin_restart fences new turn claims. Recheck for a claim that won before it.
-        if self.runtime_state.is_claimed(conversation_id)
-            || self.runtime_state.is_cancelling(conversation_id)
-            || self.task_manager.get_task(conversation_id).is_some_and(|task| {
-                task.status() == Some(ConversationStatus::Running) || task.live_background_tasks() > 0
-            })
-        {
-            return Ok(RuntimeReleaseOutcome::Busy);
-        }
-        match agent.close_studio_session().await {
-            Ok(false) => return Ok(RuntimeReleaseOutcome::Busy),
-            Err(error) => {
-                warn!(conversation_id, %error, "Aelix session close failed");
-                return Err(ConversationError::BadGateway {
-                    reason: "Aelix session close failed".into(),
-                });
+        use aionui_ai_agent::AcpError;
+
+        let close = agent.close_studio_session().await;
+        match &close {
+            Ok(false) => return Ok(RuntimeReleaseOutcome::Deferred),
+            // These protocol replies reject the request before invoking close.
+            Err(AcpError::MethodNotFound { .. } | AcpError::InvalidRequest { .. } | AcpError::InvalidParams { .. }) => {
             }
-            Ok(true) => {}
+            // A lost response or an ambiguous agent error may follow a successful
+            // close. Retire the exact cached agent before admitting another ensure.
+            _ if self.is_current_release_agent(id, agent) => {
+                self.task_manager
+                    .kill_and_wait(id, Some(AgentKillReason::RuntimeRestart))
+                    .await;
+            }
+            _ => {}
         }
-        if matches!(self.task_manager.get_task(conversation_id), Some(AgentInstance::Acp(current)) if Arc::ptr_eq(&current, agent))
-        {
-            self.task_manager
-                .kill_and_wait(conversation_id, Some(AgentKillReason::RuntimeRestart))
-                .await;
+        match close {
+            Ok(_) => {
+                info!(conversation_id = id, "Released the Aelix conversation runtime");
+                Ok(RuntimeReleaseOutcome::Released)
+            }
+            Err(error) => {
+                warn!(conversation_id = id, kind = ?std::mem::discriminant(&error), "Aelix session close failed");
+                Err(ConversationError::BadGateway {
+                    reason: "Aelix session close failed".into(),
+                })
+            }
         }
-        info!(conversation_id, "Released the Aelix conversation runtime");
-        Ok(RuntimeReleaseOutcome::Released)
+    }
+
+    pub async fn ensure_runtime_for_view(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        view_id: Option<&str>,
+        active_leases: &ActiveLeaseRegistry,
+        task_manager: &Arc<dyn IWorkerTaskManager>,
+    ) -> Result<EnsureConversationRuntimeResponse, ConversationError> {
+        self.ensure_runtime_inner(user_id, conversation_id, task_manager, Some((active_leases, view_id)))
+            .await
     }
 
     /// Pre-initialize an agent task for a conversation (warmup).
@@ -4659,6 +4744,17 @@ impl ConversationService {
         conversation_id: &str,
         task_manager: &Arc<dyn IWorkerTaskManager>,
     ) -> Result<EnsureConversationRuntimeResponse, ConversationError> {
+        self.ensure_runtime_inner(user_id, conversation_id, task_manager, None)
+            .await
+    }
+
+    async fn ensure_runtime_inner(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        task_manager: &Arc<dyn IWorkerTaskManager>,
+        lifecycle: Option<(&ActiveLeaseRegistry, Option<&str>)>,
+    ) -> Result<EnsureConversationRuntimeResponse, ConversationError> {
         let row = self
             .conversation_repo
             .get(user_id, conversation_id)
@@ -4677,9 +4773,20 @@ impl ConversationService {
             });
         }
 
+        let _view_lifecycle = match lifecycle {
+            Some((leases, _)) => Some(leases.lock_conversation(conversation_id).await),
+            None => None,
+        };
         if self.runtime_state.is_restarting(conversation_id) {
             return Err(ConversationError::RuntimeRestarting {
                 conversation_id: conversation_id.to_owned(),
+            });
+        }
+        if let Some((leases, Some(view_id))) = lifecycle
+            && !leases.register_view(conversation_id, view_id)
+        {
+            return Err(ConversationError::Busy {
+                reason: "Conversation view is no longer available".into(),
             });
         }
         let pending_fork = self.awaiting_guarded_fork(user_id, &row).await?;

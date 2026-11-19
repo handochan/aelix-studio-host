@@ -61,17 +61,27 @@ async def scenario(args):
         if args.idle_seconds is not None:
             env["AIONUI_IDLE_TIMEOUT_SECS"] = str(args.idle_seconds)
         launcher = root / "adapter.py"
-        launcher.write_text(f"""import sys
+        launcher.write_text(f"""import asyncio, sys
 from pathlib import Path
 sys.path.insert(0, {str(args.acp_source)!r})
 from aelix_acp.server import Server, ProtocolError, main
 dispatch = Server.dispatch_request
 async def wrapped(self, method, params):
     if method == "session/close":
-        marker = Path({str(root / 'fail-close')!r})
-        if marker.exists():
-            marker.unlink()
-            raise ProtocolError("Injected close failure", -32603)
+        root = Path({str(root)!r})
+        if (root / "fail-close").exists():
+            (root / "fail-close").unlink()
+            raise ProtocolError("Injected pre-dispatch refusal", -32601)
+        if (root / "block-close").exists():
+            (root / "close-entered").touch()
+            while (root / "block-close").exists():
+                await asyncio.sleep(0.01)
+        result = await dispatch(self, method, params)
+        if (root / "drop-close-reply").exists():
+            (root / "drop-close-reply").unlink()
+            (root / "close-executed").touch()
+            await asyncio.Event().wait()
+        return result
     return await dispatch(self, method, params)
 Server.dispatch_request = wrapped
 main()
@@ -95,8 +105,11 @@ main()
                 await host.idle(route)
                 return route, native_path(root, created["id"])
 
-            async def renew(route, view):
-                await host.api(route + "/active-lease", "POST", {"view_id": view})
+            async def open_view(route, view):
+                return await host.api(route + "/runtime/ensure?view_id=" + view, "POST")
+
+            async def renew(route, view, expected=(200,)):
+                return await host.api(route + "/active-lease", "POST", {"view_id": view}, expected=expected)
 
             async def release(route, view):
                 result = await host.api(route + "/runtime/release", "POST", {"view_id": view})
@@ -113,11 +126,12 @@ main()
 
             if args.idle_only:
                 failed, failed_path = await conversation("release failure")
-                await renew(failed, "failure-view")
+                await open_view(failed, "failure-view")
                 (root / "fail-close").touch()
                 await host.api(failed + "/runtime/release", "POST", {"view_id": "failure-view"}, expected=(502,))
                 failed_at = time.monotonic()
                 crashed, crashed_path = await conversation("renderer gone")
+                await open_view(crashed, "crash-view")
                 client = await asyncio.create_subprocess_exec(
                     sys.executable, "-c",
                     "import sys,time,urllib.request;"
@@ -141,30 +155,115 @@ main()
                                   "clientDeathRecoveredSeconds": recovered[1]}))
                 return
 
+            async def hold_turn(route):
+                model.entered.clear()
+                model.release = asyncio.Event()
+                await host.api(route + "/messages", "POST", {"content": "CRASH_HOLD"})
+                await asyncio.wait_for(model.entered.wait(), 15)
+
+            async def assert_writer_held(path):
+                acquired, detail = await native_state(args.aelix, host, path)
+                assert not acquired and "already open" in detail, detail
+
+            async def wait_until_retired(route):
+                async with asyncio.timeout(15):
+                    while (await host.api(route))["runtime"]["has_task"]:
+                        await asyncio.sleep(0.05)
+
             route, path = await conversation("first persisted turn")
-            await renew(route, "left-view")
-            await renew(route, "right-view")
+            await open_view(route, "left-view")
+            await open_view(route, "right-view")
+            assert await release(route, "unknown-view") == "inactive"
             assert await release(route, "left-view") == "view_active"
-            assert not (await native_state(args.aelix, host, path))[0]
-            await host.api(route + "/messages", "POST", {"content": "CRASH_HOLD"})
-            await asyncio.wait_for(model.entered.wait(), 15)
-            assert await release(route, "right-view") == "busy"
+            await assert_writer_held(path)
+
+            # A one-shot departure remains owned by the host after the client is gone.
+            await hold_turn(route)
+            assert await release(route, "right-view") == "deferred"
+            await renew(route, "right-view", expected=(409,))
+            assert await release(route, "right-view") == "inactive"
+            model.release.set()
+            await wait_until_retired(route)
+            saved = Path(path).read_bytes()
+            acquired, detail = await native_state(args.aelix, host, path)
+            assert acquired and Path(path).read_bytes() == saved, detail
+
+            # A replacement view admitted before the turn ends supersedes the old departure.
+            await open_view(route, "old-view")
+            await hold_turn(route)
+            assert await release(route, "old-view") == "deferred"
+            await open_view(route, "replacement-view")
+            await renew(route, "old-view", expected=(409,))
+            assert await release(route, "old-view") == "inactive"
             model.release.set()
             await host.idle(route)
-            before = Path(path).read_bytes()
-            assert await release(route, "right-view") == "released"
-            acquired, detail = await native_state(args.aelix, host, path)
-            assert acquired, detail
-            assert Path(path).read_bytes() == before
-            assert await release(route, "right-view") == "inactive"
-            await host.api(route + "/runtime/ensure", "POST")
-            assert not (await native_state(args.aelix, host, path))[0]
+            await assert_writer_held(path)
+
+            # A second ensure and a heartbeat contend with an admitted close.
+            # They cannot finish ahead of it, and must get a fresh runtime afterwards.
+            blocker = root / "block-close"
+            blocker.touch()
+            closing = asyncio.create_task(release(route, "replacement-view"))
+            try:
+                async with asyncio.timeout(10):
+                    while not (root / "close-entered").exists():
+                        await asyncio.sleep(0.02)
+                opening = asyncio.create_task(open_view(route, "new-view"))
+                late = asyncio.create_task(renew(route, "replacement-view", expected=(409,)))
+                await asyncio.sleep(0.1)
+                assert not opening.done() and not late.done()
+            finally:
+                blocker.unlink(missing_ok=True)
+            assert await closing == "released"
+            await opening
+            await late
+            assert await release(route, "replacement-view") == "inactive"
+            await renew(route, "new-view")
+            await assert_writer_held(path)
+
+            # The real adapter closes its worker and drops the reply. Host must
+            # discard the cached connection before the next ensure/turn.
+            (root / "drop-close-reply").touch()
+            await host.api(route + "/runtime/release", "POST", {"view_id": "new-view"}, expected=(502,))
+            assert (root / "close-executed").exists()
+            assert not (await host.api(route))["runtime"]["has_task"]
+            await open_view(route, "recovered-view")
+            assert native_path(root, route.rsplit("/", 1)[1]) == path
+            await host.api(route + "/messages", "POST", {"content": "Continue after missing close ACK"})
+            await host.idle(route)
+            assert model.count("Continue after missing close ACK") == 1
+            if args.studio_root:
+                await release(route, "recovered-view")
+                tab_route, tab_path = await conversation("Persist the browser tab turn")
+                await hold_turn(tab_route)
+                password = await host.api("/api/webui/reset-password", "POST")
+                account = await host.api("/api/auth/internal/users/system")
+                runner = await asyncio.create_subprocess_exec(
+                    args.bun, "tests/manual/sessionLockRelease.mjs", str(host.port), tab_route.rsplit("/", 1)[1],
+                    cwd=args.studio_root,
+                    env={**os.environ, "STUDIO_RELEASE_USER": account["username"],
+                         "STUDIO_RELEASE_PASSWORD": password["new_password"]},
+                )
+                try:
+                    assert await asyncio.wait_for(runner.wait(), 50) == 0
+                finally:
+                    if runner.returncode is None:
+                        runner.kill()
+                        await runner.wait()
+                await assert_writer_held(tab_path)
+                model.release.set()
+                await wait_until_retired(tab_route)
+                acquired, detail = await native_state(args.aelix, host, tab_path)
+                assert acquired, detail
+                print(json.dumps({"actualTabClosedDuringTurn": True, "cliAcquiredAfterTurnWithoutBrowser": True}))
+                await open_view(route, "shutdown-view")
+
             await host.stop()
             acquired, detail = await native_state(args.aelix, host, path)
             assert acquired, detail
-            print(json.dumps({"otherViewProtected": True, "activeTurnProtected": True,
-                              "cliImmediatelyReacquired": True, "historyPreserved": True,
-                              "hostShutdownReleased": True}))
+            print(json.dumps({"otherViewProtected": True, "serverDeferredRelease": True,
+                              "lateHeartbeatAndDepartureFenced": True, "concurrentEnsureWaits": True,
+                              "sameSessionAfterLostCloseReply": True, "hostShutdownReleased": True}))
         except Exception:
             log = root / "host.log"
             if log.exists():
@@ -184,4 +283,6 @@ if __name__ == "__main__":
     parser.add_argument("--acp-source", type=Path, required=True)
     parser.add_argument("--idle-only", action="store_true")
     parser.add_argument("--idle-seconds", type=int)
+    parser.add_argument("--studio-root", type=Path)
+    parser.add_argument("--bun", default="bun")
     asyncio.run(scenario(parser.parse_args()))

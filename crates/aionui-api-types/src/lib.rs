@@ -98,11 +98,12 @@ pub use conversation::{
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationArtifactStatus,
     ConversationAssistantIdentityResponse, ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
     ConversationNameUpdatedPayload, ConversationResponse, ConversationRuntimeStateKind, ConversationRuntimeSummary,
-    ConversationViewRequest, CreateConversationRequest, EnsureConversationRuntimeResponse, FORK_HEAD_CHANGED,
-    ForkCapabilityView, ForkConversationRequest, ListConversationsQuery, ListMessagesQuery, McpRuntimeSnapshot,
-    MessageListResponse, MessageResponse, MessageSearchItem, MessageSearchResponse, MessageStatusChangedPayload,
-    PromptCapabilityView, ReleaseConversationRuntimeResponse, RuntimeReleaseOutcome, SearchMessagesQuery,
-    SendMessageRequest, SendMessageResponse, SessionRef, UpdateConversationArtifactRequest, UpdateConversationRequest,
+    ConversationViewRequest, CreateConversationRequest, EnsureConversationRuntimeResponse, EnsureConversationViewQuery,
+    FORK_HEAD_CHANGED, ForkCapabilityView, ForkConversationRequest, ListConversationsQuery, ListMessagesQuery,
+    McpRuntimeSnapshot, MessageListResponse, MessageResponse, MessageSearchItem, MessageSearchResponse,
+    MessageStatusChangedPayload, PromptCapabilityView, ReleaseConversationRuntimeResponse, RuntimeReleaseOutcome,
+    SearchMessagesQuery, SendMessageRequest, SendMessageResponse, SessionRef, UpdateConversationArtifactRequest,
+    UpdateConversationRequest,
 };
 pub use conversation_tools::{
     CONVERSATION_TOOLS_SCHEMA_VERSION, ConversationCliEnvelope, ConversationCliMeta, ConversationCreateAssistant,

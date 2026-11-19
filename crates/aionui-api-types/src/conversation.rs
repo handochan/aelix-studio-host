@@ -53,13 +53,18 @@ pub struct ConversationViewRequest {
     pub view_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EnsureConversationViewQuery {
+    pub view_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeReleaseOutcome {
     Released,
     Inactive,
     ViewActive,
-    Busy,
+    Deferred,
 }
 
 #[derive(Debug, Serialize)]

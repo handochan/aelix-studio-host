@@ -10,10 +10,10 @@ use aionui_api_types::{
     ActiveCountResponse, ApiResponse, ApprovalCheckQuery, ApprovalCheckResponse, CancelConversationRequest,
     CancelConversationResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse, ConversationResponse,
-    ConversationViewRequest, CreateConversationRequest, EnsureConversationRuntimeResponse, ForkConversationRequest,
-    ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse,
-    ReleaseConversationRuntimeResponse, SearchMessagesQuery, SendMessageRequest, SendMessageResponse,
-    UpdateConversationArtifactRequest, UpdateConversationRequest,
+    ConversationViewRequest, CreateConversationRequest, EnsureConversationRuntimeResponse, EnsureConversationViewQuery,
+    ForkConversationRequest, ListConversationsQuery, ListMessagesQuery, MessageListResponse, MessageResponse,
+    MessageSearchResponse, ReleaseConversationRuntimeResponse, SearchMessagesQuery, SendMessageRequest,
+    SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::ApiError;
@@ -423,10 +423,20 @@ async fn ensure_runtime(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
+    Query(view): Query<EnsureConversationViewQuery>,
 ) -> Result<Json<ApiResponse<EnsureConversationRuntimeResponse>>, ApiError> {
+    if let Some(id) = &view.view_id {
+        validate_view_id(id)?;
+    }
     let response = state
         .service
-        .ensure_runtime(&user.id, &id, &state.task_manager)
+        .ensure_runtime_for_view(
+            &user.id,
+            &id,
+            view.view_id.as_deref(),
+            &state.active_leases,
+            &state.task_manager,
+        )
         .await
         .map_err(ApiError::from)?;
     Ok(Json(ApiResponse::ok(response)))

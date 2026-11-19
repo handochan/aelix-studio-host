@@ -1,20 +1,57 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use aionui_common::{TimestampMs, now_ms};
 use dashmap::DashMap;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 pub const ACTIVE_LEASE_TTL_MS: TimestampMs = 90_000;
+const MAX_TRACKED_VIEWS: usize = 128;
+
+#[derive(Debug)]
+struct ViewLease {
+    expires_at: TimestampMs,
+    departed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewDeparture {
+    Inactive,
+    ViewActive,
+    LastView(u64),
+}
 
 #[derive(Debug, Default)]
 struct ConversationLeases {
     legacy: TimestampMs,
-    views: HashMap<String, TimestampMs>,
+    views: HashMap<String, ViewLease>,
+    lifecycle: Arc<Mutex<()>>,
+    pending_release: Option<u64>,
+}
+
+impl ConversationLeases {
+    fn expire_views(&mut self, now: TimestampMs) {
+        self.views.retain(|_, view| view.expires_at > now);
+    }
+
+    fn active_until(&self, now: TimestampMs) -> Option<TimestampMs> {
+        self.views
+            .values()
+            .filter(|view| !view.departed)
+            .map(|view| view.expires_at)
+            .chain([self.legacy])
+            .max()
+            .filter(|expiry| *expiry > now)
+    }
 }
 
 #[derive(Debug)]
 pub struct ActiveLeaseRegistry {
     leases: DashMap<String, ConversationLeases>,
     ttl_ms: TimestampMs,
+    next_departure: AtomicU64,
+    next_sweep_ms: AtomicI64,
 }
 
 impl ActiveLeaseRegistry {
@@ -26,6 +63,8 @@ impl ActiveLeaseRegistry {
         Self {
             leases: DashMap::new(),
             ttl_ms,
+            next_departure: AtomicU64::new(1),
+            next_sweep_ms: AtomicI64::new(0),
         }
     }
 
@@ -35,21 +74,91 @@ impl ActiveLeaseRegistry {
         expires_at
     }
 
-    pub fn renew_view(&self, conversation_id: &str, view_id: &str) -> TimestampMs {
-        let now = now_ms();
-        let expires_at = now.saturating_add(self.ttl_ms);
-        let mut leases = self.leases.entry(conversation_id.to_owned()).or_default();
-        leases.views.retain(|_, expiry| *expiry > now);
-        leases.views.insert(view_id.to_owned(), expires_at);
-        expires_at
+    /// Serialize open, lease changes and explicit close for this conversation.
+    pub async fn lock_conversation(&self, conversation_id: &str) -> OwnedMutexGuard<()> {
+        self.prune_expired();
+        let lock = Arc::clone(&self.leases.entry(conversation_id.to_owned()).or_default().lifecycle);
+        lock.lock_owned().await
     }
 
-    /// Retire one view. Return whether any other foreground lease remains.
-    pub fn retire_view(&self, conversation_id: &str, view_id: &str) -> bool {
-        if let Some(mut leases) = self.leases.get_mut(conversation_id) {
-            leases.views.remove(view_id);
+    /// Named view transitions run while the conversation lifecycle lock is held.
+    pub fn register_view(&self, conversation_id: &str, view_id: &str) -> bool {
+        let now = now_ms();
+        let mut leases = self.leases.entry(conversation_id.to_owned()).or_default();
+        leases.expire_views(now);
+        match leases.views.get(view_id) {
+            Some(view) if view.departed => return false,
+            None if leases.views.len() >= MAX_TRACKED_VIEWS => return false,
+            _ => {}
         }
-        self.is_active(conversation_id)
+        leases.views.insert(
+            view_id.to_owned(),
+            ViewLease {
+                expires_at: now.saturating_add(self.ttl_ms),
+                departed: false,
+            },
+        );
+        leases.pending_release = None;
+        true
+    }
+
+    pub fn renew_view(&self, conversation_id: &str, view_id: &str) -> bool {
+        let now = now_ms();
+        let Some(mut leases) = self.leases.get_mut(conversation_id) else {
+            return false;
+        };
+        let Some(view) = leases.views.get_mut(view_id) else {
+            return false;
+        };
+        if view.departed || view.expires_at <= now {
+            return false;
+        }
+        view.expires_at = now.saturating_add(self.ttl_ms);
+        true
+    }
+
+    /// Only a live view can schedule a close. A short tombstone also fences a
+    /// heartbeat or ensure that was already in flight when an unknown view left.
+    pub fn depart_view(&self, conversation_id: &str, view_id: &str) -> ViewDeparture {
+        let now = now_ms();
+        let mut leases = self.leases.entry(conversation_id.to_owned()).or_default();
+        leases.expire_views(now);
+        let was_active = match leases.views.get(view_id) {
+            Some(view) if view.departed => return ViewDeparture::Inactive,
+            Some(_) => true,
+            None if leases.views.len() >= MAX_TRACKED_VIEWS => return ViewDeparture::Inactive,
+            None => false,
+        };
+        leases.views.insert(
+            view_id.to_owned(),
+            ViewLease {
+                expires_at: now.saturating_add(self.ttl_ms),
+                departed: true,
+            },
+        );
+        if !was_active {
+            return ViewDeparture::Inactive;
+        }
+        if leases.active_until(now).is_some() {
+            return ViewDeparture::ViewActive;
+        }
+        let departure = self.next_departure.fetch_add(1, Ordering::Relaxed);
+        leases.pending_release = Some(departure);
+        ViewDeparture::LastView(departure)
+    }
+
+    pub fn release_pending(&self, conversation_id: &str, departure: u64) -> bool {
+        self.leases
+            .get(conversation_id)
+            .is_some_and(|leases| leases.pending_release == Some(departure) && leases.active_until(now_ms()).is_none())
+    }
+
+    pub fn finish_release(&self, conversation_id: &str, departure: u64) {
+        if let Some(mut leases) = self.leases.get_mut(conversation_id)
+            && leases.pending_release == Some(departure)
+        {
+            leases.pending_release = None;
+        }
     }
 
     pub fn renew_many<'a>(&self, conversation_ids: impl IntoIterator<Item = &'a str>) -> (usize, TimestampMs) {
@@ -62,19 +171,38 @@ impl ActiveLeaseRegistry {
         (count, expires_at)
     }
 
+    fn prune_expired(&self) {
+        let now = now_ms();
+        let next = self.next_sweep_ms.load(Ordering::Relaxed);
+        if now >= next
+            && self
+                .next_sweep_ms
+                .compare_exchange(
+                    next,
+                    now.saturating_add(self.ttl_ms),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            self.leases.retain(|_, leases| !Self::is_expired(leases, now));
+        }
+    }
+
+    fn is_expired(leases: &mut ConversationLeases, now: TimestampMs) -> bool {
+        leases.expire_views(now);
+        leases.active_until(now).is_none()
+            && leases.views.is_empty()
+            && leases.pending_release.is_none()
+            && Arc::strong_count(&leases.lifecycle) == 1
+    }
+
     pub fn active_until(&self, conversation_id: &str) -> Option<TimestampMs> {
         let now = now_ms();
         let mut expires_at = None;
         self.leases.remove_if_mut(conversation_id, |_, leases| {
-            leases.views.retain(|_, expiry| *expiry > now);
-            expires_at = leases
-                .views
-                .values()
-                .copied()
-                .chain([leases.legacy])
-                .max()
-                .filter(|expiry| *expiry > now);
-            expires_at.is_none()
+            expires_at = leases.active_until(now);
+            Self::is_expired(leases, now)
         });
         expires_at
     }
@@ -117,14 +245,45 @@ mod tests {
     }
 
     #[test]
-    fn retiring_a_view_preserves_other_foreground_leases() {
+    fn departure_is_single_use_and_a_new_view_supersedes_pending_close() {
         let registry = ActiveLeaseRegistry::new();
-        registry.renew_view("conv", "a");
-        registry.renew_view("conv", "b");
-        assert!(registry.retire_view("conv", "a"));
-        assert!(!registry.retire_view("conv", "b"));
-        registry.renew("conv");
-        assert!(registry.retire_view("conv", "a"));
+        assert!(registry.register_view("conv", "a"));
+        let ViewDeparture::LastView(pending) = registry.depart_view("conv", "a") else {
+            panic!("the last view should schedule a release");
+        };
+        assert!(registry.release_pending("conv", pending));
+        assert!(!registry.renew_view("conv", "a"));
+        assert!(registry.register_view("conv", "b"));
+        assert_eq!(registry.depart_view("conv", "a"), ViewDeparture::Inactive);
+        assert!(!registry.release_pending("conv", pending));
+        assert!(registry.is_active("conv"));
+    }
+
+    #[test]
+    fn unknown_departure_cannot_close_and_fences_a_late_open() {
+        let registry = ActiveLeaseRegistry::new();
+        assert_eq!(registry.depart_view("conv", "a"), ViewDeparture::Inactive);
+        assert!(!registry.register_view("conv", "a"));
+        assert!(!registry.renew_view("conv", "a"));
+        assert!(!registry.is_active("conv"));
+    }
+
+    #[test]
+    fn closing_one_of_two_active_views_preserves_the_other_view() {
+        let registry = ActiveLeaseRegistry::new();
+        registry.register_view("conv", "a");
+        registry.register_view("conv", "b");
+        assert_eq!(registry.depart_view("conv", "a"), ViewDeparture::ViewActive);
+        assert!(matches!(registry.depart_view("conv", "b"), ViewDeparture::LastView(_)));
+    }
+
+    #[test]
+    fn expired_view_cannot_authorize_close_or_revive_by_heartbeat() {
+        let registry = ActiveLeaseRegistry::with_ttl_ms(1);
+        registry.register_view("conv", "a");
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!registry.renew_view("conv", "a"));
+        assert_eq!(registry.depart_view("conv", "a"), ViewDeparture::Inactive);
     }
 
     #[test]

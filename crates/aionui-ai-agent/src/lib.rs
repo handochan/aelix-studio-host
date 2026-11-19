@@ -36,7 +36,7 @@ pub mod terminal;
 pub mod types;
 mod workflow_progress;
 
-pub use active_lease::{ACTIVE_LEASE_TTL_MS, ActiveLeaseRegistry};
+pub use active_lease::{ACTIVE_LEASE_TTL_MS, ActiveLeaseRegistry, ViewDeparture};
 pub use agent_runtime::AgentRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use agent_task::IMockAgent;
