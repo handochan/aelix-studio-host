@@ -395,6 +395,7 @@ fn seed_startup_config_preferences(
     session: &mut AcpSession,
     params: &AcpSessionParams,
     initial_config: &HashMap<ConfigKey, ConfigValue>,
+    team_mode: Option<&str>,
 ) {
     if let Some(mode) = params
         .config
@@ -402,7 +403,10 @@ fn seed_startup_config_preferences(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .filter(|_| !has_persisted_config_for_category(initial_config, &SessionConfigOptionCategory::Mode))
+        .filter(|_| {
+            team_mode.is_none()
+                && !has_persisted_config_for_category(initial_config, &SessionConfigOptionCategory::Mode)
+        })
     {
         session.seed_pending_startup_config(SessionConfigOptionCategory::Mode, ConfigValue::new(mode.to_owned()));
     }
@@ -474,7 +478,7 @@ fn confirm_option_id(data: &Value) -> Option<String> {
 /// leaves the backend. All handshake columns, WebSocket payloads, and
 /// HTTP responses share this rule — callers should go through this
 /// helper instead of `serde_json::to_value` directly.
-pub(super) fn sdk_to_snake_value<T: serde::Serialize>(value: &T) -> Option<Value> {
+pub(crate) fn sdk_to_snake_value<T: serde::Serialize>(value: &T) -> Option<Value> {
     let mut v = serde_json::to_value(value).ok()?;
     normalize_keys_to_snake_case(&mut v);
     Some(v)
@@ -586,6 +590,7 @@ pub struct AcpAgentManager {
 
     /// ACP protocol handle (SDK connection).
     pub(super) protocol: AcpProtocol,
+    team_permission_mode: Option<&'static str>,
 
     /// Routes permission requests from the protocol layer to the user
     /// and back. Owns the receiver channel, pending map, and closing flag.
@@ -664,9 +669,18 @@ impl AcpAgentManager {
         let permission_router = Arc::new(PermissionRouter::new(permission_rx));
 
         let snapshot = params.session_snapshot.as_ref();
-        let initial_mode = initial_mode_from_params(&params);
+        // Verified against aelix-acp@16d6555 server.py initialize and runtime/controls.py.
+        let team_permission_mode = params.team_permission_mode.filter(|_| {
+            protocol
+                .initialize_response()
+                .and_then(|response| response.agent_info)
+                .is_some_and(|info| info.name == "aelix-acp")
+        });
+        let initial_mode = team_permission_mode
+            .map(ModeId::new)
+            .or_else(|| initial_mode_from_params(&params));
 
-        let (initial_model, initial_config) = (
+        let (initial_model, mut initial_config) = (
             snapshot.and_then(|s| s.current_model_id.clone()).or_else(|| {
                 params
                     .config
@@ -678,6 +692,10 @@ impl AcpAgentManager {
             snapshot.map(|s| s.config_selections.clone()).unwrap_or_default(),
         );
 
+        if let Some(mode) = team_permission_mode {
+            initial_config.remove(&ConfigKey::new("mode"));
+            initial_config.insert(ConfigKey::new("permission_mode"), ConfigValue::new(mode));
+        }
         let startup_config_seed_base = initial_config.clone();
         let mut session = AcpSession::new(initial_mode, initial_model, initial_config);
         preload_metadata_catalogs(
@@ -686,7 +704,7 @@ impl AcpAgentManager {
             params.metadata.backend.as_deref(),
             &params.metadata.handshake,
         );
-        seed_startup_config_preferences(&mut session, &params, &startup_config_seed_base);
+        seed_startup_config_preferences(&mut session, &params, &startup_config_seed_base, team_permission_mode);
 
         let pipeline = PromptPipeline::new(vec![Arc::new(SessionNewPreludeHook)]);
 
@@ -696,6 +714,7 @@ impl AcpAgentManager {
             runtime,
             process,
             protocol,
+            team_permission_mode,
             session_lock: Mutex::new(()),
             permission_router,
             skill_manager,
@@ -1087,6 +1106,7 @@ impl AcpAgentManager {
             }
         }
         .map(|snapshot| SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::Observed,
             config_options: Some(snapshot.options),
         })
@@ -1396,6 +1416,36 @@ impl AcpAgentManager {
                 );
             }
         }
+    }
+
+    /// Whether Team applies Aelix's explicit permission policy to this runtime.
+    pub fn has_team_permission_policy(&self) -> bool {
+        self.team_permission_mode.is_some()
+    }
+
+    /// Enforce the Team selection before the factory makes the task available.
+    pub(crate) async fn enforce_team_permission_mode(&self) -> Result<(), AgentError> {
+        let Some(mode) = self.team_permission_mode else {
+            return Ok(());
+        };
+        let matches_mode = |option: &aionui_api_types::AcpConfigOptionDto| {
+            option.id == "permission_mode" && option.current_value.as_deref() == Some(mode)
+        };
+        if self.config_options().await?.config_options.iter().any(matches_mode) {
+            return Ok(());
+        }
+        let response = self.set_config_option_confirmed("permission_mode", mode).await?;
+        if response.confirmation == aionui_api_types::ConfigOptionConfirmation::Observed
+            && response
+                .config_options
+                .as_deref()
+                .is_some_and(|options| options.iter().any(matches_mode))
+        {
+            return Ok(());
+        }
+        Err(AgentError::conflict(
+            "Aelix Team permission mode could not be confirmed",
+        ))
     }
 
     /// Pre-open the ACP session without sending a prompt. Called by the

@@ -52,6 +52,7 @@ struct NewAgentProvisioning {
     assistant_id: Option<String>,
     workspace: Option<String>,
     session_mode: Option<String>,
+    aelix_permission_mode: Option<String>,
 }
 
 pub(crate) struct PersistSpawnedAgentRequest {
@@ -102,6 +103,11 @@ pub trait TeamConversationProvisioningPort: Send + Sync {
 
     async fn conversation_assistant_id(&self, conversation_id: &str) -> Result<Option<String>, TeamError>;
 
+    /// Return the agent identity captured on this member's conversation.
+    async fn bound_agent_id(&self, _user_id: &str, _conversation_id: &str) -> Result<Option<String>, TeamError> {
+        Ok(None)
+    }
+
     async fn create_team_temp_workspace(&self, user_id: &str, team_id: &str) -> Result<String, TeamError>;
 
     async fn patch_runtime_config(&self, conversation_id: &str, patch: serde_json::Value) -> Result<(), TeamError>;
@@ -116,6 +122,10 @@ pub trait TeamConversationProvisioningPort: Send + Sync {
     }
 
     async fn save_acp_runtime_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError>;
+
+    async fn save_team_permission_mode(&self, _conversation_id: &str, _mode: &str) -> Result<(), TeamError> {
+        Ok(())
+    }
 
     async fn get_config_options(&self, conversation_id: &str) -> Result<GetConfigOptionsResponse, TeamError>;
 
@@ -412,6 +422,7 @@ impl TeamAgentProvisioner {
                     assistant_id,
                     workspace: Some(workspace),
                     session_mode: row.session_mode.clone(),
+                    aelix_permission_mode: row.aelix_permission_mode.clone(),
                 },
                 Some(&mcp_selection),
             )
@@ -472,6 +483,7 @@ impl TeamAgentProvisioner {
                     assistant_id: req.assistant_id,
                     workspace: Some(workspace),
                     session_mode: row.session_mode.clone(),
+                    aelix_permission_mode: row.aelix_permission_mode.clone(),
                 },
                 Some(&mcp_selection),
             )
@@ -606,7 +618,14 @@ impl TeamAgentProvisioner {
         user_id: &str,
         agent: &TeamAgent,
     ) -> Result<(TeamToolTransport, aionui_common::ResolvedBackendCapabilities), TeamError> {
-        let capabilities = self.capability_port.resolve(user_id, &agent.backend, None).await?;
+        let bound_agent_id = self
+            .conversation_port
+            .bound_agent_id(user_id, &agent.conversation_id)
+            .await?;
+        let capabilities = self
+            .capability_port
+            .resolve(user_id, &agent.backend, bound_agent_id.as_deref())
+            .await?;
         if capabilities.mcp.stdio {
             return Ok((TeamToolTransport::Mcp, capabilities));
         }
@@ -681,6 +700,11 @@ impl TeamAgentProvisioner {
     }
 
     pub(crate) async fn update_session_mode_seed(&self, agent: &TeamAgent, mode: &str) -> Result<(), TeamError> {
+        if matches!(mode, "default" | "yolo") {
+            self.conversation_port
+                .save_team_permission_mode(&agent.conversation_id, mode)
+                .await?;
+        }
         self.conversation_port
             .patch_runtime_config(&agent.conversation_id, serde_json::json!({ "session_mode": mode }))
             .await
@@ -716,6 +740,11 @@ impl TeamAgentProvisioner {
                 mcp_selection,
             )
             .await?;
+        if let Some(mode) = input.aelix_permission_mode.as_deref() {
+            self.conversation_port
+                .save_team_permission_mode(&conversation.conversation_id, mode)
+                .await?;
+        }
         Ok(TeamAgent {
             slot_id: input.slot_id,
             name: input.name,

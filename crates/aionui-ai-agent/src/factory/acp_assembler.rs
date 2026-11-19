@@ -29,6 +29,7 @@ pub struct AcpSessionParams {
     pub mcp_servers: Vec<McpServer>,
     pub preset_context: Option<String>,
     pub session_snapshot: Option<PersistedSessionState>,
+    pub team_permission_mode: Option<&'static str>,
     /// Backend data directory (`AppConfig.data_dir`) used for process
     /// registration and optional prompt diagnostics.
     pub data_dir: PathBuf,
@@ -83,6 +84,7 @@ pub async fn assemble_acp_params(
         mcp_servers,
         preset_context,
         session_snapshot,
+        team_permission_mode: None,
         data_dir,
         dump_prompts,
     }

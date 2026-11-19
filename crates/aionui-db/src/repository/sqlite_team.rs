@@ -23,8 +23,8 @@ impl ITeamRepository for SqliteTeamRepository {
 
     async fn create_team(&self, row: &TeamRow) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO teams (id, user_id, name, workspace, workspace_mode, agents, lead_agent_id, session_mode, agents_version, created_at, updated_at, project_id, folder_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO teams (id, user_id, name, workspace, workspace_mode, agents, lead_agent_id, session_mode, aelix_permission_mode, agents_version, created_at, updated_at, project_id, folder_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.user_id)
@@ -34,6 +34,7 @@ impl ITeamRepository for SqliteTeamRepository {
         .bind(&row.agents)
         .bind(&row.lead_agent_id)
         .bind(&row.session_mode)
+        .bind(&row.aelix_permission_mode)
         .bind(&row.agents_version)
         .bind(row.created_at)
         .bind(row.updated_at)
@@ -97,6 +98,9 @@ impl ITeamRepository for SqliteTeamRepository {
         if params.session_mode.is_some() {
             set_clauses.push("session_mode = ?");
         }
+        if params.aelix_permission_mode.is_some() {
+            set_clauses.push("aelix_permission_mode = ?");
+        }
         if params.project_id.is_some() {
             set_clauses.push("project_id = ?");
         }
@@ -129,6 +133,9 @@ impl ITeamRepository for SqliteTeamRepository {
         }
         if let Some(ref session_mode) = params.session_mode {
             query = query.bind(session_mode);
+        }
+        if let Some(ref mode) = params.aelix_permission_mode {
+            query = query.bind(mode);
         }
         if let Some(ref project_id) = params.project_id {
             query = query.bind(project_id);

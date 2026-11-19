@@ -1114,10 +1114,14 @@ impl SessionAgentTask {
                 value: value.to_string(),
             },
         };
-        self.backend
+        let receipt = self
+            .backend
             .dispatch(cmd)
             .await
             .map_err(|e| AgentError::bad_request(e.to_string()))?;
+        if option_id == "mode" && !receipt.accepted {
+            return Err(AgentError::bad_request("Agent did not accept the mode selection"));
+        }
         // Where does this switch actually land? Asked of the LIVE backend rather than
         // assumed, because the answer moves: claude queues a control frame raised
         // mid-turn but writes an idle one straight out, so the same backend answers
@@ -1166,6 +1170,7 @@ impl SessionAgentTask {
             }
             _ => {
                 return Ok(aionui_api_types::SetConfigOptionResponse {
+                    backend_accepted: None,
                     confirmation: aionui_api_types::ConfigOptionConfirmation::CommandAck,
                     config_options: None,
                 });
@@ -1189,6 +1194,7 @@ impl SessionAgentTask {
             .and_then(|o| o.current_value.as_deref())
             == Some(value);
         Ok(aionui_api_types::SetConfigOptionResponse {
+            backend_accepted: deferred.then_some(true),
             // `deferred` first: a deferred switch deliberately leaves `current_value` on
             // the old mode, so `observed` is false for the honest reason and must not be
             // downgraded to the ambiguous `CommandAck`.
@@ -9410,6 +9416,7 @@ mod pump_tests {
             "mode switch must be Observed, got {:?}",
             resp.confirmation
         );
+        assert_eq!(resp.backend_accepted, None);
         let opts = resp.config_options.expect("config_options present");
         let mode_opt = opts.iter().find(|o| o.id == "mode").expect("mode option");
         assert_eq!(
@@ -9627,13 +9634,15 @@ mod pump_tests {
     /// samples/codex-cli/0.146.0/schema/v2/ThreadSettingsUpdateParams.json), or claude
     /// while a turn is in flight (the control frame is queued and drained before the
     /// next prompt).
-    pub(super) struct NextTurnEffectBackend;
+    pub(super) struct NextTurnEffectBackend {
+        accepted: bool,
+    }
 
     #[async_trait::async_trait]
     impl SessionBackend for NextTurnEffectBackend {
         async fn dispatch(&self, _c: Command) -> Result<CommandReceipt, BackendError> {
             Ok(CommandReceipt {
-                accepted: true,
+                accepted: self.accepted,
                 admission: Admission::NoTurn,
                 turn_gen: 0,
             })
@@ -9661,7 +9670,7 @@ mod pump_tests {
     /// have right now".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_next_turn_backend_reports_pending_not_observed() {
-        let backend: Arc<dyn SessionBackend> = Arc::new(NextTurnEffectBackend);
+        let backend: Arc<dyn SessionBackend> = Arc::new(NextTurnEffectBackend { accepted: true });
         let task = SessionAgentTask::new(
             AgentType::Acp,
             "conv-1".into(),
@@ -9679,6 +9688,7 @@ mod pump_tests {
             "a next-turn backend must report PendingNextTurn, got {:?}",
             resp.confirmation
         );
+        assert_eq!(resp.backend_accepted, Some(true));
         let opts = resp.config_options.expect("config_options present");
         let mode_opt = opts.iter().find(|o| o.id == "mode").expect("mode option");
         assert_eq!(
@@ -9686,6 +9696,23 @@ mod pump_tests {
             Some("default"),
             "current_value must stay on the mode still in force, not jump to the request"
         );
+    }
+
+    #[tokio::test]
+    async fn next_turn_timing_does_not_confirm_a_mode_the_backend_did_not_accept() {
+        let task = SessionAgentTask::new(
+            AgentType::Acp,
+            "conv-1".into(),
+            "user-1".into(),
+            "/w".into(),
+            Arc::new(NextTurnEffectBackend { accepted: false }),
+            None,
+        );
+        let error = task
+            .set_config_option("mode", "plan")
+            .await
+            .expect_err("a receipt without acceptance must not report a pending change");
+        assert!(error.to_string().contains("did not accept the mode selection"));
     }
 
     // Same for model — critical because claude gives set_model NO confirmation wire,

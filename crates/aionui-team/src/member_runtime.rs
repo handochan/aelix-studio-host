@@ -121,7 +121,9 @@ enum MemberRuntimeEntry {
         operation_id: u64,
         outcome_tx: watch::Sender<AttachSignal>,
     },
-    Ready,
+    Ready {
+        aelix_permission_policy: bool,
+    },
     Failed {
         operation_id: u64,
         failure: MemberRuntimeFailure,
@@ -168,10 +170,15 @@ impl MemberRuntimeRegistry {
         }
         match entries.get(&agent_id) {
             None => {
-                entries.insert(agent_id, MemberRuntimeEntry::Ready);
+                entries.insert(
+                    agent_id,
+                    MemberRuntimeEntry::Ready {
+                        aelix_permission_policy: false,
+                    },
+                );
                 true
             }
-            Some(MemberRuntimeEntry::Ready) => true,
+            Some(MemberRuntimeEntry::Ready { .. }) => true,
             Some(
                 MemberRuntimeEntry::Attaching { .. }
                 | MemberRuntimeEntry::Failed { .. }
@@ -191,7 +198,7 @@ impl MemberRuntimeRegistry {
                 operation_id,
                 outcome_tx,
             }) => ReserveAttach::Join(waiter(*operation_id, outcome_tx.subscribe())),
-            Some(MemberRuntimeEntry::Ready) => ReserveAttach::AlreadyReady,
+            Some(MemberRuntimeEntry::Ready { .. }) => ReserveAttach::AlreadyReady,
             Some(MemberRuntimeEntry::Failed {
                 operation_id,
                 outcome_tx,
@@ -239,7 +246,7 @@ impl MemberRuntimeRegistry {
                 operation_id,
                 outcome_tx,
             }) => ReserveAttach::Removing(waiter(*operation_id, outcome_tx.subscribe())),
-            Some(MemberRuntimeEntry::Ready) | Some(MemberRuntimeEntry::Failed { .. }) | None => {
+            Some(MemberRuntimeEntry::Ready { .. }) | Some(MemberRuntimeEntry::Failed { .. }) | None => {
                 let operation_id = self.next_operation_id();
                 let (outcome_tx, outcome_rx) = watch::channel(AttachSignal::Pending);
                 entries.insert(
@@ -274,7 +281,7 @@ impl MemberRuntimeRegistry {
                 operation_id,
                 outcome_tx,
             }) => ReserveAttach::Join(waiter(*operation_id, outcome_tx.subscribe())),
-            Some(MemberRuntimeEntry::Ready) => {
+            Some(MemberRuntimeEntry::Ready { .. }) => {
                 let operation_id = self.next_operation_id();
                 let (outcome_tx, outcome_rx) = watch::channel(AttachSignal::Pending);
                 entries.insert(
@@ -328,7 +335,7 @@ impl MemberRuntimeRegistry {
         )
     }
 
-    pub(crate) fn commit_ready(&self, lease: &AttachLease) -> bool {
+    pub(crate) fn commit_ready(&self, lease: &AttachLease, aelix_permission_policy: bool) -> bool {
         if lease.session_generation != self.session_generation {
             return false;
         }
@@ -347,7 +354,12 @@ impl MemberRuntimeRegistry {
             return false;
         }
         let outcome_tx = outcome_tx.clone();
-        entries.insert(lease.agent_id.clone(), MemberRuntimeEntry::Ready);
+        entries.insert(
+            lease.agent_id.clone(),
+            MemberRuntimeEntry::Ready {
+                aelix_permission_policy,
+            },
+        );
         outcome_tx.send_replace(AttachSignal::Terminal(AttachOutcome::Ready));
         true
     }
@@ -403,7 +415,7 @@ impl MemberRuntimeRegistry {
                 outcome_tx,
             }) => Some(outcome_tx),
             Some(MemberRuntimeEntry::Failed { .. }) => None,
-            Some(MemberRuntimeEntry::Ready) => None,
+            Some(MemberRuntimeEntry::Ready { .. }) => None,
             Some(MemberRuntimeEntry::Removing { .. }) => unreachable!("handled above"),
             None => return BeginRemove::Absent,
         };
@@ -491,6 +503,17 @@ impl MemberRuntimeRegistry {
         true
     }
 
+    pub(crate) fn ready_uses_aelix_permission_policy(&self, agent_id: &str) -> bool {
+        let entries = self.lock_entries();
+        !self.stopped.load(Ordering::Acquire)
+            && matches!(
+                entries.get(agent_id),
+                Some(MemberRuntimeEntry::Ready {
+                    aelix_permission_policy: true
+                })
+            )
+    }
+
     pub(crate) fn snapshot(&self, agent_id: &str) -> MemberRuntimeSnapshot {
         let entries = self.lock_entries();
         if self.stopped.load(Ordering::Acquire) {
@@ -501,7 +524,7 @@ impl MemberRuntimeRegistry {
             Some(MemberRuntimeEntry::Attaching { operation_id, .. }) => MemberRuntimeSnapshot::Attaching {
                 operation_id: *operation_id,
             },
-            Some(MemberRuntimeEntry::Ready) => MemberRuntimeSnapshot::Ready,
+            Some(MemberRuntimeEntry::Ready { .. }) => MemberRuntimeSnapshot::Ready,
             Some(MemberRuntimeEntry::Failed {
                 operation_id, failure, ..
             }) => MemberRuntimeSnapshot::Failed {
@@ -524,7 +547,7 @@ impl MemberRuntimeRegistry {
                 MemberRuntimeEntry::Attaching { outcome_tx, .. } | MemberRuntimeEntry::Removing { outcome_tx, .. } => {
                     outcome_tx.send_replace(AttachSignal::Terminal(AttachOutcome::SessionStopped));
                 }
-                MemberRuntimeEntry::Ready | MemberRuntimeEntry::Failed { .. } => {}
+                MemberRuntimeEntry::Ready { .. } | MemberRuntimeEntry::Failed { .. } => {}
             }
         }
         true
@@ -599,7 +622,7 @@ mod tests {
 
         assert_eq!(lease.operation_id(), 1);
         assert_eq!(waiter.operation_id(), 1);
-        assert!(registry.commit_ready(&lease));
+        assert!(registry.commit_ready(&lease, false));
         assert_eq!(lease.waiter().wait().await, AttachOutcome::Ready);
         assert_eq!(waiter.wait().await, AttachOutcome::Ready);
         assert_eq!(registry.snapshot("worker-1"), MemberRuntimeSnapshot::Ready);
@@ -643,7 +666,7 @@ mod tests {
             registry.snapshot("worker-1"),
             MemberRuntimeSnapshot::Attaching { operation_id: 2 }
         );
-        assert!(registry.commit_ready(&retry));
+        assert!(registry.commit_ready(&retry, false));
         assert_eq!(retry.waiter().wait().await, AttachOutcome::Ready);
     }
 
@@ -719,7 +742,7 @@ mod tests {
             MemberRuntimeSnapshot::Removing { operation_id: 2 }
         );
         assert_eq!(attach.waiter().wait().await, AttachOutcome::Removed);
-        assert!(!registry.commit_ready(&attach));
+        assert!(!registry.commit_ready(&attach, false));
         assert!(!registry.commit_failed(&attach, failure("late_provider_error", "Agent attach did not complete")));
 
         let removing_waiter = match registry.reserve_attach("worker-1", false) {
@@ -760,7 +783,7 @@ mod tests {
             _ => panic!("persistence failure must require a fresh attach"),
         };
         assert_eq!(retry.operation_id(), 4);
-        assert!(registry.commit_ready(&retry));
+        assert!(registry.commit_ready(&retry, false));
     }
 
     #[tokio::test]
@@ -796,7 +819,7 @@ mod tests {
         assert!(!registry.stop());
         assert_eq!(first_task.await.unwrap(), AttachOutcome::SessionStopped);
         assert_eq!(second_task.await.unwrap(), AttachOutcome::SessionStopped);
-        assert!(!registry.commit_ready(&first));
+        assert!(!registry.commit_ready(&first, false));
         assert!(!registry.commit_failed(&second, failure("provider_stopped", "Agent session stopped")));
         assert_eq!(registry.snapshot("worker-1"), MemberRuntimeSnapshot::SessionStopped);
 
@@ -822,13 +845,13 @@ mod tests {
             _ => panic!("retry reservation must start"),
         };
         assert_eq!(second.operation_id(), 2);
-        assert!(!registry.commit_ready(&first));
+        assert!(!registry.commit_ready(&first, false));
         assert!(!registry.commit_failed(&first, failure("stale", "Stale attach failed")));
         assert_eq!(
             registry.snapshot("worker-1"),
             MemberRuntimeSnapshot::Attaching { operation_id: 2 }
         );
-        assert!(registry.commit_ready(&second));
+        assert!(registry.commit_ready(&second, false));
         assert_eq!(second.waiter().wait().await, AttachOutcome::Ready);
         assert_eq!(registry.snapshot("worker-1"), MemberRuntimeSnapshot::Ready);
     }
@@ -950,12 +973,12 @@ mod tests {
 
         assert_eq!(old_owner.operation_id(), 1);
         assert_eq!(current_owner.operation_id(), 1);
-        assert!(!current_registry.commit_ready(&old_owner));
+        assert!(!current_registry.commit_ready(&old_owner, false));
         assert_eq!(
             current_registry.snapshot("worker-1"),
             MemberRuntimeSnapshot::Attaching { operation_id: 1 }
         );
-        assert!(current_registry.commit_ready(&current_owner));
+        assert!(current_registry.commit_ready(&current_owner, false));
     }
 
     #[test]

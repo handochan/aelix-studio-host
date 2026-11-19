@@ -167,6 +167,7 @@ async fn create(
     body: Result<Json<CreateConversationRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<ConversationResponse>>), ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
+    reject_team_permission_override(&req.extra)?;
     let conversation = state.service.create(&user.id, req).await.map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(conversation))))
 }
@@ -186,12 +187,22 @@ async fn clone(
     body: Result<Json<CloneConversationRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<ConversationResponse>>), ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
+    reject_team_permission_override(&req.conversation.extra)?;
     let conversation = state
         .service
         .clone_create(&user.id, req)
         .await
         .map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(conversation))))
+}
+
+fn reject_team_permission_override(extra: &serde_json::Value) -> Result<(), ApiError> {
+    if extra.get("team_permission_mode").is_some() {
+        return Err(ApiError::BadRequest(
+            "Team permission mode must be selected through the Team API".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn get_one(
@@ -210,6 +221,14 @@ async fn update(
     body: Result<Json<UpdateConversationRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ConversationResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
+    if let Some(extra) = &req.extra {
+        reject_team_permission_override(extra)?;
+        if extra.get("teamId").is_some() {
+            return Err(ApiError::BadRequest(
+                "Team ownership cannot be changed through conversation metadata".into(),
+            ));
+        }
+    }
     let conversation = state
         .service
         .update(&user.id, &id, req, &state.task_manager)

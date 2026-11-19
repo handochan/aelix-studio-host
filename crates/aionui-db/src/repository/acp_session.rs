@@ -70,6 +70,10 @@ pub trait IAcpSessionRepository: Send + Sync {
     /// Fetch the full row only when the owning conversation belongs to `user_id`.
     async fn get_for_user(&self, user_id: &str, conversation_id: &str) -> Result<Option<AcpSessionRow>, DbError>;
 
+    /// Persist a Team permission choice without changing runtime observations.
+    async fn set_team_permission_mode(&self, user_id: &str, conversation_id: &str, mode: &str)
+    -> Result<bool, DbError>;
+
     /// Insert a fresh `acp_session` row. Called by `ConversationService`
     /// when an ACP-type conversation is created; primary-key conflict
     /// surfaces as `DbError::Conflict`.

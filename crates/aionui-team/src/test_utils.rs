@@ -62,6 +62,7 @@ impl ITeamRepository for MockTeamRepo {
             agents: "[]".to_owned(),
             lead_agent_id: None,
             session_mode: None,
+            aelix_permission_mode: None,
             agents_version: "1.0.1".to_owned(),
             created_at: now_ms(),
             updated_at: now_ms(),
@@ -1118,6 +1119,11 @@ pub(crate) mod workspace_harness {
             })
         }
 
+        async fn save_team_permission_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError> {
+            self.patch_runtime_config(conversation_id, serde_json::json!({ "mock_team_permission": mode }))
+                .await
+        }
+
         async fn save_acp_runtime_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError> {
             self.patch_runtime_config(conversation_id, serde_json::json!({ "session_mode": mode }))
                 .await
@@ -1193,6 +1199,7 @@ pub(crate) mod workspace_harness {
                 .await?;
             let config_options = self.get_config_options(conversation_id).await?.config_options;
             Ok(SetConfigOptionResponse {
+                backend_accepted: None,
                 confirmation: ConfigOptionConfirmation::Observed,
                 config_options: Some(config_options),
             })
@@ -1231,6 +1238,14 @@ pub(crate) mod workspace_harness {
                 .unwrap_or(false)
             {
                 return Err(TeamError::InvalidRequest("forced runtime attach failure".to_owned()));
+            }
+            if let Some(mode) = self
+                .repo
+                .get_extra(conversation_id)
+                .and_then(|mut extra| extra.as_object_mut()?.remove("mock_team_permission"))
+            {
+                self.patch_runtime_config(conversation_id, serde_json::json!({ "mock_warmup_permission": mode }))
+                    .await?;
             }
             Ok(())
         }

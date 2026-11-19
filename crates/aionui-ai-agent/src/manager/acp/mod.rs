@@ -22,3 +22,5 @@ pub use catalog_forwarder::CatalogForwarder;
 pub use hooks::SessionNewPreludeHook;
 pub use permission_router::PermissionRouter;
 pub use session::AcpSession;
+
+pub(crate) use agent::sdk_to_snake_value;
