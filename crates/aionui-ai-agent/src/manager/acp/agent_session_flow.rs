@@ -39,6 +39,23 @@ pub(super) enum PromptOutcome {
 }
 
 impl AcpAgentManager {
+    pub(super) async fn persist_aelix_prelude(&self, sid: &str, pending: bool) -> Result<(), AgentError> {
+        let Some(repo) = &self.session_repo else {
+            return Ok(());
+        };
+        let updated = repo
+            .set_aelix_prelude_pending_for_user(&self.params.user_id, &self.params.conversation_id, sid, pending)
+            .await
+            .map_err(|error| {
+                warn!(%error, conversation_id = %self.params.conversation_id, "Could not save Aelix prelude state");
+                AgentError::internal("Could not save the Aelix prelude state")
+            })?;
+        if !updated {
+            return Err(AgentError::conflict("The Aelix session binding changed"));
+        }
+        Ok(())
+    }
+
     /// Establish a fresh ACP session (session/new) and apply desired
     /// mode/model/config via reconcile. Does NOT send a prompt and
     /// does NOT emit Start/Finish — callers wrap that around if needed.
@@ -207,17 +224,28 @@ impl AcpAgentManager {
                 }
                 Err(e) => return Err(e.into()),
             };
+            let is_aelix = self
+                .protocol
+                .initialize_response()
+                .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"));
+            let pending_prelude = if is_aelix && let Some(repo) = &self.session_repo {
+                repo.get_for_user(&self.params.user_id, &self.params.conversation_id)
+                    .await
+                    .map_err(|error| {
+                        warn!(%error, conversation_id = %self.params.conversation_id, "Could not load Aelix prelude state");
+                        AgentError::internal("Could not load the Aelix prelude state")
+                    })?
+                    .is_some_and(|row| row.has_pending_aelix_prelude(session_id))
+            } else {
+                false
+            };
 
             {
                 let mut session = self.session.write().await;
                 let legacy_models = legacy_models
                     .as_ref()
                     .and_then(LegacySessionModelState::from_state_value);
-                if self
-                    .protocol
-                    .initialize_response()
-                    .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"))
-                {
+                if is_aelix {
                     session.adopt_aelix_restored_selections(
                         legacy_models.as_ref(),
                         load_response.config_options.as_deref().unwrap_or_default(),
@@ -228,6 +256,9 @@ impl AcpAgentManager {
                 }
                 session.apply_restored_configuration(load_response.modes, load_response.config_options);
                 session.set_session_id(DomainSessionId::new(session_id.to_owned()));
+                if pending_prelude {
+                    session.mark_deferred_aelix_prelude();
+                }
                 self.commit_session_changes(&mut session).await;
             }
             self.emit_snapshot_events().await;

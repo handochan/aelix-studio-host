@@ -1158,6 +1158,15 @@ impl IAcpSessionRepository for StubAcpSessionRepo {
         *self.session_id.lock().unwrap() = None;
         Ok(true)
     }
+    async fn set_aelix_prelude_pending_for_user(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _session_id: &str,
+        _pending: bool,
+    ) -> Result<bool, DbError> {
+        Ok(false)
+    }
     async fn delete_for_user(&self, _user_id: &str, _conversation_id: &str) -> Result<bool, DbError> {
         Ok(false)
     }

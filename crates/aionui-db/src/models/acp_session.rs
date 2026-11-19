@@ -19,6 +19,14 @@ pub struct AcpSessionRow {
 }
 
 impl AcpSessionRow {
+    /// Restore a deferred prelude only when the marker belongs to the bound session.
+    pub fn has_pending_aelix_prelude(&self, session_id: &str) -> bool {
+        self.session_id.as_deref() == Some(session_id)
+            && serde_json::from_str::<serde_json::Value>(&self.session_config).is_ok_and(|value| {
+                value.get("aelix_pending_prelude").and_then(serde_json::Value::as_str) == Some(session_id)
+            })
+    }
+
     /// A guarded fork stays published after its first durable ACP binding.
     pub fn has_published_fork(&self) -> bool {
         self.session_id.as_ref().is_some_and(|id| !id.is_empty())

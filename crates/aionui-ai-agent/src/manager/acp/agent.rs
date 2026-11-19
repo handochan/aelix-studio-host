@@ -575,6 +575,7 @@ pub enum RequiredFullAutoApplication {
 pub struct AcpAgentManager {
     /// Pre-computed, immutable session parameters assembled by the factory.
     pub(super) params: Arc<AcpSessionParams>,
+    pub(super) session_repo: Option<Arc<dyn aionui_db::IAcpSessionRepository>>,
 
     /// Session aggregate root — owns desired/observed/advertised state.
     /// Single in-memory source of truth for session lifecycle, modes,
@@ -620,6 +621,11 @@ pub struct AcpAgentManager {
 }
 
 impl AcpAgentManager {
+    pub fn with_session_repository(mut self, repo: Arc<dyn aionui_db::IAcpSessionRepository>) -> Self {
+        self.session_repo = Some(repo);
+        self
+    }
+
     /// Create a new ACP agent manager by spawning a CLI subprocess and
     /// establishing an ACP protocol connection.
     ///
@@ -700,6 +706,7 @@ impl AcpAgentManager {
 
         let manager = Self {
             params,
+            session_repo: None,
             session: RwLock::new(session),
             runtime,
             process,
@@ -1326,11 +1333,17 @@ impl AcpAgentManager {
             .protocol
             .initialize_response()
             .and_then(|response| response.agent_info);
-        let content = if defer_session_prelude(&raw_user_input, agent_info.as_ref().map(|info| info.name.as_str())) {
-            // Leave the one-shot prelude pending for the next ordinary turn.
+        let agent_name = agent_info.as_ref().map(|info| info.name.as_str());
+        let content = if defer_session_prelude(&raw_user_input, agent_name) {
+            let mut session = self.session.write().await;
+            if session.has_pending_session_new_prelude() && !session.has_deferred_aelix_prelude() {
+                self.persist_aelix_prelude(&sid, true).await?;
+                session.mark_deferred_aelix_prelude();
+            }
             raw_user_input
         } else {
             let mut s = self.session.write().await;
+            let deferred = s.has_deferred_aelix_prelude();
             let mut ctx = PromptCtx {
                 session: &mut s,
                 params: &self.params,
@@ -1338,6 +1351,10 @@ impl AcpAgentManager {
                 runtime: &self.runtime,
             };
             let transformed = self.pipeline.pre_send(&mut ctx, data.content.clone()).await;
+            if deferred && let Err(error) = self.persist_aelix_prelude(&sid, false).await {
+                s.mark_deferred_aelix_prelude();
+                return Err(error.into());
+            }
             self.commit_session_changes(&mut s).await;
             transformed
         };

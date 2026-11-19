@@ -96,6 +96,17 @@ pub trait IAcpSessionRepository: Send + Sync {
     /// `rebuild_after_session_not_found` → `clear_session_id` self-heal.
     async fn clear_session_id_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError>;
 
+    /// Update the deferred first-prompt marker for the owning conversation and
+    /// its matching backend session. A newly opened session may still be unbound
+    /// while the session-assigned event reaches the repository.
+    async fn set_aelix_prelude_pending_for_user(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        session_id: &str,
+        pending: bool,
+    ) -> Result<bool, DbError>;
+
     /// Delete the row when the owning conversation belongs to `user_id`.
     /// Called by the conversation delete hook — no DB foreign key, so this
     /// must be invoked explicitly.

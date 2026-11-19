@@ -9,6 +9,7 @@ use std::time::Duration;
 use aionui_ai_agent::factory::acp_assembler::{WorkspaceInfo, assemble_acp_params};
 use aionui_ai_agent::manager::acp::AcpAgentManager;
 use aionui_ai_agent::registry::AgentRegistry;
+use aionui_ai_agent::types::SendMessageData;
 use aionui_ai_agent::{AcpBuildExtra, AcpSessionSyncService, AcpSkillManager, AgentInstance};
 use aionui_api_types::ConfigOptionConfirmation;
 use aionui_common::CommandSpec;
@@ -64,6 +65,9 @@ for line in sys.stdin:
         entry += f' {key}={value}'
         selections[key] = value
         response['result'] = {'configOptions': options()}
+    elif method == 'session/prompt' and params['sessionId'] == 'selector-session':
+        entry += ' ' + json.dumps(params['prompt'][0]['text'])
+        response['result'] = {'stopReason': 'end_turn'}
     else:
         response['error'] = {'code': -32601, 'message': f'Unexpected request: {method}'}
     with open(trace, 'a') as output:
@@ -112,6 +116,7 @@ async fn open_session(
         AcpBuildExtra {
             current_model_id: Some("fixture/one".into()),
             thought_level: Some("low".into()),
+            preset_context: Some("Fixture conversation rules".into()),
             ..Default::default()
         },
         vec![],
@@ -128,6 +133,7 @@ async fn open_session(
     )
     .await
     .unwrap();
+    let manager = manager.with_session_repository(sync.repo());
     if let Some(session_id) = sync.load_session_id(USER, CONVERSATION).await {
         manager.set_session_id(session_id).await;
     }
@@ -173,7 +179,7 @@ async fn assert_selections(
     .expect("displayed model and thought selections must reach SQLite");
 }
 
-async fn check_load(agent_name: &str, expect_native: bool, load_surface: &str) {
+async fn setup() -> (tempfile::TempDir, Arc<AgentRegistry>, Arc<AcpSessionSyncService>) {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("peer.py"), PEER).unwrap();
     let db = init_database_memory().await.unwrap();
@@ -207,7 +213,11 @@ async fn check_load(agent_name: &str, expect_native: bool, load_surface: &str) {
     .await
     .unwrap();
     let sync = AcpSessionSyncService::new(repo);
+    (temp, registry, sync)
+}
 
+async fn check_load(agent_name: &str, expect_native: bool, load_surface: &str) {
+    let (temp, registry, sync) = setup().await;
     let fresh = open_session(temp.path(), &registry, &sync, agent_name, "new.txt", load_surface).await;
     assert_selections(&fresh, &sync, "fixture/one", "low", Some("fixture/one")).await;
     fresh.kill_and_wait(None).await;
@@ -268,4 +278,51 @@ async fn aelix_legacy_model_load_clears_the_saved_generic_model_selection() {
     tokio::time::timeout(Duration::from_secs(30), check_load("aelix-acp", true, "legacy"))
         .await
         .expect("Aelix legacy model flow timed out");
+}
+
+#[tokio::test]
+async fn aelix_delivers_the_deferred_prelude_once_after_the_session_is_reopened() {
+    async fn prompt(instance: &AgentInstance, content: &str) {
+        instance
+            .send_message(SendMessageData {
+                content: content.into(),
+                msg_id: content.into(),
+                turn_id: None,
+                files: vec![],
+                inject_skills: vec![],
+            })
+            .await
+            .unwrap();
+    }
+
+    fn prompt_trace(directory: &Path, name: &str) -> Vec<String> {
+        std::fs::read_to_string(directory.join(name))
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("session/prompt "))
+            .map(|text| serde_json::from_str(text).unwrap())
+            .collect()
+    }
+
+    let (temp, registry, sync) = setup().await;
+    let fresh = open_session(temp.path(), &registry, &sync, "aelix-acp", "compact.txt", "generic").await;
+    prompt(&fresh, "/compact").await;
+    assert_eq!(prompt_trace(temp.path(), "compact.txt"), ["/compact"]);
+    assert_selections(&fresh, &sync, "fixture/one", "low", Some("fixture/one")).await;
+    fresh.kill_and_wait(None).await;
+
+    let resumed = open_session(temp.path(), &registry, &sync, "aelix-acp", "resume.txt", "generic").await;
+    prompt(&resumed, "/compact again").await;
+    prompt(&resumed, "Continue").await;
+    let prompts = prompt_trace(temp.path(), "resume.txt");
+    assert_eq!(prompts[0], "/compact again");
+    assert!(prompts[1].contains("Fixture conversation rules"), "{prompts:?}");
+    assert!(prompts[1].ends_with("\n[/Assistant Rules]\n\nContinue"));
+    resumed.kill_and_wait(None).await;
+
+    let reopened = open_session(temp.path(), &registry, &sync, "aelix-acp", "reopen.txt", "generic").await;
+    prompt(&reopened, "Continue again").await;
+    assert_eq!(prompt_trace(temp.path(), "reopen.txt"), ["Continue again"]);
+    assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
+    reopened.kill_and_wait(None).await;
 }
