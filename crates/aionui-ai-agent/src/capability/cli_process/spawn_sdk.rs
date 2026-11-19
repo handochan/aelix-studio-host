@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::AgentError;
 
-use super::{CliAgentProcess, STDERR_BUFFER_MAX, prepare_command_cwd, tracked_process_group_id};
+use super::{AgentStdin, CliAgentProcess, STDERR_BUFFER_MAX, prepare_command_cwd, tracked_process_group_id};
 
 impl CliAgentProcess {
     /// Spawn a new CLI subprocess in **SDK mode**.
@@ -23,10 +23,10 @@ impl CliAgentProcess {
     /// - stderr buffering
     /// - Process exit monitoring
     pub async fn spawn_for_sdk(config: CommandSpec) -> Result<Self, AgentError> {
-        Self::spawn_sdk(config, true).await
+        Self::spawn_sdk(config, false).await
     }
 
-    pub(crate) async fn spawn_sdk(config: CommandSpec, capture_stderr: bool) -> Result<Self, AgentError> {
+    pub(crate) async fn spawn_sdk(config: CommandSpec, relay_candidate: bool) -> Result<Self, AgentError> {
         let mut cmd = CmdBuilder::new(&config.command);
         let agent_env = aionui_runtime::agent_process_env().await;
         cmd.args(&config.args)
@@ -35,11 +35,23 @@ impl CliAgentProcess {
             .envs(config.env.iter().map(|e| (&e.name, &e.value)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(if capture_stderr {
-                std::process::Stdio::piped()
-            } else {
+            .stderr(if relay_candidate {
                 std::process::Stdio::null()
+            } else {
+                std::process::Stdio::piped()
             });
+
+        #[cfg(windows)]
+        let direct: Option<AgentStdin> = if relay_candidate {
+            let (reader, writer) = super::direct_stdin::DirectStdin::pipe()
+                .map_err(|error| AgentError::internal(format!("Could not prepare nonblocking ACP stdin: {error}")))?;
+            cmd.stdin(std::process::Stdio::from(reader));
+            Some(Box::new(writer))
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let direct: Option<AgentStdin> = None;
 
         if let Some(ref cwd) = config.cwd {
             cmd.current_dir(prepare_command_cwd(cwd)?);
@@ -62,10 +74,12 @@ impl CliAgentProcess {
             AgentError::internal("Failed to capture stdout from child process")
         })?;
         let stderr = child.stderr.take();
-        let stdin = child.stdin.take().ok_or_else(|| {
-            error!(pid, "Failed to capture stdin for child process");
-            AgentError::internal("Failed to capture stdin for child process")
-        })?;
+        let stdin = direct
+            .or_else(|| child.stdin.take().map(|writer| Box::new(writer) as AgentStdin))
+            .ok_or_else(|| {
+                error!(pid, "Failed to capture stdin for child process");
+                AgentError::internal("Failed to capture stdin for child process")
+            })?;
 
         let (exit_tx, exit_rx) = watch::channel(None);
 

@@ -144,9 +144,11 @@ impl ConversationService {
         owner: &str,
         conversation: &str,
         agent: &Arc<AcpAgentManager>,
-        browser: Option<aionui_common::WsSessionGuard>,
+        browser_session: Option<(&aionui_common::WsSessionGuard, i64)>,
         deadline: Instant,
     ) -> RelayWriteAdmission {
+        let session_generation = browser_session.map(|(_, generation)| generation);
+        let browser = browser_session.map(|(guard, _)| guard.clone());
         let runtime = self.runtime_state();
         let manager = Arc::downgrade(self.task_manager());
         let conversation = conversation.to_owned();
@@ -174,11 +176,14 @@ impl ConversationService {
                 });
             });
         })
-        .with_owner_recheck(move || {
+        .with_database_fence(move || {
             let repo = repo.clone();
             let owner = checked_owner.clone();
             let conversation = checked_conversation.clone();
-            Box::pin(async move { matches!(repo.get(&owner, &conversation).await, Ok(Some(_))) })
+            async move {
+                repo.fence_acp_relay_write(&owner, &conversation, session_generation)
+                    .await
+            }
         })
     }
 
@@ -207,8 +212,9 @@ impl ConversationService {
         owner: &str,
         conversation: &str,
         request: AcpExtensionRequest,
-        guard: Option<&aionui_common::WsSessionGuard>,
+        browser_session: Option<(&aionui_common::WsSessionGuard, i64)>,
     ) -> Result<AcpExtensionResult, ExtensionError> {
+        let guard = browser_session.map(|(guard, _)| guard);
         let binding = request.binding_id.clone();
         self.ensure_owned_conversation(owner, conversation)
             .await
@@ -235,7 +241,7 @@ impl ConversationService {
                         return Err(RelayError::MethodDenied.into());
                     }
                     let reservation = self.acp_extension_limits.reserve(owner, &request.binding_id)?;
-                    let admission = self.relay_write_admission(owner, conversation, agent, guard.cloned(), deadline);
+                    let admission = self.relay_write_admission(owner, conversation, agent, browser_session, deadline);
                     let call = agent.relay_dispatch(request, admission)?;
                     Ok((call, reservation))
                 })

@@ -238,7 +238,7 @@ async fn spawn_and_connect_acp_once(
     let relay_candidate = crate::protocol::acp_relay::is_builtin_aelix(&params.metadata);
     // Extension content must not reach raw stderr logs or crash diagnostics.
     let process = Arc::new(
-        CliAgentProcess::spawn_sdk(params.command_spec.clone(), !relay_candidate)
+        CliAgentProcess::spawn_sdk(params.command_spec.clone(), relay_candidate)
             .await
             .map_err(AcpStartupConnectError::Agent)?,
     );

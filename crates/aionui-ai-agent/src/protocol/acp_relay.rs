@@ -138,13 +138,15 @@ struct ActivePrompt {
 }
 
 /// Checks carried from authenticated admission to the first stdio write.
-type RecheckOwner = dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync;
+type DatabaseFence = dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<aionui_db::AcpRelayWriteFence, aionui_db::DbError>> + Send>>
+    + Send
+    + Sync;
 type CommitFirstWrite = dyn Fn(&mut dyn FnMut()) + Send + Sync;
 pub struct RelayWriteAdmission {
     pub browser: Option<aionui_common::WsSessionGuard>,
     pub deadline: tokio::time::Instant,
     commit: Box<CommitFirstWrite>,
-    recheck_owner: Option<Box<RecheckOwner>>,
+    database_fence: Option<Box<DatabaseFence>>,
 }
 
 impl RelayWriteAdmission {
@@ -157,30 +159,34 @@ impl RelayWriteAdmission {
             browser,
             deadline,
             commit: Box::new(commit),
-            recheck_owner: None,
+            database_fence: None,
         }
     }
 
-    pub fn with_owner_recheck(
-        mut self,
-        recheck: impl Fn() -> std::pin::Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync + 'static,
-    ) -> Self {
-        self.recheck_owner = Some(Box::new(recheck));
+    pub fn with_database_fence<F, Fut>(mut self, acquire: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<aionui_db::AcpRelayWriteFence, aionui_db::DbError>> + Send + 'static,
+    {
+        self.database_fence = Some(Box::new(move || Box::pin(acquire())));
         self
     }
 
-    pub(super) async fn recheck(&self) -> Result<(), RelayError> {
-        if let Some(check) = &self.recheck_owner
-            && !check().await
-        {
-            return Err(RelayError::StaleBinding);
-        }
+    pub(super) async fn acquire(&self) -> Result<Option<Box<dyn aionui_db::AcpRelayWriteLock>>, RelayError> {
         if let Some(browser) = &self.browser
-            && !browser.recheck().await
+            && !browser.valid()
         {
             return Err(RelayError::AuthorizationRevoked);
         }
-        Ok(())
+        let Some(fence) = &self.database_fence else {
+            return Ok(None);
+        };
+        match fence().await {
+            Ok(aionui_db::AcpRelayWriteFence::Granted(lock)) => Ok(Some(lock)),
+            Ok(aionui_db::AcpRelayWriteFence::StaleConversation) => Err(RelayError::StaleBinding),
+            Ok(aionui_db::AcpRelayWriteFence::SessionRevoked) => Err(RelayError::AuthorizationRevoked),
+            Err(_) => Err(RelayError::Unavailable),
+        }
     }
 
     pub(super) fn commit(&self, write: &mut dyn FnMut()) {

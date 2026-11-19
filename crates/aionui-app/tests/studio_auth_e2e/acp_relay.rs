@@ -845,15 +845,27 @@ impl Write for QueuedRequest {
 
 #[tokio::test]
 async fn acp_relay_logout_rejects_a_request_queued_behind_a_blocked_stdio_prompt() {
-    rejects_queued_request(false).await;
+    rejects_queued_request(QueuedRevocation::Logout).await;
 }
 
 #[tokio::test]
 async fn acp_relay_restart_admission_rejects_a_request_before_the_old_pipe_closes() {
-    rejects_queued_request(true).await;
+    rejects_queued_request(QueuedRevocation::Restart).await;
 }
 
-async fn rejects_queued_request(restarting: bool) {
+#[tokio::test]
+async fn acp_relay_generation_change_rejects_a_queued_request_with_a_still_valid_jwt() {
+    rejects_queued_request(QueuedRevocation::DatabaseGeneration).await;
+}
+
+#[derive(Clone, Copy)]
+enum QueuedRevocation {
+    Logout,
+    Restart,
+    DatabaseGeneration,
+}
+
+async fn rejects_queued_request(revocation: QueuedRevocation) {
     let queued = QueuedRequest::default();
     let logs = queued.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -915,29 +927,41 @@ async fn rejects_queued_request(restarting: bool) {
     wait_until(|| queued.0.load(std::sync::atomic::Ordering::Acquire)).await;
     assert!(!pending.is_finished());
     let runtime = host.conversations.runtime_state();
-    if restarting {
-        // Hold the real restart gate open while the old task and pipe
-        // remain live, so only the first-write lifecycle check can reject.
-        runtime.begin_restart(&id).unwrap();
-    } else {
-        read(
-            host.client
-                .post(format!("{}/logout", host.url))
-                .header(header::COOKIE, &browser)
-                .header(header::ORIGIN, &host.url)
-                .send()
+    match revocation {
+        QueuedRevocation::Restart => {
+            // Keep the old pipe alive while the production restart gate
+            // excludes the first write.
+            runtime.begin_restart(&id).unwrap();
+        }
+        QueuedRevocation::DatabaseGeneration => {
+            // Revoke after the initial HTTP session lookup and SDK admission.
+            // Direct repository mutation leaves the JWT signature and local
+            // blacklist alone, just like an out-of-process database writer.
+            host.users
+                .increment_session_generation("system_default_user")
                 .await
-                .unwrap(),
-            StatusCode::OK,
-        )
-        .await;
+                .unwrap();
+        }
+        QueuedRevocation::Logout => {
+            read(
+                host.client
+                    .post(format!("{}/logout", host.url))
+                    .header(header::COOKIE, &browser)
+                    .header(header::ORIGIN, &host.url)
+                    .send()
+                    .await
+                    .unwrap(),
+                StatusCode::OK,
+            )
+            .await;
+        }
     }
     std::fs::write(dir.path().join("relay-calls.resume-read"), "").unwrap();
     let response = tokio::time::timeout(Duration::from_secs(10), pending)
         .await
         .unwrap()
         .unwrap();
-    if restarting {
+    if matches!(revocation, QueuedRevocation::Restart) {
         code(response, StatusCode::CONFLICT, "EXT_STALE_BINDING").await;
         runtime.clear_restarting(&id);
     } else {

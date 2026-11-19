@@ -298,6 +298,8 @@ impl SqliteConversationRepository {
     }
 }
 
+impl super::conversation::AcpRelayWriteLock for sqlx::Transaction<'static, sqlx::Sqlite> {}
+
 #[async_trait::async_trait]
 impl IConversationRepository for SqliteConversationRepository {
     // ── Conversation CRUD ───────────────────────────────────────────
@@ -310,6 +312,36 @@ impl IConversationRepository for SqliteConversationRepository {
             .await?;
 
         Ok(row)
+    }
+
+    async fn fence_acp_relay_write(
+        &self,
+        owner: &str,
+        conversation: &str,
+        session_generation: Option<i64>,
+    ) -> Result<super::conversation::AcpRelayWriteFence, DbError> {
+        use super::conversation::AcpRelayWriteFence;
+
+        // BEGIN IMMEDIATE excludes writes by other SQLite connections and
+        // Host processes, including account disable and generation changes.
+        // The caller drops this transaction after the nonblocking first
+        // write attempt, before it awaits pipe space or writes a tail.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let account: Option<(String, i64)> = sqlx::query_as(
+            "SELECT u.status, u.session_generation FROM conversations c
+             JOIN users u ON u.id = c.user_id WHERE c.id = ? AND c.user_id = ?",
+        )
+        .bind(conversation)
+        .bind(owner)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((status, generation)) = account else {
+            return Ok(AcpRelayWriteFence::StaleConversation);
+        };
+        if session_generation.is_some_and(|expected| status != "active" || generation != expected) {
+            return Ok(AcpRelayWriteFence::SessionRevoked);
+        }
+        Ok(AcpRelayWriteFence::Granted(Box::new(tx)))
     }
 
     async fn owner_user_id(&self, id: &str) -> Result<Option<String>, DbError> {
@@ -1668,6 +1700,75 @@ mod tests {
     }
 
     const SYSTEM_USER_ID: &str = "system_default_user";
+
+    #[tokio::test]
+    async fn acp_relay_database_fence_orders_session_revocation_on_an_independent_connection() {
+        use crate::{AcpRelayWriteFence, IUserRepository, SqliteUserRepository, UserStatus};
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        for mutation in ["disable", "generation"] {
+            let path = dir.path().join(format!("{mutation}.sqlite"));
+            let db = crate::init_database(&path).await.unwrap();
+            let repo = SqliteConversationRepository::new(db.pool().clone());
+            let peer = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(SqliteConnectOptions::new().filename(&path).busy_timeout(Duration::ZERO))
+                .await
+                .unwrap();
+            let users = SqliteUserRepository::new(peer);
+            let row = sample_conversation(SYSTEM_USER_ID);
+            repo.create(&row).await.unwrap();
+            let session = users.find_active_by_id(SYSTEM_USER_ID).await.unwrap().unwrap();
+            repo.get(SYSTEM_USER_ID, &row.id).await.unwrap().unwrap();
+            let generation = session.session_generation;
+
+            let AcpRelayWriteFence::Granted(fence) = repo
+                .fence_acp_relay_write(SYSTEM_USER_ID, &row.id, Some(generation))
+                .await
+                .unwrap()
+            else {
+                panic!("live owner and generation must be admitted");
+            };
+            let revoke = || async {
+                if mutation == "disable" {
+                    users.set_status(SYSTEM_USER_ID, UserStatus::Disabled).await
+                } else {
+                    users.increment_session_generation(SYSTEM_USER_ID).await.map(|_| ())
+                }
+            };
+            // A second connection cannot commit revocation across the
+            // first-write lease, even with the database in WAL mode.
+            let blocked = revoke().await.unwrap_err();
+            assert!(
+                matches!(&blocked, DbError::Query(sqlx::Error::Database(db)) if db.code().as_deref() == Some("5")),
+                "{blocked}"
+            );
+            drop(fence);
+            for _ in 0..50 {
+                if revoke().await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                matches!(
+                    repo.fence_acp_relay_write(SYSTEM_USER_ID, &row.id, Some(generation))
+                        .await
+                        .unwrap(),
+                    AcpRelayWriteFence::SessionRevoked
+                ),
+                "a queued write must reject the generation it observed before revocation"
+            );
+            assert!(matches!(
+                repo.fence_acp_relay_write("another-user", &row.id, Some(generation))
+                    .await
+                    .unwrap(),
+                AcpRelayWriteFence::StaleConversation
+            ));
+        }
+    }
 
     // ── Conversation CRUD tests ─────────────────────────────────────
 

@@ -48,7 +48,7 @@ pub use assistant::{
 };
 pub use channel::IChannelRepository;
 pub use client_preference::IClientPreferenceRepository;
-pub use conversation::IConversationRepository;
+pub use conversation::{AcpRelayWriteFence, AcpRelayWriteLock, IConversationRepository};
 pub use cron::ICronRepository;
 pub use diagnostics::{
     FeedbackDiagnosticsDbContext, FeedbackDiagnosticsProfile, FeedbackDiagnosticsProfileResult,

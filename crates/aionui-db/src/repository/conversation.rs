@@ -7,6 +7,15 @@ use crate::models::{
     UpsertConversationAssistantSnapshotParams,
 };
 
+/// Owns the database lock that orders revocation against the first relay write.
+pub trait AcpRelayWriteLock: Send {}
+
+pub enum AcpRelayWriteFence {
+    Granted(Box<dyn AcpRelayWriteLock>),
+    StaleConversation,
+    SessionRevoked,
+}
+
 /// Conversation + message data access abstraction.
 ///
 /// Covers conversation CRUD, extended queries (source/chat, cron-job,
@@ -20,6 +29,18 @@ pub trait IConversationRepository: Send + Sync {
 
     /// Returns a conversation by user and ID, or `None` if not found.
     async fn get(&self, user_id: &str, id: &str) -> Result<Option<ConversationRow>, DbError>;
+
+    /// Validate conversation ownership and, for a browser, the active
+    /// session generation under a lock that excludes database writers.
+    /// Repositories without that capability fail closed.
+    async fn fence_acp_relay_write(
+        &self,
+        _owner: &str,
+        _conversation: &str,
+        _session_generation: Option<i64>,
+    ) -> Result<AcpRelayWriteFence, DbError> {
+        Ok(AcpRelayWriteFence::StaleConversation)
+    }
 
     /// Returns the owner user ID for a conversation, or `None` if the conversation does not exist.
     async fn owner_user_id(&self, id: &str) -> Result<Option<String>, DbError>;

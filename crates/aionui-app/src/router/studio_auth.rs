@@ -223,7 +223,7 @@ async fn admit(
             let guard = guard.with_revocation_fence(move |write| jwt.with_revocation_fence(write));
             request.extensions_mut().insert(AcpExtensionAdmission {
                 owner: OPERATOR.into(),
-                browser_session: Some(guard),
+                browser_session: Some((guard, generation)),
             });
             return aionui_auth::csrf_middleware(State(state.cookies.clone()), request, next).await;
         }

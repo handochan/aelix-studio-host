@@ -19,7 +19,7 @@ const BODY_LIMIT: usize = 64 * 1024;
 #[derive(Clone)]
 pub struct AcpExtensionAdmission {
     pub owner: String,
-    pub browser_session: Option<WsSessionGuard>,
+    pub browser_session: Option<(WsSessionGuard, i64)>,
 }
 
 pub fn acp_extension_routes(state: ConversationRouterState) -> Router {
@@ -102,7 +102,15 @@ async fn call(
     }
     let data = state
         .service
-        .call_acp_extension(&access.owner, &conversation, request, access.browser_session.as_ref())
+        .call_acp_extension(
+            &access.owner,
+            &conversation,
+            request,
+            access
+                .browser_session
+                .as_ref()
+                .map(|(guard, generation)| (guard, *generation)),
+        )
         .await
         .map_err(extension_error)?;
     Ok(Json(ApiResponse::ok(data)).into_response())

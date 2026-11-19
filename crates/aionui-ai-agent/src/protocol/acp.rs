@@ -39,10 +39,10 @@ use agent_client_protocol::{
     Agent, Client, ConnectionTo, Lines, Responder, UntypedMessage, on_receive_notification, on_receive_request,
 };
 use aionui_common::ErrorChain;
-use futures_util::{StreamExt, TryStreamExt};
-use tokio::process::{ChildStdin, ChildStdout};
+use futures_util::{Sink, SinkExt, StreamExt, TryStreamExt};
+use tokio::process::ChildStdout;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_util::codec::FramedRead;
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tracing::{debug, info, warn};
 
 use crate::protocol::acp_dialect;
@@ -178,7 +178,7 @@ impl AcpProtocol {
     /// install its package — see [`crate::protocol::acp_init_budget`].
     #[allow(clippy::too_many_arguments)]
     pub async fn connect(
-        stdin: ChildStdin,
+        stdin: crate::capability::cli_process::AgentStdin,
         stdout: ChildStdout,
         event_tx: broadcast::Sender<AgentStreamEvent>,
         permission_tx: mpsc::Sender<PermissionRequest>,
@@ -714,7 +714,7 @@ impl Drop for ReplaySuppressionGuard<'_> {
 /// handle, then park on the shutdown signal until [`AcpProtocol`] is dropped.
 #[allow(clippy::too_many_arguments)]
 async fn run_sdk_background(
-    stdin: ChildStdin,
+    stdin: crate::capability::cli_process::AgentStdin,
     stdout: ChildStdout,
     event_tx: broadcast::Sender<AgentStreamEvent>,
     permission_tx: mpsc::Sender<PermissionRequest>,
@@ -791,25 +791,27 @@ async fn run_sdk_background(
     let incoming = futures_util::stream::unfold((Box::pin(incoming), local_rx), |(mut wire, mut local)| async move {
         let item = tokio::select! {
             biased;
-            Some(line) = local.recv() => Some(Ok(line)),
+            Some(line) = local.recv() => Some(line),
             item = wire.next() => item,
         };
         item.map(|item| (item, (wire, local)))
     });
-    let wire_out = relay.clone();
-    let outgoing_alive = alive.clone();
-    let outgoing = futures_util::sink::unfold(stdin, move |mut writer, line: String| {
-        let relay = wire_out.clone();
-        let local = local_tx.clone();
-        let alive = outgoing_alive.clone();
-        async move {
-            super::acp_relay_writer::write_line(&mut writer, &relay, &local, line)
-                .await
-                .inspect_err(|_| alive.store(false, Ordering::Release))?;
-            Ok::<_, std::io::Error>(writer)
-        }
-    });
-    let transport = Lines::new(Box::pin(outgoing), Box::pin(incoming));
+    let mut writer_task = None;
+    let outgoing: std::pin::Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>> = if candidate {
+        let (sink, task) = super::acp_relay_writer::sink(stdin, relay.clone(), local_tx, alive.clone());
+        writer_task = Some(task);
+        Box::pin(sink)
+    } else {
+        let alive = alive.clone();
+        Box::pin(SinkExt::<String>::sink_map_err(
+            FramedWrite::new(stdin, LinesCodec::new()),
+            move |error| {
+                alive.store(false, Ordering::Release);
+                std::io::Error::other(error)
+            },
+        ))
+    };
+    let transport = Lines::new(outgoing, Box::pin(incoming));
 
     // `init_tx` / `ready_tx` are consumed inside the main_fn closure; wrap
     // them in Option so we can .take() without moving out of captured state.
@@ -973,6 +975,10 @@ async fn run_sdk_background(
         })
         .await;
 
+    if let Some(writer) = writer_task {
+        writer.abort();
+        let _ = writer.await;
+    }
     alive.store(false, Ordering::Release);
     relay.disconnected();
 
