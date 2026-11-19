@@ -24,7 +24,8 @@
             "requests": [
               "_aelix/session/input/state",
               "_aelix/session/input/steer",
-              "_aelix/session/input/follow-up"
+              "_aelix/session/input/follow-up",
+              "_aelix/session/requests/lookup"
             ],
             "notifications": []
           }
@@ -39,7 +40,8 @@
         "requests": [
           "_aelix/session/input/state",
           "_aelix/session/input/steer",
-          "_aelix/session/input/follow-up"
+          "_aelix/session/input/follow-up",
+          "_aelix/session/requests/lookup"
         ],
         "notifications": []
       }
@@ -71,7 +73,8 @@
             "_aelix/session/children/steer",
             "_aelix/session/children/wrap-up",
             "_aelix/session/children/stop",
-            "_aelix/session/children/events"
+            "_aelix/session/children/events",
+            "_aelix/session/requests/lookup"
           ],
           "notifications": [
             "_aelix/session/children/activity"
@@ -121,7 +124,8 @@
         "_aelix/session/children/steer",
         "_aelix/session/children/wrap-up",
         "_aelix/session/children/stop",
-        "_aelix/session/children/events"
+        "_aelix/session/children/events",
+        "_aelix/session/requests/lookup"
       ],
       "notifications": [
         "_aelix/session/children/activity"

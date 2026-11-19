@@ -123,23 +123,19 @@
       "case": "manual recheck after a lost HTTP receipt with the original write key",
       "rendererRequest": {
         "bindingId": "b-21",
-        "method": "_aelix/session/input/steer",
+        "method": "_aelix/session/requests/lookup",
         "payload": {
-          "turnId": "turn-8",
-          "message": "비교 범위를 두 파일로 좁혀 주세요.",
           "requestId": "01a1f392-16c0-7000-8000-000000000001"
         }
       },
       "acpRequest": {
         "jsonrpc": "2.0",
         "id": 14,
-        "method": "_aelix/session/input/steer",
+        "method": "_aelix/session/requests/lookup",
         "params": {
           "sessionId": "s-42",
           "bindingId": "b-21",
           "payload": {
-            "turnId": "turn-8",
-            "message": "비교 범위를 두 파일로 좁혀 주세요.",
             "requestId": "01a1f392-16c0-7000-8000-000000000001"
           }
         }
@@ -148,9 +144,12 @@
         "jsonrpc": "2.0",
         "id": 14,
         "result": {
-          "turnId": "turn-8",
-          "accepted": true,
-          "delivery": "native-queue"
+          "status": "completed",
+          "result": {
+            "turnId": "turn-8",
+            "accepted": true,
+            "delivery": "native-queue"
+          }
         }
       },
       "rendererResponse": {
@@ -159,9 +158,12 @@
           "success": true,
           "data": {
             "result": {
-              "turnId": "turn-8",
-              "accepted": true,
-              "delivery": "native-queue"
+              "status": "completed",
+              "result": {
+                "turnId": "turn-8",
+                "accepted": true,
+                "delivery": "native-queue"
+              }
             }
           }
         }
@@ -280,10 +282,8 @@
       "case": "manual recheck from the fast WebUI clock",
       "rendererRequest": {
         "bindingId": "b-21",
-        "method": "_aelix/session/input/follow-up",
+        "method": "_aelix/session/requests/lookup",
         "payload": {
-          "turnId": "turn-8",
-          "message": "끝나면 차이를 표로 정리해 주세요.",
           "requestId": "01a1f3c9-0540-7000-8000-000000000002"
         }
       },
@@ -291,9 +291,52 @@
         "jsonrpc": "2.0",
         "id": 18,
         "result": {
-          "turnId": "turn-8",
-          "accepted": true,
-          "delivery": "native-queue"
+          "status": "completed",
+          "result": {
+            "turnId": "turn-8",
+            "accepted": true,
+            "delivery": "native-queue"
+          }
+        }
+      }
+    },
+    {
+      "case": "lookup sent before expiry arrives after eviction",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/requests/lookup",
+        "payload": {
+          "requestId": "01a1f392-16c0-7000-8000-000000000001"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 19,
+        "method": "_aelix/session/requests/lookup",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "requestId": "01a1f392-16c0-7000-8000-000000000001"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 19,
+        "result": {
+          "status": "unavailable"
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "status": "unavailable"
+            }
+          }
         }
       }
     }
@@ -302,33 +345,55 @@
     "rpcIds": [
       11,
       14,
-      15
+      15,
+      19
     ],
     "nativeSteerEnqueues": 1,
     "userChunksOnReceipt": 0,
     "automaticRetries": 0,
     "remoteWebUiClocks": {
       "acpTimeAtFirstReceipt": "2026-11-19T12:00:00Z",
-      "retryElapsedSinceFirstReceiptMs": 599999,
       "completedEntryExpiresAtElapsedMs": 600000,
       "devices": [
         {
           "browserTimeAtCreation": "2026-11-19T11:30:00Z",
           "firstRpcId": 11,
-          "retryRpcId": 14,
           "firstAccepted": true,
-          "sameResultOnRetry": true,
-          "expectedNativeEnqueues": 1
+          "expectedNativeEnqueues": 1,
+          "lookupRpcId": 14,
+          "returnsStoredWriteResult": true,
+          "nativeCallsFromLookup": 0
         },
         {
           "browserTimeAtCreation": "2026-11-19T12:30:00Z",
           "firstRpcId": 12,
-          "retryRpcId": 18,
           "firstAccepted": true,
-          "sameResultOnRetry": true,
-          "expectedNativeEnqueues": 1
+          "expectedNativeEnqueues": 1,
+          "lookupRpcId": 18,
+          "returnsStoredWriteResult": true,
+          "nativeCallsFromLookup": 0
         }
-      ]
+      ],
+      "lookupHandledElapsedSinceFirstReceiptMs": 599999
+    },
+    "lookupAfterEviction": {
+      "originalWriteRpcId": 11,
+      "lookupRpcId": 19,
+      "sentElapsedSinceFirstReceiptMs": 599999,
+      "completedEntryEvictedElapsedMs": 600000,
+      "arrivedElapsedSinceFirstReceiptMs": 600001,
+      "expectedLookupStatus": "unavailable",
+      "nativeCallsFromLookup": 0,
+      "newWriteReservationsFromLookup": 0,
+      "totalNativeSteerEnqueues": 1,
+      "rendererFollowUp": {
+        "stateRead": {
+          "method": "_aelix/session/input/state",
+          "payload": {}
+        },
+        "historyRead": "GET /api/conversations/c-17/messages",
+        "writeRequests": 0
+      }
     }
   },
   "consumedWithinPrompt": {

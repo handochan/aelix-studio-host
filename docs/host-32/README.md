@@ -67,11 +67,19 @@ dispatch 직전 취소라면 보내지 않는다. 이후 브라우저의 AbortSi
 
 ### 쓰기 중복 제거 (S2·S9)
 
-renderer는 사용자의 쓰기 의도 하나에 UUIDv7 `payload.requestId` 하나를 생성한다. steer·follow-up, selections/set, 자식 steer·wrap-up·stop에 필수다. 수동 재확인은 **같은 binding과 requestId, 동일 메서드·입력**으로만 한다. HTTP 재인증·재연결은 재송신을 유발하지 않는다. SDK의 JSON-RPC id는 매 호출 달라질 수 있다. host는 payload나 중복표를 해석하지 않는다.
+renderer는 새 쓰기 의도마다 UUIDv7 `payload.requestId`를 한 번 생성한다. steer·follow-up, selections/set, 자식 steer·wrap-up·stop에 적용한다. **최초 실행**은 쓰기 메서드로 보내고, **수동 재확인**은 읽기 전용 `_aelix/session/requests/lookup`으로 보낸다. 조회 payload는 원래 쓰기의 `requestId` 하나다. H1부터 ACP가 lookup을 광고한다. host는 다른 광고 메서드와 같은 envelope로 전달하고 SDK는 조회마다 새 JSON-RPC id를 붙인다. renderer는 HTTP 재인증·재연결·수동 재확인 때 쓰기 메서드를 재발행하지 않는다.
 
-10분 창은 **ACP가 해당 binding에서 키를 처음 받은 시점**부터 시작한다. ACP는 요청 수신 시 단조 시계 값을 읽고, 소유 세션·권한 확인 후 새 키를 예약할 때 그 값을 `firstSeen`으로 보관한다. 같은 키가 다시 도착해도 `firstSeen`은 그대로다. UUIDv7은 고유 식별자로만 사용한다. UUID에 담긴 기기 시각은 요청 허용이나 만료 판정에 쓰지 않는다.
+**쓰기 접수.** ACP는 소유 세션·권한 확인 뒤 현재 binding의 키를 조회하고, 새 키면 native 송신 전에 원자적으로 예약한다. 10분 창의 `firstSeen`은 ACP가 그 binding에서 쓰기 키를 처음 받은 단조 시각이다. UUIDv7은 고유성에만 사용한다. 기존 키로 중복 전달된 쓰기는 메서드·정규화한 payload digest를 대조한 뒤 이미 진행 중인 작업이나 결과를 재사용한다. 턴·epoch·파일 잠금 상태가 바뀌어도 저장된 결과는 유지한다. 다른 내용으로 키가 충돌하면 native 호출 없이 -32602로 거부한다. binding당 최대 256개 키와 응답 바이트 예산을 예약하며, 공간 부족이면 새 쓰기는 dispatch 전 `accepted:false,reason:"dedup-capacity"`로 거부한다. 기한 안의 항목을 일찍 퇴출하지 않는다. 미회수 작업은 기한이 지나도 정산할 때까지 슬롯에 보관한다.
 
-ACP는 binding당 최대 256개 키를 보유한다. 기존 엔트리는 메서드와 정규화한 payload digest를 대조해 재사용한다. 새 키는 native 송신 **전에 원자적으로 예약**한다. 중복 조회가 현재 턴·epoch·파일 잠금 검사보다 먼저여야 이미 성공한 쓰기를 나중에 stale로 바꾸지 않는다. 같은 키·같은 입력은 진행 중이면 같은 작업을 기다리고, 완료면 동일한 result 또는 오류를 새 RPC id에 담아 돌려준다. native 수신 여부가 불명인 항목은 결과 불명으로 보존한다. 데이터가 다른 키 충돌에는 native 호출이 없다. 기한 안의 항목을 일찍 퇴출하지 않는다. 공간 부족이면 새 키는 dispatch 전 `accepted:false,reason:"dedup-capacity"`다. 최초 수신 후 경과 시간이 600초에 도달하면 완료 항목의 보장 기간이 끝난다. 실행 중인 항목은 기한이 지났어도 회수까지 슬롯에 남긴다. 완료 항목을 퇴출하면 ACP는 같은 키를 처음 보는 키와 구별할 수 없다. UI는 보장 기간을 지났거나 남은 기간을 확신할 수 없으면 쓰기를 다시 보내지 않고 현재 상태와 이력을 조회한다. 완료 캐시는 바이트 예산도 예약해 큰 응답으로 예약 키가 사라지지 않게 한다. binding 교체·ACP 재시작을 넘는 중복 보장은 없다. 이때 UI는 기존 요청을 새 binding/새 ID로 재생하지 않고 현재 상태와 이력을 새로 조회한다. [동일 쓰기에 RPC 응답 둘, native enqueue 한 번](examples/running-input.json)
+**수동 재확인.** ACP가 요청을 처리할 때 같은 owner·binding 및 원 작업의 조회 권한을 확인하고, 기존 항목과 경과 시간을 함께 검사한다. 이 handler는 키 예약, `firstSeen` 갱신, native 호출 경로에 진입하지 않는다.
+
+| ACP의 조회 결과 | renderer 동작 |
+| --- | --- |
+| 600초 미만이며 완료 | `{status:"completed",result:…}`의 저장된 결과를 표시한다. 저장된 확정 RPC 오류는 `{status:"completed",rpcCode:…}`로 안전한 숫자 코드만 표시한다. |
+| 600초 미만이며 진행 중 / 결과 불명 | `{status:"pending"}`이면 기존 작업이 진행 중임을 표시한다. `{status:"unknown"}`이면 현재 상태와 이력을 조회한다. |
+| 경과 시간 ≥ 600초 또는 키 없음 | `{status:"unavailable"}`을 반환한다. 물리적 퇴출 시점과 무관하며, 최초 쓰기보다 조회가 먼저 도착해도 같은 결과다. renderer는 해당 기능의 상태와 대화 이력을 읽는다. 조회 실패를 미실행으로 표시하거나 기존 쓰기를 재전송하지 않는다. |
+
+binding이 바뀌었거나 lookup을 광고하지 않는 세션에서도 상태·이력을 다시 읽는다. #24에서는 현재 binding의 `input/state`와 owner의 `GET /api/conversations/{id}/messages`를 사용한다. 기한 안에 출발한 lookup도 ACP에서 처리할 때 이미 만료됐으면 native 호출은 **0회**다. [만료 전후 조회와 renderer 후속 읽기](examples/running-input.json)
 
 ## 순서와 다시 연결하기
 
@@ -122,7 +130,7 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 | 후속 수직 검증 | #7은 native 파일과 다음 요청의 실제 도구·스킬을 관찰한다. project 파일 생성 승인/거절, global 쓰기 거부와 helper 경로, 잠금·deferred를 모두 확인한다. S3는 #612가 들어온 조합에서 동시에 실행되는 두 자식, 대상 하나만 변경, 다른 부모 거절, 승인 대기 중 이벤트 진행, epoch 전후 replay/영속 이력을 확인한다. synthetic model, 실 provider, 설치 target 근거를 구분한다. |
 
 - **동시성과 수동 재확인.** project 동의 1건을 열어 둔 채 state·steer·자식 Stop의 전달을 검사한다. 5번째 동시 요청의 429, deadline 뒤 미회수 1·2·3건의 admission 전이, 늦은 reply·binding 폐기에서 예산 회수, 격리 중 표준 cancel을 단언한다. 모든 쓰기에서 동일 키의 동시/완료/결과 불명 재확인, 다른 입력과의 충돌, 만료·포화·재시작을 검사하고 native 호출 횟수를 센다.
-- **다른 기기의 WebUI 시계.** ACP 시각을 고정하고 로그인한 브라우저 두 대의 시계를 각각 30분 늦게·빠르게 설정한다. 각 기기가 만든 UUIDv7으로 첫 쓰기가 모두 접수되는지 확인한다. ACP 단조 시계로 최초 수신 후 599,999 ms에 보낸 동일 요청은 같은 결과를 반환하고 native 호출은 키당 1회다. 이 재확인이 창을 연장하지 않아 600,000 ms에 완료 항목이 만료되는지 가상 시계로 검사한다. [시계 오차별 요청·기대값](examples/running-input.json)
+- **다른 기기의 WebUI 시계.** ACP 시각을 고정하고 로그인한 브라우저 두 대의 시계를 각각 30분 늦게·빠르게 설정한다. 각 기기가 만든 UUIDv7으로 첫 쓰기가 모두 접수되는지 확인한다. ACP가 599,999 ms에 처리한 lookup은 저장된 결과를 반환한다. 같은 가상 시계에서 599,999 ms에 출발한 별도 lookup을 지연시켜 600,001 ms에 도착하게 한다. 600,000 ms 경계와 그 이후에는 퇴출 전후 모두 unavailable, 조회에 의한 native 호출 0회, 최초 쓰기를 포함한 실행은 1회인지 검사한다. renderer가 상태·이력만 읽고 쓰기를 재발행하지 않는지도 확인한다. [시계 오차별 요청·기대값](examples/running-input.json)
 - **ACP 등록표가 브라우저 노출 경계다.** A1부터 등록한 session typed handler와 방향의 정확한 snapshot을 승인된 D16 fixture와 대조한다. 메서드 추가 시 snapshot의 실제 diff를 리뷰한다. 후보별 schema·허용 scope와 native 호출 대상을 검증하고, arbitrary method/command/path를 받는 범용 dispatcher, `_aelix/manage`, 쉘·파일 프록시나 전역 handler를 등록하면 실패시킨다. 이름만 바꿔 감싼 프록시도 body/negative dispatch 시험에서 잡는다. H1 전용과 H2, #612 미지원/지원 조합의 광고를 따로 검사한다.
 - **이력·과부하.** 원래 prompt가 두 번 저장되지 않는지, 소비 전후 및 동일 문장 두 건·낱개 취소·load replay·turn 종료 뒤 늦은 이벤트에서 행 수, 메시지 ID, 실제 turn과 출력 순서를 검사한다. 30/s 초과 원천 이벤트를 발생시켜 aggregator의 10/s, terminal 반영, native cursor로 누락 복구, renderer의 단일 resync와 backoff 상한, 다른 소켓 진행을 검사한다.
 
@@ -131,7 +139,7 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 | PR | 선행과 완료 조건 |
 | --- | --- |
 | H1 · host 요청과 표준 입력 이력 | U5-b의 두 조건, protected admission, binding, v1 발견/POST, 동시 요청·결과 불명 경계를 구현한다. U6-a의 live user chunk 저장·표시, 원래 prompt 중복 방지, load 억제, prompt 종료 fence를 **같은 PR**에서 검증한다. H1은 요청만 협상한다. 바이트 측정과 큰 표준 프레임 회귀를 이 PR에 첨부한다. |
-| A1 · #24 ACP | H1 계약을 기준으로 state/steer/follow-up, 쓰기 requestId 처리, 소비 시 표준 chunk와 prompt 완료 순서, 승인된 광고 snapshot을 구현한다. H2와 병행할 수 있다. |
+| A1 · #24 ACP | H1 계약을 기준으로 state/steer/follow-up, 쓰기 requestId 처리와 기존 결과 전용 requests/lookup, 소비 시 표준 chunk와 prompt 완료 순서, 승인된 광고 snapshot을 구현한다. H2와 병행할 수 있다. |
 | Studio #24 | **H1 + A1의 branch SHA**로 독립 클라이언트와 기존 입력 UI를 연결한다. desktop·로그인 WebUI에서 실제 입력, 늦은 큐 표시, 소유자의 재열기 이력, 표준 Stop을 검증한다. H2와 supervisor 변경은 선행이 아니다. |
 | H2 · host 확장 알림 | H1 위에 기존 realtime router의 인증된 구독·nonce 검사·ordered unicast·폐기·backpressure를 붙인다. 통과한 조합만 notifications=true를 광고한다. H2 병합 전에도 #24는 H1으로 검증한다. `AppServices`가 조립하며 별도 port·worker는 두지 않는다(D12). |
 | A2 → Studio #7 | H1 요청 경로, A1 공통 중복 방지, native selection pin을 재사용한다. ACP에서 scope 투영·쓰기 제한·동의·기능 거절을 검증한 뒤 Studio가 비활성 세션 안내와 선택 UI를 연결한다. 표준 permission은 H2에 의존하지 않는다. |
