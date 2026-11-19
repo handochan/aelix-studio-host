@@ -1,0 +1,364 @@
+{
+  "fixtureClock": "2026-11-19T12:00:00Z",
+  "postUrl": "/api/conversations/c-17/acp-extensions",
+  "exchanges": [
+    {
+      "case": "read current tool selection",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/selections/list",
+        "payload": {
+          "kind": "tool"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 20,
+        "result": {
+          "kind": "tool",
+          "effect": "next_request",
+          "scopes": {
+            "global": {
+              "path": "<fixture>/agent/settings.json",
+              "writable": false,
+              "reason": "management-helper",
+              "exists": true
+            },
+            "project": {
+              "path": "<fixture>/workspace/.aelix/settings.json",
+              "writable": true,
+              "reason": null,
+              "exists": true
+            }
+          },
+          "items": [
+            {
+              "key": "read",
+              "label": "read",
+              "role": "item",
+              "invocation": "",
+              "description": "Read the contents of a file",
+              "group": "builtin",
+              "groupLabel": "BUILT-IN",
+              "location": "",
+              "identities": [
+                "read"
+              ],
+              "path": null,
+              "scope": null,
+              "sourceBase": null,
+              "packagePath": null,
+              "saved": true,
+              "applied": true,
+              "inForce": true,
+              "pending": false,
+              "decidedBy": null,
+              "lock": null,
+              "problem": null,
+              "live": true,
+              "liveNote": null,
+              "refusal": null
+            }
+          ],
+          "problems": [],
+          "notices": [],
+          "unreadable": [],
+          "policyPending": false
+        }
+      }
+    },
+    {
+      "case": "write current project's existing settings file",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/selections/set",
+        "payload": {
+          "kind": "tool",
+          "scope": "project",
+          "changes": [
+            {
+              "key": "read",
+              "on": false
+            }
+          ],
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000021"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "_aelix/session/selections/set",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "kind": "tool",
+            "scope": "project",
+            "changes": [
+              {
+                "key": "read",
+                "on": false
+              }
+            ],
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000021"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 21,
+        "result": {
+          "accepted": true,
+          "kind": "tool",
+          "scope": "project",
+          "effect": "next_request",
+          "written": [
+            "<fixture>/workspace/.aelix/settings.json"
+          ],
+          "changed": [
+            {
+              "label": "read",
+              "saved": false
+            }
+          ],
+          "mismatches": [],
+          "apply": {
+            "applied": true,
+            "deferred": false,
+            "turnedOn": [],
+            "turnedOff": [
+              "read"
+            ],
+            "warning": null
+          }
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "accepted": true,
+              "kind": "tool",
+              "scope": "project",
+              "effect": "next_request",
+              "written": [
+                "<fixture>/workspace/.aelix/settings.json"
+              ],
+              "changed": [
+                {
+                  "label": "read",
+                  "saved": false
+                }
+              ],
+              "mismatches": [],
+              "apply": {
+                "applied": true,
+                "deferred": false,
+                "turnedOn": [],
+                "turnedOff": [
+                  "read"
+                ],
+                "warning": null
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "read applied state after project write",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/selections/list",
+        "payload": {
+          "kind": "tool"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 22,
+        "result": {
+          "kind": "tool",
+          "effect": "next_request",
+          "scopes": {
+            "global": {
+              "path": "<fixture>/agent/settings.json",
+              "writable": false,
+              "reason": "management-helper",
+              "exists": true
+            },
+            "project": {
+              "path": "<fixture>/workspace/.aelix/settings.json",
+              "writable": true,
+              "reason": null,
+              "exists": true
+            }
+          },
+          "items": [
+            {
+              "key": "read",
+              "label": "read",
+              "role": "item",
+              "invocation": "",
+              "description": "Read the contents of a file",
+              "group": "builtin",
+              "groupLabel": "BUILT-IN",
+              "location": "",
+              "identities": [
+                "read"
+              ],
+              "path": null,
+              "scope": null,
+              "sourceBase": null,
+              "packagePath": null,
+              "saved": false,
+              "applied": false,
+              "inForce": false,
+              "pending": false,
+              "decidedBy": "project",
+              "lock": null,
+              "problem": null,
+              "live": false,
+              "liveNote": null,
+              "refusal": null
+            }
+          ],
+          "problems": [],
+          "notices": [],
+          "unreadable": [],
+          "policyPending": false
+        }
+      }
+    },
+    {
+      "case": "global write belongs to helper",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/selections/set",
+        "payload": {
+          "kind": "tool",
+          "scope": "global",
+          "changes": [
+            {
+              "key": "read",
+              "on": false
+            }
+          ],
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000023"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 23,
+        "error": {
+          "code": -33102,
+          "message": "Global changes require the management helper."
+        }
+      },
+      "rendererResponse": {
+        "status": 422,
+        "body": {
+          "success": false,
+          "error": "Extension request failed.",
+          "code": "EXT_AGENT_ERROR",
+          "details": {
+            "rpcCode": -33102
+          }
+        }
+      }
+    },
+    {
+      "case": "current project selection is locked before any write",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/selections/set",
+        "payload": {
+          "kind": "tool",
+          "scope": "project",
+          "changes": [
+            {
+              "key": "read",
+              "on": false
+            }
+          ],
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000024"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "_aelix/session/selections/set",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "kind": "tool",
+            "scope": "project",
+            "changes": [
+              {
+                "key": "read",
+                "on": false
+              }
+            ],
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000024"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "result": {
+          "accepted": false,
+          "reason": "selection-locked",
+          "scope": "project",
+          "mismatches": [
+            {
+              "key": "read",
+              "reason": "locked"
+            }
+          ],
+          "written": []
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "accepted": false,
+              "reason": "selection-locked",
+              "scope": "project",
+              "mismatches": [
+                {
+                  "key": "read",
+                  "reason": "locked"
+                }
+              ],
+              "written": []
+            }
+          }
+        }
+      }
+    }
+  ],
+  "beforeFirstPrompt": {
+    "discovery": {
+      "status": 409,
+      "body": {
+        "success": false,
+        "error": "Session is not open.",
+        "code": "EXT_NO_LIVE_TASK"
+      }
+    },
+    "renderer": {
+      "sessionControlsEnabled": false,
+      "notice": "세션을 연 뒤 이 대화의 도구·스킬을 변경할 수 있습니다.",
+      "globalWrites": "management-helper",
+      "rediscoverOn": "session-attached"
+    },
+    "tasksStartedByDiscovery": 0
+  }
+}

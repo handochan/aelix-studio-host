@@ -1,0 +1,194 @@
+{
+  "fixtureClock": "2026-11-19T12:00:00Z",
+  "postUrl": "/api/conversations/c-17/acp-extensions",
+  "status": "candidate ACP contract pending aelix-ai #612",
+  "exchanges": [
+    {
+      "case": "discover children under bound parent",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/list",
+        "payload": {}
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 30,
+        "result": {
+          "epoch": "native-e3",
+          "seq": 10,
+          "children": [
+            {
+              "childId": "child-a",
+              "state": "running"
+            },
+            {
+              "childId": "child-b",
+              "state": "running"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "case": "steer the second child",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/steer",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "message": "두 번째 결과만 확인해 주세요.",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000031"
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "_aelix/session/children/steer",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "epoch": "native-e3",
+            "childId": "child-b",
+            "message": "두 번째 결과만 확인해 주세요.",
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000031"
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 31,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "accepted": true
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "epoch": "native-e3",
+              "childId": "child-b",
+              "accepted": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "ask that child to wrap up",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/wrap-up",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000032"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 32,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "accepted": true
+        }
+      }
+    },
+    {
+      "case": "stop that child explicitly",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/stop",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000033"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 33,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "accepted": true
+        }
+      }
+    },
+    {
+      "case": "read missed native events within one epoch",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/events",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "afterSeq": 10
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 34,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "events": [
+            {
+              "epoch": "native-e3",
+              "childId": "child-b",
+              "seq": 11,
+              "state": "running",
+              "event": "started"
+            },
+            {
+              "epoch": "native-e3",
+              "childId": "child-b",
+              "seq": 12,
+              "state": "running",
+              "event": "activity"
+            }
+          ],
+          "lastSeq": 12
+        }
+      }
+    },
+    {
+      "case": "reject a stale epoch",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/stop",
+        "payload": {
+          "epoch": "native-e2",
+          "childId": "child-b",
+          "requestId": "01a1f3ad-8e00-7000-8000-000000000035"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 35,
+        "result": {
+          "accepted": false,
+          "reason": "stale-epoch"
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "accepted": false,
+              "reason": "stale-epoch"
+            }
+          }
+        }
+      }
+    }
+  ]
+}
