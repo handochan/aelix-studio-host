@@ -1106,6 +1106,7 @@ impl AcpAgentManager {
             }
         }
         .map(|snapshot| SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::Observed,
             config_options: Some(snapshot.options),
         })

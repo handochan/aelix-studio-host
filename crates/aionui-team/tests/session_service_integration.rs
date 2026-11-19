@@ -740,6 +740,7 @@ impl TeamConversationProvisioningPort for FakeConversationPorts {
             });
         }
         Ok(SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::PendingNextTurn,
             config_options: Some(options),
         })

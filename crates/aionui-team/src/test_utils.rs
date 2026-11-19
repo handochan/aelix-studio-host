@@ -1199,6 +1199,7 @@ pub(crate) mod workspace_harness {
                 .await?;
             let config_options = self.get_config_options(conversation_id).await?.config_options;
             Ok(SetConfigOptionResponse {
+                backend_accepted: None,
                 confirmation: ConfigOptionConfirmation::Observed,
                 config_options: Some(config_options),
             })

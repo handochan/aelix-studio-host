@@ -226,6 +226,7 @@ impl IMockAgent for NoopMockAgent {
         _value: &str,
     ) -> Result<aionui_api_types::SetConfigOptionResponse, aionui_ai_agent::AgentError> {
         Ok(aionui_api_types::SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: aionui_api_types::ConfigOptionConfirmation::Observed,
             config_options: Some(vec![aionui_api_types::AcpConfigOptionDto {
                 id: "model".to_owned(),

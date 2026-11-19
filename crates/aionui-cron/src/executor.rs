@@ -2772,6 +2772,7 @@ mod tests {
             let mut guard = self.mode.write().await;
             *guard = value.to_owned();
             Ok(SetConfigOptionResponse {
+                backend_accepted: None,
                 confirmation: ConfigOptionConfirmation::Observed,
                 config_options: None,
             })

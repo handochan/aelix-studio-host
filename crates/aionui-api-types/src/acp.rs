@@ -122,6 +122,10 @@ pub struct GetConfigOptionsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetConfigOptionResponse {
     pub confirmation: ConfigOptionConfirmation,
+    /// The backend accepted a deferred mode selection. Legacy hosts can report
+    /// pending_next_turn before receiving an acceptance reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_accepted: Option<bool>,
     pub config_options: Option<Vec<AcpConfigOptionDto>>,
 }
 
@@ -277,6 +281,7 @@ mod tests {
     #[test]
     fn set_config_option_response_serializes_command_ack_without_snapshot() {
         let resp = SetConfigOptionResponse {
+            backend_accepted: None,
             confirmation: ConfigOptionConfirmation::CommandAck,
             config_options: None,
         };
@@ -299,6 +304,19 @@ mod tests {
         assert_eq!(req.acp_args, vec!["--flag"]);
         assert_eq!(req.env.get("KEY"), Some(&"value".into()));
         assert_eq!(req.runtime_scope_id.as_deref(), Some("custom-agent:test"));
+    }
+
+    #[test]
+    fn deferred_config_acceptance_is_optional_for_older_clients_and_hosts() {
+        let legacy = json!({"confirmation": "pending_next_turn", "config_options": []});
+        let mut response: SetConfigOptionResponse = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(response.backend_accepted, None);
+        assert_eq!(serde_json::to_value(&response).unwrap(), legacy);
+        response.backend_accepted = Some(true);
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({"confirmation": "pending_next_turn", "backend_accepted": true, "config_options": []})
+        );
     }
 
     #[test]

@@ -3172,16 +3172,16 @@ impl TeamSessionService {
         let mut incomplete = false;
         for agent in &team.agents {
             let instance = self.task_manager.get_task(&agent.conversation_id);
-            // A Ready slot without its old task may be rebuilding in the
-            // turn executor rather than the attach path. Store the requested
-            // mode, but do not claim it reached a live task we could not set.
+            // A Ready Aelix slot without a task may be rebuilding in the
+            // turn executor. Persist the selection for rebuild and report the
+            // live application as incomplete.
             if instance.is_none()
                 && matches!(mode, "default" | "yolo")
                 && self.sessions.get(team_id).is_some_and(|entry| {
-                    matches!(
-                        entry.session.member_runtimes().snapshot(&agent.slot_id),
-                        MemberRuntimeSnapshot::Ready
-                    )
+                    entry
+                        .session
+                        .member_runtimes()
+                        .ready_uses_aelix_permission_policy(&agent.slot_id)
                 })
             {
                 incomplete = true;
@@ -3466,6 +3466,7 @@ mod tests {
             assert_eq!(value, "read-only");
             match self.mode_result.lock().unwrap().clone() {
                 Ok(()) => Ok(SetConfigOptionResponse {
+                    backend_accepted: None,
                     confirmation: ConfigOptionConfirmation::Observed,
                     config_options: None,
                 }),
@@ -3606,12 +3607,12 @@ mod tests {
         request
     }
 
-    fn mark_member_runtime_ready(session: &TeamSession, slot_id: &str) {
+    fn mark_member_runtime_ready(session: &TeamSession, slot_id: &str, aelix_permission_policy: bool) {
         let lease = match session.member_runtimes().reserve_attach(slot_id, false) {
             ReserveAttach::Start(lease) => lease,
             other => panic!("ready-state seed must start, got {other:?}"),
         };
-        assert!(session.member_runtimes().commit_ready(&lease));
+        assert!(session.member_runtimes().commit_ready(&lease, aelix_permission_policy));
         session
             .work_coordinator()
             .set_runtime_constraint(slot_id, RuntimeConstraint::Ready);
@@ -4140,14 +4141,44 @@ mod tests {
             conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_warmup_permission"],
             "default"
         );
+    }
 
-        // A turn-executor rebuild with no attached task cannot acknowledge a
-        // live mode update, even if the request can save the next mode.
-        assert!(svc.task_manager.get_task(&worker.conversation_id).is_none());
-        assert!(matches!(
-            svc.set_session_mode("user-test", &created.id, "default").await,
-            Err(TeamError::InvalidRequest(reason)) if reason.contains("every Aelix slot")
-        ));
+    #[tokio::test]
+    async fn missing_ready_task_reports_partial_permission_change_only_for_aelix_slots() {
+        for aelix_permission_policy in [false, true] {
+            let (svc, _repo, _task_manager, conv_repo) = setup_with_factory_metadata_team_repo_and_conversation_repo();
+            let created = svc
+                .create_team("user-test", two_agent_team_request("Rebuilding slot"))
+                .await
+                .unwrap();
+            svc.ensure_session("user-test", &created.id).await.unwrap();
+            let worker = created
+                .assistants
+                .iter()
+                .find(|agent| agent.role == "teammate")
+                .unwrap();
+            let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
+            mark_member_runtime_ready(&session, &worker.slot_id, aelix_permission_policy);
+            assert!(svc.task_manager.get_task(&worker.conversation_id).is_none());
+            let worker_agent = session.scheduler().get_agent(&worker.slot_id).await.unwrap();
+            svc.provisioner()
+                .update_session_mode_seed(&worker_agent, "yolo")
+                .await
+                .unwrap();
+
+            let result = svc.set_session_mode("user-test", &created.id, "default").await;
+            if aelix_permission_policy {
+                assert!(
+                    matches!(result, Err(TeamError::InvalidRequest(reason)) if reason.contains("every Aelix slot"))
+                );
+            } else {
+                result.expect("seed-only updates retain their success for non-Aelix runtimes");
+            }
+            assert_eq!(
+                conv_repo.get_extra(&worker.conversation_id).unwrap()["mock_team_permission"],
+                "default"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4208,7 +4239,7 @@ mod tests {
             .unwrap();
         svc.ensure_session("user-test", &created.id).await.unwrap();
         let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
-        mark_member_runtime_ready(&session, &worker.slot_id);
+        mark_member_runtime_ready(&session, &worker.slot_id, false);
         assert!(session.scheduler().take_needs_role_prompt(&worker.slot_id).await);
         session
             .mailbox()
@@ -4306,7 +4337,7 @@ mod tests {
             .unwrap();
         svc.ensure_session("user-test", &created.id).await.unwrap();
         let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
-        mark_member_runtime_ready(&session, &worker.slot_id);
+        mark_member_runtime_ready(&session, &worker.slot_id, false);
         let lease = session
             .work_coordinator()
             .acquire_enqueue(EnqueueRequest {
@@ -4392,7 +4423,7 @@ mod tests {
             .unwrap();
         svc.ensure_session("user-test", &created.id).await.unwrap();
         let session = Arc::clone(&svc.sessions.get(&created.id).unwrap().session);
-        mark_member_runtime_ready(&session, &worker.slot_id);
+        mark_member_runtime_ready(&session, &worker.slot_id, false);
         task_manager.insert_mode_agent(&worker.conversation_id);
         conv_repo.mark_runtime_attach_failed(&worker.conversation_id);
 

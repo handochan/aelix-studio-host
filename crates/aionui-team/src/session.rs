@@ -2357,7 +2357,13 @@ async fn attach_member_runtime_inner(
         }
     };
 
-    if !session.member_runtimes.commit_ready(&lease) {
+    // Keep the policy identity with this attach generation even if the
+    // task is later absent during a turn-executor rebuild.
+    let aelix_permission_policy = matches!(
+        task_manager.get_task(&agent.conversation_id),
+        Some(aionui_ai_agent::AgentInstance::Acp(manager)) if manager.has_team_permission_policy()
+    );
+    if !session.member_runtimes.commit_ready(&lease, aelix_permission_policy) {
         if registered_event_loop {
             session.event_loops.remove(&agent.slot_id);
         }
@@ -4178,7 +4184,7 @@ mod tests {
         else {
             panic!("removing runtime setup must reserve attach");
         };
-        assert!(removing_session.member_runtimes.commit_ready(&removing_lease));
+        assert!(removing_session.member_runtimes.commit_ready(&removing_lease, false));
         assert!(matches!(
             removing_session.member_runtimes.begin_remove("lead-1"),
             BeginRemove::Start(_)
@@ -4232,7 +4238,7 @@ mod tests {
             panic!("old attach must be reserved");
         };
         let new_registry = MemberRuntimeRegistry::new("new-generation");
-        assert!(!new_registry.commit_ready(&old_attach));
+        assert!(!new_registry.commit_ready(&old_attach, false));
         assert_eq!(new_registry.snapshot("lead-1"), MemberRuntimeSnapshot::Absent);
     }
 

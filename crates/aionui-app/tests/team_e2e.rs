@@ -2483,6 +2483,21 @@ for line in sys.stdin:
     attach(&roster[1], "runtime/restart").await;
     assert_eq!(mode(&roster[1]).await, "default");
 
+    // A cancelled Aelix task can disappear before the Ready slot is
+    // rebuilt. The Team saves Ask for the rebuild and reports partial
+    // application while that slot has no live task.
+    assert_eq!(change_mode("yolo").await.status(), StatusCode::OK);
+    services.worker_task_manager.kill_and_wait(member_id, None).await;
+    assert!(services.worker_task_manager.get_task(member_id).is_none());
+    let missing = change_mode("default").await;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(missing).await["error"],
+        "Team permission change could not be applied to every Aelix slot"
+    );
+    attach(&roster[1], "runtime/restart").await;
+    assert_eq!(mode(&roster[1]).await, "default");
+
     let stopped = app
         .clone()
         .oneshot(delete_with_token(
