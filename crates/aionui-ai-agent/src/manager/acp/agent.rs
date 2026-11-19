@@ -1358,7 +1358,9 @@ impl AcpAgentManager {
         let (content, consumed_prelude) = if defer_session_prelude(&raw_user_input, agent_name) {
             let mut session = self.session.write().await;
             if session.has_pending_session_new_prelude() && !session.has_deferred_aelix_prelude() {
-                self.persist_aelix_prelude(&sid, AelixPreludeChange::Defer).await?;
+                self.persist_aelix_prelude(&sid, AelixPreludeChange::Defer)
+                    .await
+                    .map_err(AcpSendFailure::PreludePersistence)?;
                 session.mark_deferred_aelix_prelude();
             }
             (raw_user_input, false)
@@ -1374,7 +1376,7 @@ impl AcpAgentManager {
             let transformed = self.pipeline.pre_send(&mut ctx, data.content.clone()).await;
             if deferred && let Err(error) = self.persist_aelix_prelude(&sid, AelixPreludeChange::Consume).await {
                 s.mark_deferred_aelix_prelude();
-                return Err(error.into());
+                return Err(AcpSendFailure::PreludePersistence(error));
             }
             self.commit_session_changes(&mut s).await;
             (transformed, deferred)

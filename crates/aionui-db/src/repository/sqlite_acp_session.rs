@@ -334,14 +334,16 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         use AelixPreludeChange::{Consume, Defer, Restore};
 
         let result = sqlx::query(
-            "UPDATE acp_session SET session_config = CASE \
+            "UPDATE acp_session SET session_id = COALESCE(session_id, ?), session_config = CASE \
              WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
              ELSE json_remove(session_config, '$.aelix_pending_prelude') END \
-             WHERE conversation_id = ? AND (session_id = ? OR (? AND session_id IS NULL)) \
+             WHERE conversation_id = ? AND (session_id = ? OR (? AND session_id IS NULL \
+               AND json_type(session_config, '$.aelix_pending_prelude') IS NULL)) \
                AND (NOT ? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
                AND (NOT ? OR json_type(session_config, '$.aelix_pending_prelude') IS NULL) \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
         )
+        .bind(session_id)
         .bind(change != Consume)
         .bind(session_id)
         .bind(conversation_id)
@@ -522,8 +524,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            !repo
-                .get_for_user("user-1", "conv-1")
+            repo.get_for_user("user-1", "conv-1")
                 .await
                 .unwrap()
                 .unwrap()
@@ -591,18 +592,13 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Defer)
-                .await
-                .unwrap()
-        );
-        assert!(
             !repo
                 .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Consume)
                 .await
                 .unwrap()
         );
         assert!(
-            repo.update_session_id_for_user("user-1", "conv-1", "backend")
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Defer)
                 .await
                 .unwrap()
         );
@@ -660,6 +656,12 @@ mod tests {
         assert!(
             !repo
                 .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Defer)
                 .await
                 .unwrap()
         );

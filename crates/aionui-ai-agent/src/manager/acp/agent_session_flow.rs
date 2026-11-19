@@ -677,7 +677,13 @@ fn prompt_was_rejected(error: &AcpError, rx: &mut tokio::sync::broadcast::Receiv
     // reported activity before that reply or if the receiver fell behind.
     if !matches!(
         error,
-        AcpError::InvalidRequest { .. } | AcpError::InvalidParams { .. } | AcpError::MethodNotFound { .. }
+        AcpError::InvalidRequest { .. }
+            | AcpError::InvalidParams { .. }
+            | AcpError::MethodNotFound { .. }
+            // The negotiated Aelix adapter uses -32000 for prompt admission
+            // failures, including the activity lease before dispatch_request.
+            // Other ACP peers map -32000 to AuthRequired.
+            | AcpError::ApplicationError { code: -32000, .. }
     ) {
         return false;
     }
@@ -1525,6 +1531,7 @@ mod tests {
     fn prelude_restoration_distinguishes_pre_sdk_failure_from_unknown_delivery() {
         let (_tx, mut rx) = broadcast::channel::<AgentStreamEvent>(8);
         assert!(super::prompt_was_rejected(&super::AcpError::NotConnected, &mut rx));
+        assert!(!super::prompt_was_rejected(&super::AcpError::AuthRequired, &mut rx));
         assert!(!super::prompt_was_rejected(
             &super::AcpError::PromptOutcomeUnknown,
             &mut rx

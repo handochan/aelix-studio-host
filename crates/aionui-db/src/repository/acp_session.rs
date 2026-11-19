@@ -109,8 +109,9 @@ pub trait IAcpSessionRepository: Send + Sync {
     async fn clear_session_id_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError>;
 
     /// Update the deferred first-prompt marker for the owning conversation and
-    /// its matching backend session. Initial deferral can precede the
-    /// session-assigned event. Consumption and restoration require the bound ID.
+    /// its matching backend session. Initial deferral can bind a fresh session
+    /// and store the marker atomically before the session-assigned event.
+    /// Consumption and restoration require the bound ID.
     async fn update_aelix_prelude_for_user(
         &self,
         user_id: &str,
