@@ -26,6 +26,7 @@ use aionui_api_types::{
 use aionui_common::{
     AgentKillReason, AgentType, ConversationStatus, ErrorChain, TimestampMs, normalize_keys_to_snake_case, now_ms,
 };
+use aionui_db::AelixPreludeChange;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -1334,13 +1335,13 @@ impl AcpAgentManager {
             .initialize_response()
             .and_then(|response| response.agent_info);
         let agent_name = agent_info.as_ref().map(|info| info.name.as_str());
-        let content = if defer_session_prelude(&raw_user_input, agent_name) {
+        let (content, consumed_prelude) = if defer_session_prelude(&raw_user_input, agent_name) {
             let mut session = self.session.write().await;
             if session.has_pending_session_new_prelude() && !session.has_deferred_aelix_prelude() {
-                self.persist_aelix_prelude(&sid, true).await?;
+                self.persist_aelix_prelude(&sid, AelixPreludeChange::Defer).await?;
                 session.mark_deferred_aelix_prelude();
             }
-            raw_user_input
+            (raw_user_input, false)
         } else {
             let mut s = self.session.write().await;
             let deferred = s.has_deferred_aelix_prelude();
@@ -1351,12 +1352,12 @@ impl AcpAgentManager {
                 runtime: &self.runtime,
             };
             let transformed = self.pipeline.pre_send(&mut ctx, data.content.clone()).await;
-            if deferred && let Err(error) = self.persist_aelix_prelude(&sid, false).await {
+            if deferred && let Err(error) = self.persist_aelix_prelude(&sid, AelixPreludeChange::Consume).await {
                 s.mark_deferred_aelix_prelude();
                 return Err(error.into());
             }
             self.commit_session_changes(&mut s).await;
-            transformed
+            (transformed, deferred)
         };
 
         self.dump_acp_final_input(&sid, data, &content);
@@ -1365,7 +1366,7 @@ impl AcpAgentManager {
             content,
             ..data.clone()
         };
-        self.prompt_existing_session(&data, Some(&sid), matched_command.as_ref())
+        self.prompt_existing_session(&data, Some(&sid), matched_command.as_ref(), consumed_prelude)
             .await
     }
 

@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use crate::error::DbError;
 use crate::models::AcpSessionRow;
 use crate::repository::acp_session::{
-    CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams,
+    AelixPreludeChange, CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams,
 };
 
 #[derive(Clone, Debug)]
@@ -306,27 +306,32 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn set_aelix_prelude_pending_for_user(
+    async fn update_aelix_prelude_for_user(
         &self,
         user_id: &str,
         conversation_id: &str,
         session_id: &str,
-        pending: bool,
+        change: AelixPreludeChange,
     ) -> Result<bool, DbError> {
+        use AelixPreludeChange::{Consume, Defer, Restore};
+
         let result = sqlx::query(
             "UPDATE acp_session SET session_config = CASE \
              WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
              ELSE json_remove(session_config, '$.aelix_pending_prelude') END \
-             WHERE conversation_id = ? AND (session_id IS NULL OR session_id = ?) \
-               AND (? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
+             WHERE conversation_id = ? AND (session_id = ? OR (? AND session_id IS NULL)) \
+               AND (NOT ? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
+               AND (NOT ? OR json_type(session_config, '$.aelix_pending_prelude') IS NULL) \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
         )
-        .bind(pending)
+        .bind(change != Consume)
         .bind(session_id)
         .bind(conversation_id)
         .bind(session_id)
-        .bind(pending)
+        .bind(change == Defer)
+        .bind(change == Consume)
         .bind(session_id)
+        .bind(change == Restore)
         .bind(user_id)
         .execute(&self.pool)
         .await?;
@@ -489,12 +494,12 @@ mod tests {
 
         assert!(
             !repo
-                .set_aelix_prelude_pending_for_user("user-2", "conv-1", "backend", true)
+                .update_aelix_prelude_for_user("user-2", "conv-1", "backend", AelixPreludeChange::Defer)
                 .await
                 .unwrap()
         );
         assert!(
-            repo.set_aelix_prelude_pending_for_user("user-1", "conv-1", "backend", true)
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", AelixPreludeChange::Defer)
                 .await
                 .unwrap()
         );
@@ -521,19 +526,19 @@ mod tests {
         );
         assert!(
             !repo
-                .set_aelix_prelude_pending_for_user("user-2", "conv-1", "backend", false)
+                .update_aelix_prelude_for_user("user-2", "conv-1", "backend", AelixPreludeChange::Consume)
                 .await
                 .unwrap()
         );
         assert!(
             !repo
-                .set_aelix_prelude_pending_for_user("user-1", "conv-1", "wrong", true)
+                .update_aelix_prelude_for_user("user-1", "conv-1", "wrong", AelixPreludeChange::Defer)
                 .await
                 .unwrap()
         );
         assert!(
             !repo
-                .set_aelix_prelude_pending_for_user("user-1", "conv-1", "wrong", false)
+                .update_aelix_prelude_for_user("user-1", "conv-1", "wrong", AelixPreludeChange::Consume)
                 .await
                 .unwrap()
         );
@@ -553,6 +558,93 @@ mod tests {
         let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
         assert!(!row.has_pending_aelix_prelude("backend"));
         assert!(!row.has_pending_aelix_prelude("replacement"));
+    }
+
+    #[tokio::test]
+    async fn aelix_prelude_restore_requires_the_original_bound_owner_and_an_empty_marker() {
+        use AelixPreludeChange::{Consume, Defer, Restore};
+
+        let (repo, _db) = setup().await;
+        repo.create(&create_params("conv-1")).await.unwrap();
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Defer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Consume)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "backend")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Consume)
+                .await
+                .unwrap()
+        );
+
+        for (user, session) in [("user-2", "backend"), ("user-1", "wrong")] {
+            assert!(
+                !repo
+                    .update_aelix_prelude_for_user(user, "conv-1", session, Restore)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.get_for_user("user-1", "conv-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .has_pending_aelix_prelude("backend")
+        );
+
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "replacement")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "replacement", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(repo.clear_session_id_for_user("user-1", "conv-1").await.unwrap());
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

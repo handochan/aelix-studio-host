@@ -3433,12 +3433,12 @@ mod tests {
         ) -> Result<bool, aionui_db::DbError> {
             Ok(false)
         }
-        async fn set_aelix_prelude_pending_for_user(
+        async fn update_aelix_prelude_for_user(
             &self,
             _user_id: &str,
             _conversation_id: &str,
             _session_id: &str,
-            _pending: bool,
+            _change: aionui_db::AelixPreludeChange,
         ) -> Result<bool, aionui_db::DbError> {
             Ok(false)
         }

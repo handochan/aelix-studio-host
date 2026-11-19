@@ -65,6 +65,14 @@ impl SaveRuntimeStateParams<'_> {
     }
 }
 
+/// State changes for a deferred Aelix first-prompt prelude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AelixPreludeChange {
+    Defer,
+    Consume,
+    Restore,
+}
+
 #[async_trait::async_trait]
 pub trait IAcpSessionRepository: Send + Sync {
     /// Fetch the full row only when the owning conversation belongs to `user_id`.
@@ -97,14 +105,14 @@ pub trait IAcpSessionRepository: Send + Sync {
     async fn clear_session_id_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError>;
 
     /// Update the deferred first-prompt marker for the owning conversation and
-    /// its matching backend session. A newly opened session may still be unbound
-    /// while the session-assigned event reaches the repository.
-    async fn set_aelix_prelude_pending_for_user(
+    /// its matching backend session. Initial deferral can precede the
+    /// session-assigned event. Consumption and restoration require the bound ID.
+    async fn update_aelix_prelude_for_user(
         &self,
         user_id: &str,
         conversation_id: &str,
         session_id: &str,
-        pending: bool,
+        change: AelixPreludeChange,
     ) -> Result<bool, DbError>;
 
     /// Delete the row when the owning conversation belongs to `user_id`.
