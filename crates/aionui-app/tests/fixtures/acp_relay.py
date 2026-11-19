@@ -129,10 +129,17 @@ while True:
         elif method.endswith("/finish"):
             assert prompt is not None
             if body.get("failInsert"):
-                update("user_message_chunk", "blocked history", "rejected")
-                result(prompt, {"stopReason": "end_turn"})
+                active_prompt = prompt
                 prompt = None
                 result(rpc_id, None)
+
+                def fail_insert():
+                    while not counter.with_suffix(".reject-insert").exists():
+                        time.sleep(0.01)
+                    update("user_message_chunk", "blocked history", "rejected")
+                    result(active_prompt, {"stopReason": "end_turn"})
+
+                threading.Thread(target=fail_insert, daemon=True).start()
                 continue
             update("user_message_chunk", "ignored no id")
             update("user_message_chunk", "ignored wrong session", "wrong", sid="other")

@@ -1063,6 +1063,9 @@ async fn acp_relay_turn_reports_input_loss_for_a_slow_database_and_for_an_insert
                 StatusCode::OK,
             )
             .await;
+            // Test persistence failure independently of a concurrent
+            // retirement of the binding before the HTTP receipt is sent.
+            std::fs::write(dir.path().join("relay-calls.reject-insert"), "").unwrap();
         }
         let outcome = tokio::time::timeout(Duration::from_secs(15), turn)
             .await
