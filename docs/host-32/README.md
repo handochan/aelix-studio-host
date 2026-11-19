@@ -50,7 +50,7 @@ renderer의 공용 HTTP bridge는 현재 요청 본문을 console.debug에 남�
 | 대상 | 상한과 동작 |
 | --- | --- |
 | 입력·결과 | HTTP 본문 64 KiB, 결과와 알림은 각각 **전체 ACP JSON-RPC 프레임** 256 KiB. UTF-8 바이트로 재며 경계값은 허용한다. chunked body도 스트리밍 상한을 적용하고 압축 요청은 415로 거부한다. envelope 검증 전 중첩은 32단계로 제한한다. 광고는 방향당 32개·합계 8 KiB다. 초과한 결과/알림을 잘라서 정상으로 보내지 않는다. |
-| stdio | host의 `protocol/acp.rs::run_sdk_background`는 `FramedRead`와 `LinesCodec::new()`를 쓴다. 확장 요청 ID·메서드를 스트리밍으로 식별한 뒤 전체 확장 프레임 256 KiB를 적용하고, 초과 시 JSON 트리 복제·전달을 중지한다. JSON 키 순서는 자유이므로 분류 전부터 reader에 유한 바이트 예산이 필요하다. **공통 줄 상한은 H1의 측정 항목**이다. 고정 번들의 최대 지원 이미지 tool 결과·embedded resource·load replay·일반 텍스트의 방향별 전체 줄 길이(UTF-8 bytes)를 실제 stdio에서 재고, 최대 관측치·지원 크기와 여유분·경계 바로 위/아래 회귀를 H1에 기록한 후 수치를 고른다. 선정 전에는 16 MiB를 표준 프레임의 상한으로 고정하지 않는다. 미분류 프레임은 측정으로 정한 공통 상한에서 중단하고 영향받은 진행 중 요청은 결과 불명으로 끝낸다. verified: `aelix-acp@3bdb9451/src/aelix_acp/wire/transport.py::decode_frame`의 16 MiB는 adapter 입력 방향이다. |
+| stdio | host의 `protocol/acp.rs::run_sdk_background`는 `FramedRead`와 `LinesCodec::new()`를 쓴다. 공통 상한을 설정한 LinesCodec으로 한 줄을 받은 뒤, JSON 파싱 전에 줄 구분자를 제외한 UTF-8 바이트 수를 잰다. 파싱 후 메서드로 확장 알림을 식별하고, 메서드가 없는 응답은 ID로 대기 중인 확장 요청과 연결한다. 확장 프레임이면 앞서 잰 길이를 256 KiB와 비교해 초과분의 전달을 거부한다. 표준 프레임에는 공통 줄 상한을 적용한다. **공통 줄 상한은 H1의 측정 항목**이다. 고정 번들의 최대 지원 이미지 tool 결과·embedded resource·load replay·일반 텍스트의 방향별 전체 줄 길이(UTF-8 bytes)를 실제 stdio에서 재고, 최대 관측치·지원 크기와 여유분·경계 바로 위/아래 회귀를 H1에 기록한 후 수치를 고른다. 선정 전에는 16 MiB를 표준 프레임의 상한으로 고정하지 않는다. 미분류 프레임은 측정으로 정한 공통 상한에서 중단하고 영향받은 진행 중 요청은 결과 불명으로 끝낸다. verified: `aelix-acp@3bdb9451/src/aelix_acp/wire/transport.py::decode_frame`의 16 MiB는 adapter 입력 방향이다. |
 | 빈도·동시성 | 발견·호출·구독 변경 합계는 주체당 10회/초, burst 20. binding당 실행 슬롯 **4개**, 주체당 8개를 원자적으로 예약하고 초과는 429로 즉시 거부한다. 하나의 project 동의가 열려 있어도 다른 세 슬롯으로 state·steer·자식 Stop을 동시에 보낼 수 있다. host에는 메서드별 우선순위가 없다. ACP도 사용자 동의를 기다리는 동안 prompt/세션 공용 mutex나 native 이벤트 reader를 점유하지 않는다. 충돌하는 쓰기만 해당 자원에서 조정한다. 알림은 binding당 30개/초, burst 60. 소켓당 구독 8개, 확장 대기 32프레임 또는 512 KiB 중 먼저 닿는 값에서 해당 스트림을 무효화한다. |
 | 시간 | handoff 뒤 120초가 deadline이다. HTTP 취소·disconnect가 먼저 와도 SDK 요청은 원래 deadline까지 실행 슬롯에 남는다. deadline에 실행 슬롯에서 빼고 binding당 **별도 미회수 예산(정상 허용 2개)**에 계상한다. 1~2개로는 신규 요청을 격리하지 않는다. 세 번째 미회수 건이 생길 때에만 해당 binding의 신규 확장 호출을 닫고 이미 보낸 요청의 reply를 계속 회수한다. 새 송신은 없고 이미 예약한 요청 수만큼만 더 남을 수 있다(binding당 SDK pending 최대 6). 미회수가 2개 이하로 줄면 재개한다. 프로세스 전체에도 주체별 pending 총량을 제한한다(실행 8 + 미회수 예산 8, 합계 16). 새 binding을 열어도 예전 pending이 회수되거나 연결이 끝날 때까지 총량에 포함한다. 표준 턴 Stop(`session/cancel`)·permission 응답은 확장 슬롯·격리와 독립이다. |
 
@@ -65,11 +65,13 @@ renderer의 공용 HTTP bridge는 현재 요청 본문을 console.debug에 남�
 
 dispatch 직전 취소라면 보내지 않는다. 이후 브라우저의 AbortSignal은 native 취소 확인이 아니다. 명시적인 turn Stop은 표준 `session/cancel`, 자식 Stop은 대상 자식을 지정한 별도 확장 요청, 개별 예약 입력 제거는 native가 그 기능과 수신 확인을 제공할 때만 노출한다. 원격에서 오류가 나도 동일 입력을 일반 prompt나 renderer 로컬 큐로 자동 전환하지 않는다.
 
-### 쓰기 중복 제거 (S2)
+### 쓰기 중복 제거 (S2·S9)
 
 renderer는 사용자의 쓰기 의도 하나에 UUIDv7 `payload.requestId` 하나를 생성한다. steer·follow-up, selections/set, 자식 steer·wrap-up·stop에 필수다. 수동 재확인은 **같은 binding과 requestId, 동일 메서드·입력**으로만 한다. HTTP 재인증·재연결은 재송신을 유발하지 않는다. SDK의 JSON-RPC id는 매 호출 달라질 수 있다. host는 payload나 중복표를 해석하지 않는다.
 
-ACP는 binding마다 최근 10분의 키를 최대 256개 보유한다. 시간은 UUID의 생성 시각 기준이며 미래 30초 초과나 만료 키는 dispatch 전에 거부한다. 소유 세션과 권한을 확인한 뒤 requestId로 조회한다. 기존 엔트리는 메서드와 정규화한 payload digest를 대조해 재사용한다. 새 키는 native 송신 **전에 원자적으로 예약**한다. 중복 조회가 현재 턴·epoch·파일 잠금 검사보다 먼저여야 이미 성공한 쓰기를 나중에 stale로 바꾸지 않는다. 같은 키·같은 입력은 진행 중이면 같은 작업을 기다리고, 완료면 동일한 result 또는 오류를 새 RPC id에 담아 돌려준다. native 수신 여부가 불명인 항목은 결과 불명으로 보존한다. 데이터가 다른 키 충돌에는 native 호출이 없다. 기한 안의 항목을 일찍 퇴출하지 않는다. 공간 부족이면 새 키는 dispatch 전 `accepted:false,reason:"dedup-capacity"`다. 실행 중인 항목은 기한이 지났어도 회수까지 슬롯에 남긴다. 완료 캐시는 바이트 예산도 예약해 큰 응답으로 예약 키가 사라지지 않게 한다. binding 교체·ACP 재시작을 넘는 중복 보장은 없다. 이때 UI는 기존 요청을 새 binding/새 ID로 재생하지 않고 현재 상태와 이력을 새로 조회한다. [동일 쓰기에 RPC 응답 둘, native enqueue 한 번](examples/running-input.json)
+10분 창은 **ACP가 해당 binding에서 키를 처음 받은 시점**부터 시작한다. ACP는 요청 수신 시 단조 시계 값을 읽고, 소유 세션·권한 확인 후 새 키를 예약할 때 그 값을 `firstSeen`으로 보관한다. 같은 키가 다시 도착해도 `firstSeen`은 그대로다. UUIDv7은 고유 식별자로만 사용한다. UUID에 담긴 기기 시각은 요청 허용이나 만료 판정에 쓰지 않는다.
+
+ACP는 binding당 최대 256개 키를 보유한다. 기존 엔트리는 메서드와 정규화한 payload digest를 대조해 재사용한다. 새 키는 native 송신 **전에 원자적으로 예약**한다. 중복 조회가 현재 턴·epoch·파일 잠금 검사보다 먼저여야 이미 성공한 쓰기를 나중에 stale로 바꾸지 않는다. 같은 키·같은 입력은 진행 중이면 같은 작업을 기다리고, 완료면 동일한 result 또는 오류를 새 RPC id에 담아 돌려준다. native 수신 여부가 불명인 항목은 결과 불명으로 보존한다. 데이터가 다른 키 충돌에는 native 호출이 없다. 기한 안의 항목을 일찍 퇴출하지 않는다. 공간 부족이면 새 키는 dispatch 전 `accepted:false,reason:"dedup-capacity"`다. 최초 수신 후 경과 시간이 600초에 도달하면 완료 항목의 보장 기간이 끝난다. 실행 중인 항목은 기한이 지났어도 회수까지 슬롯에 남긴다. 완료 항목을 퇴출하면 ACP는 같은 키를 처음 보는 키와 구별할 수 없다. UI는 보장 기간을 지났거나 남은 기간을 확신할 수 없으면 쓰기를 다시 보내지 않고 현재 상태와 이력을 조회한다. 완료 캐시는 바이트 예산도 예약해 큰 응답으로 예약 키가 사라지지 않게 한다. binding 교체·ACP 재시작을 넘는 중복 보장은 없다. 이때 UI는 기존 요청을 새 binding/새 ID로 재생하지 않고 현재 상태와 이력을 새로 조회한다. [동일 쓰기에 RPC 응답 둘, native enqueue 한 번](examples/running-input.json)
 
 ## 순서와 다시 연결하기
 
@@ -120,6 +122,7 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 | 후속 수직 검증 | #7은 native 파일과 다음 요청의 실제 도구·스킬을 관찰한다. project 파일 생성 승인/거절, global 쓰기 거부와 helper 경로, 잠금·deferred를 모두 확인한다. S3는 #612가 들어온 조합에서 동시에 실행되는 두 자식, 대상 하나만 변경, 다른 부모 거절, 승인 대기 중 이벤트 진행, epoch 전후 replay/영속 이력을 확인한다. synthetic model, 실 provider, 설치 target 근거를 구분한다. |
 
 - **동시성과 수동 재확인.** project 동의 1건을 열어 둔 채 state·steer·자식 Stop의 전달을 검사한다. 5번째 동시 요청의 429, deadline 뒤 미회수 1·2·3건의 admission 전이, 늦은 reply·binding 폐기에서 예산 회수, 격리 중 표준 cancel을 단언한다. 모든 쓰기에서 동일 키의 동시/완료/결과 불명 재확인, 다른 입력과의 충돌, 만료·포화·재시작을 검사하고 native 호출 횟수를 센다.
+- **다른 기기의 WebUI 시계.** ACP 시각을 고정하고 로그인한 브라우저 두 대의 시계를 각각 30분 늦게·빠르게 설정한다. 각 기기가 만든 UUIDv7으로 첫 쓰기가 모두 접수되는지 확인한다. ACP 단조 시계로 최초 수신 후 599,999 ms에 보낸 동일 요청은 같은 결과를 반환하고 native 호출은 키당 1회다. 이 재확인이 창을 연장하지 않아 600,000 ms에 완료 항목이 만료되는지 가상 시계로 검사한다. [시계 오차별 요청·기대값](examples/running-input.json)
 - **ACP 등록표가 브라우저 노출 경계다.** A1부터 등록한 session typed handler와 방향의 정확한 snapshot을 승인된 D16 fixture와 대조한다. 메서드 추가 시 snapshot의 실제 diff를 리뷰한다. 후보별 schema·허용 scope와 native 호출 대상을 검증하고, arbitrary method/command/path를 받는 범용 dispatcher, `_aelix/manage`, 쉘·파일 프록시나 전역 handler를 등록하면 실패시킨다. 이름만 바꿔 감싼 프록시도 body/negative dispatch 시험에서 잡는다. H1 전용과 H2, #612 미지원/지원 조합의 광고를 따로 검사한다.
 - **이력·과부하.** 원래 prompt가 두 번 저장되지 않는지, 소비 전후 및 동일 문장 두 건·낱개 취소·load replay·turn 종료 뒤 늦은 이벤트에서 행 수, 메시지 ID, 실제 turn과 출력 순서를 검사한다. 30/s 초과 원천 이벤트를 발생시켜 aggregator의 10/s, terminal 반영, native cursor로 누락 복구, renderer의 단일 resync와 backoff 상한, 다른 소켓 진행을 검사한다.
 
