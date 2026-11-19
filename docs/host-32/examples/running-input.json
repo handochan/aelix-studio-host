@@ -394,6 +394,91 @@
         "historyRead": "GET /api/conversations/c-17/messages",
         "writeRequests": 0
       }
+    },
+    "completedLookupFrameBoundary": {
+      "fixtureEncoding": "Compact UTF-8 JSON, no BOM, whitespace or line terminator. Each case is independent. Fill storedResult.detail with the indicated number of ASCII x characters before serialization.",
+      "limitBytes": 262144,
+      "lookupHandledElapsedSinceFirstReceiptMs": 1000,
+      "storedResult": {
+        "accepted": true,
+        "detail": ""
+      },
+      "originalWriteRpcId": 51,
+      "lookupRequest": {
+        "jsonrpc": "2.0",
+        "id": 52,
+        "method": "_aelix/session/requests/lookup",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "requestId": "01a1f3ad-8e00-7000-8000-000000000051"
+          }
+        }
+      },
+      "cases": [
+        {
+          "asciiXCount": 262047,
+          "originalWriteResponseBytes": 262111,
+          "completedLookupCandidateBytes": 262143,
+          "expectedStatus": "completed",
+          "emittedLookupResponseBytes": 262143
+        },
+        {
+          "asciiXCount": 262048,
+          "originalWriteResponseBytes": 262112,
+          "completedLookupCandidateBytes": 262144,
+          "expectedStatus": "completed",
+          "emittedLookupResponseBytes": 262144
+        },
+        {
+          "asciiXCount": 262049,
+          "originalWriteResponseBytes": 262113,
+          "completedLookupCandidateBytes": 262145,
+          "expectedStatus": "unavailable",
+          "emittedLookupResponseBytes": 87
+        },
+        {
+          "asciiXCount": 262080,
+          "originalWriteResponseBytes": 262144,
+          "completedLookupCandidateBytes": 262176,
+          "expectedStatus": "unavailable",
+          "emittedLookupResponseBytes": 87
+        }
+      ],
+      "onOversize": {
+        "emittedAcpResponse": {
+          "jsonrpc": "2.0",
+          "id": 52,
+          "result": {
+            "status": "unavailable",
+            "reason": "result-too-large"
+          }
+        },
+        "rendererResponse": {
+          "status": 200,
+          "body": {
+            "success": true,
+            "data": {
+              "result": {
+                "status": "unavailable",
+                "reason": "result-too-large"
+              }
+            }
+          }
+        },
+        "rendererFollowUp": {
+          "stateRead": {
+            "method": "_aelix/session/input/state",
+            "payload": {}
+          },
+          "historyRead": "GET /api/conversations/c-17/messages",
+          "writeRequests": 0
+        },
+        "nativeCallsFromLookup": 0,
+        "newWriteReservationsFromLookup": 0,
+        "totalNativeWriteExecutions": 1
+      }
     }
   },
   "consumedWithinPrompt": {

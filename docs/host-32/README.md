@@ -75,9 +75,12 @@ renderer는 새 쓰기 의도마다 UUIDv7 `payload.requestId`를 한 번 생성
 
 | ACP의 조회 결과 | renderer 동작 |
 | --- | --- |
-| 600초 미만이며 완료 | `{status:"completed",result:…}`의 저장된 결과를 표시한다. 저장된 확정 RPC 오류는 `{status:"completed",rpcCode:…}`로 안전한 숫자 코드만 표시한다. |
+| 600초 미만이며 완료, 조회 응답 ≤ 256 KiB | `{status:"completed",result:…}`의 저장된 결과를 표시한다. 저장된 확정 RPC 오류는 `{status:"completed",rpcCode:…}`로 안전한 숫자 코드만 표시한다. |
+| 600초 미만이며 완료, 조회 응답 > 256 KiB | ACP는 저장된 결과를 싣지 않고 같은 조회 RPC id로 `{status:"unavailable",reason:"result-too-large"}`를 반환한다. host는 이를 정상 조회 결과(HTTP 200)로 전달하고 renderer는 해당 기능 상태와 대화 이력을 읽는다. |
 | 600초 미만이며 진행 중 / 결과 불명 | `{status:"pending"}`이면 기존 작업이 진행 중임을 표시한다. `{status:"unknown"}`이면 현재 상태와 이력을 조회한다. |
 | 경과 시간 ≥ 600초 또는 키 없음 | `{status:"unavailable"}`을 반환한다. 물리적 퇴출 시점과 무관하며, 최초 쓰기보다 조회가 먼저 도착해도 같은 결과다. renderer는 해당 기능의 상태와 대화 이력을 읽는다. 조회 실패를 미실행으로 표시하거나 기존 쓰기를 재전송하지 않는다. |
+
+ACP는 **송신 전**에 실제 조회 RPC id, JSON-RPC envelope, `status`와 중첩 `result`까지 직렬화한 전체 UTF-8 바이트 수를 줄 구분자 없이 검사한다. 262,144 B까지는 완료 응답 전체를 보낸다. 초과하면 작은 대체 응답만 보내므로 host의 프레임 제한을 통과한다. 원래 쓰기의 완료 상태·저장 결과·만료 시각은 그대로다. 조회로 인한 native 호출, 새 예약, 쓰기 재전송은 각각 0회다. [직렬화 경계 예시](examples/running-input.json)
 
 binding이 바뀌었거나 lookup을 광고하지 않는 세션에서도 상태·이력을 다시 읽는다. #24에서는 현재 binding의 `input/state`와 owner의 `GET /api/conversations/{id}/messages`를 사용한다. 기한 안에 출발한 lookup도 ACP에서 처리할 때 이미 만료됐으면 native 호출은 **0회**다. [만료 전후 조회와 renderer 후속 읽기](examples/running-input.json)
 
@@ -131,6 +134,7 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 
 - **동시성과 수동 재확인.** project 동의 1건을 열어 둔 채 state·steer·자식 Stop의 전달을 검사한다. 5번째 동시 요청의 429, deadline 뒤 미회수 1·2·3건의 admission 전이, 늦은 reply·binding 폐기에서 예산 회수, 격리 중 표준 cancel을 단언한다. 모든 쓰기에서 동일 키의 동시/완료/결과 불명 재확인, 다른 입력과의 충돌, 만료·포화·재시작을 검사하고 native 호출 횟수를 센다.
 - **다른 기기의 WebUI 시계.** ACP 시각을 고정하고 로그인한 브라우저 두 대의 시계를 각각 30분 늦게·빠르게 설정한다. 각 기기가 만든 UUIDv7으로 첫 쓰기가 모두 접수되는지 확인한다. ACP가 599,999 ms에 처리한 lookup은 저장된 결과를 반환한다. 같은 가상 시계에서 599,999 ms에 출발한 별도 lookup을 지연시켜 600,001 ms에 도착하게 한다. 600,000 ms 경계와 그 이후에는 퇴출 전후 모두 unavailable, 조회에 의한 native 호출 0회, 최초 쓰기를 포함한 실행은 1회인지 검사한다. renderer가 상태·이력만 읽고 쓰기를 재발행하지 않는지도 확인한다. [시계 오차별 요청·기대값](examples/running-input.json)
+- **완료 조회 프레임 크기.** 기한 안의 저장 결과로 lookup 응답 전체가 262,143 / 262,144 / 262,145 B가 되도록 구성한다. 앞의 두 경우에는 온전한 결과를, 마지막에는 작은 `unavailable` 프레임 하나만 stdout에서 관찰한다. 최초 쓰기 응답이 정확히 262,144 B이고 조회 후보가 262,176 B인 예시도 같은 대체 경로를 검증한다. 예시의 32 B 차이는 명시한 compact JSON과 같은 자릿수 ID에서 나온다. 구현 시험은 실제 encoder와 조회 ID로 측정한다.
 - **ACP 등록표가 브라우저 노출 경계다.** A1부터 등록한 session typed handler와 방향의 정확한 snapshot을 승인된 D16 fixture와 대조한다. 메서드 추가 시 snapshot의 실제 diff를 리뷰한다. 후보별 schema·허용 scope와 native 호출 대상을 검증하고, arbitrary method/command/path를 받는 범용 dispatcher, `_aelix/manage`, 쉘·파일 프록시나 전역 handler를 등록하면 실패시킨다. 이름만 바꿔 감싼 프록시도 body/negative dispatch 시험에서 잡는다. H1 전용과 H2, #612 미지원/지원 조합의 광고를 따로 검사한다.
 - **이력·과부하.** 원래 prompt가 두 번 저장되지 않는지, 소비 전후 및 동일 문장 두 건·낱개 취소·load replay·turn 종료 뒤 늦은 이벤트에서 행 수, 메시지 ID, 실제 turn과 출력 순서를 검사한다. 30/s 초과 원천 이벤트를 발생시켜 aggregator의 10/s, terminal 반영, native cursor로 누락 복구, renderer의 단일 resync와 backoff 상한, 다른 소켓 진행을 검사한다.
 
