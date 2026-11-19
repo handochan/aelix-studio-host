@@ -10,7 +10,7 @@ use aionui_ai_agent::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, Pe
 use aionui_ai_agent::types::BuildTaskOptions;
 use aionui_api_types::{AcpBuildExtra, AionrsBuildExtra, TeamSessionBinding};
 use aionui_common::{AgentType, WorkspacePathValidationError, validate_workspace_path_availability};
-use aionui_db::models::ConversationRow;
+use aionui_db::models::{AcpSessionRow, ConversationRow};
 use aionui_db::{IAcpSessionRepository, IAgentMetadataRepository};
 use chrono::Datelike;
 use tracing::{debug, info, warn};
@@ -266,7 +266,7 @@ impl<'a> SessionContextBuilder<'a> {
             binding.runtime_seed.selected_permission_mode =
                 session_row.as_ref().and_then(|row| row.team_permission_mode.clone());
         }
-        let session_id = session_row.as_ref().and_then(|row| row.session_id.clone());
+        let session_id = guarded_resume_id(&config, session_row.as_ref())?;
         let session_snapshot = self
             .load_acp_session_snapshot(&row.user_id, &row.id, &config, session_id.as_deref())
             .await?;
@@ -411,7 +411,7 @@ impl<'a> SessionContextBuilder<'a> {
             .get_for_user(&user_id, conversation_id)
             .await
             .map_err(|e| ConversationError::internal(format!("Failed to load acp_session row: {e}")))?;
-        let session_id = session_row.as_ref().and_then(|row| row.session_id.clone());
+        let session_id = guarded_resume_id(&ctx.config, session_row.as_ref())?;
         if session_id == ctx.session_id {
             return Ok(());
         }
@@ -428,6 +428,22 @@ impl<'a> SessionContextBuilder<'a> {
         ctx.session_snapshot = session_snapshot;
         Ok(())
     }
+}
+
+fn guarded_resume_id(config: &AcpBuildExtra, row: Option<&AcpSessionRow>) -> Result<Option<String>, ConversationError> {
+    let id = row.and_then(|row| row.session_id.clone());
+    if id.as_ref().is_none_or(|id| id.is_empty())
+        && config
+            .fork
+            .as_ref()
+            .is_some_and(|fork| fork.expected_native_head.is_some())
+        && row.is_some_and(AcpSessionRow::has_published_fork)
+    {
+        return Err(ConversationError::Busy {
+            reason: "FORK_BINDING_LOST: the published fork cannot be recreated from its parent".into(),
+        });
+    }
+    Ok(id)
 }
 
 /// Runtime permission gate inputs for an aionrs rebuild, loaded from the

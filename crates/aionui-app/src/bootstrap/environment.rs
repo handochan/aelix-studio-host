@@ -89,7 +89,9 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
     };
     info!(
         identity_mode = config.identity_mode.auth_label(),
-        auth = if config.identity_mode.is_local() {
+        auth = if cli.studio_auth {
+            "studio"
+        } else if config.identity_mode.is_local() {
             "disabled"
         } else {
             "enabled"

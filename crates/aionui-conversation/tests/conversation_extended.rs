@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use aionui_ai_agent::{AgentError, IWorkerTaskManager};
 use aionui_api_types::{
-    CloneConversationRequest, CreateConversationRequest, ListMessagesQuery, SearchMessagesQuery, WebSocketMessage,
+    CloneConversationRequest, CreateConversationRequest, ListConversationsQuery, ListMessagesQuery,
+    SearchMessagesQuery, WebSocketMessage,
 };
 use aionui_common::{AgentKillReason, ConversationStatus, TimestampMs, generate_prefixed_id, now_ms};
 use aionui_conversation::skill_resolver::SkillResolver;
@@ -33,7 +34,10 @@ impl EventBroadcaster for TestBroadcaster {
     }
 }
 
-struct NoopTaskManager;
+#[derive(Default)]
+struct NoopTaskManager {
+    stale_fork_head: Option<&'static str>,
+}
 
 #[async_trait::async_trait]
 impl IWorkerTaskManager for NoopTaskManager {
@@ -43,8 +47,17 @@ impl IWorkerTaskManager for NoopTaskManager {
     async fn get_or_build_task(
         &self,
         _: &str,
-        _: aionui_ai_agent::types::BuildTaskOptions,
+        options: aionui_ai_agent::types::BuildTaskOptions,
     ) -> Result<aionui_ai_agent::AgentInstance, AgentError> {
+        if let Some(expected) = self.stale_fork_head {
+            let aionui_ai_agent::session_context::AgentSessionKind::Acp(context) = options.context.kind else {
+                panic!("guarded fork must use ACP");
+            };
+            let fork = context.config.fork.expect("pending fork specification");
+            assert_eq!(fork.expected_native_head.as_deref(), Some(expected));
+            assert!(context.session_id.is_none());
+            return Err(AgentError::conflict("FORK_HEAD_CHANGED: stale native fixture"));
+        }
         Err(AgentError::internal("noop"))
     }
     fn kill(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AgentError> {
@@ -91,7 +104,7 @@ async fn setup() -> (
         Arc::new(aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
     let acp_session_repo: Arc<dyn aionui_db::IAcpSessionRepository> =
         Arc::new(aionui_db::SqliteAcpSessionRepository::new(db.pool().clone()));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
+    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager::default());
     let svc = ConversationService::new(
         std::env::temp_dir(),
         broadcaster.clone(),
@@ -816,23 +829,35 @@ async fn setup_fork() -> (
     Arc<dyn aionui_db::IAcpSessionRepository>,
 ) {
     let db = init_database_memory().await.unwrap();
-    let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+    let (svc, repo, acp_repo, _) = setup_fork_in_pool(db.pool());
+    (svc, repo, acp_repo)
+}
+
+fn setup_fork_in_pool(
+    pool: &sqlx::SqlitePool,
+) -> (
+    ConversationService,
+    Arc<SqliteConversationRepository>,
+    Arc<dyn aionui_db::IAcpSessionRepository>,
+    Arc<TestBroadcaster>,
+) {
+    let repo = Arc::new(SqliteConversationRepository::new(pool.clone()));
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn aionui_db::IAgentMetadataRepository> =
-        Arc::new(aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
+        Arc::new(aionui_db::SqliteAgentMetadataRepository::new(pool.clone()));
     let acp_session_repo: Arc<dyn aionui_db::IAcpSessionRepository> =
-        Arc::new(aionui_db::SqliteAcpSessionRepository::new(db.pool().clone()));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
+        Arc::new(aionui_db::SqliteAcpSessionRepository::new(pool.clone()));
+    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager::default());
     let svc = ConversationService::new(
         std::env::temp_dir(),
-        broadcaster,
+        broadcaster.clone(),
         Arc::new(EmptySkillResolver),
         task_mgr,
         repo.clone(),
         agent_metadata_repo,
         acp_session_repo.clone(),
     );
-    (svc, repo, acp_session_repo)
+    (svc, repo, acp_session_repo, broadcaster)
 }
 
 fn fork_create_req(backend: &str) -> CreateConversationRequest {
@@ -846,6 +871,143 @@ fn fork_create_req(backend: &str) -> CreateConversationRequest {
 
 fn fork_req(message_id: &str) -> aionui_api_types::ForkConversationRequest {
     serde_json::from_value(json!({ "message_id": message_id })).unwrap()
+}
+
+#[tokio::test]
+async fn native_fork_persists_the_selected_head_and_rejects_a_stale_renderer_reference() {
+    use aionui_db::{IAgentMetadataRepository, ISidebarStore, UpdateAgentHandshakeParams};
+    let db = init_database_memory().await.unwrap();
+    let (svc, repo, acp_repo, broadcaster) = setup_fork_in_pool(db.pool());
+    let parent = svc.create(USER_ID, fork_create_req("gemini")).await.unwrap();
+    acp_repo
+        .update_session_id_for_user(USER_ID, &parent.id, "parent-sid")
+        .await
+        .unwrap();
+    let agent = acp_repo.get_for_user(USER_ID, &parent.id).await.unwrap().unwrap();
+    aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone())
+        .apply_handshake(
+            &agent.agent_id,
+            &UpdateAgentHandshakeParams {
+                agent_capabilities: Some(Some(
+                    r#"{"session_capabilities":{"fork":{"_meta":{"aelix/expectedHead":1}}}}"#,
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut message = make_message(&parent.id, "selected reply", 1);
+    message.backend_turn_id = Some("turn-selected".into());
+    repo.insert_message(USER_ID, &message).await.unwrap();
+    let mut request = fork_req(&message.id);
+    request.expected_native_head = Some("turn-old".into());
+    let error = svc.fork(USER_ID, &parent.id, request).await.unwrap_err();
+    assert!(matches!(error, ConversationError::Busy { reason } if reason.starts_with("FORK_HEAD_CHANGED")));
+    let selected = svc.fork(USER_ID, &parent.id, fork_req(&message.id)).await.unwrap();
+    let reset = svc.reset(USER_ID, &selected.id).await.unwrap_err();
+    assert!(matches!(reset, ConversationError::Busy { reason } if reason.starts_with("FORK_PENDING")));
+    let mut later = make_message(&parent.id, "later reply", 2);
+    later.backend_turn_id = Some("turn-later".into());
+    repo.insert_message(USER_ID, &later).await.unwrap();
+    let stale_task: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager {
+        stale_fork_head: Some("turn-selected"),
+    });
+    let forged = json!({"parent_session_id": "other-session", "expected_native_head": "turn-later"});
+    let request = || {
+        serde_json::from_value(json!({
+            "name": "Renamed",
+            "extra": {"fork": forged, "client_label": "ordinary patch"},
+        }))
+        .unwrap()
+    };
+    assert!(matches!(
+        svc.update("foreign", &selected.id, request(), &stale_task).await,
+        Err(ConversationError::NotFound { .. })
+    ));
+    let patched = svc.update(USER_ID, &selected.id, request(), &stale_task).await.unwrap();
+    assert_eq!(patched.extra["client_label"], "ordinary patch");
+    assert_eq!(patched.extra["fork"], selected.extra["fork"]);
+    svc.update_extra(USER_ID, &selected.id, json!({"fork": null}))
+        .await
+        .unwrap();
+    let patched = svc.update(USER_ID, &parent.id, request(), &stale_task).await.unwrap();
+    assert!(patched.extra.get("fork").is_none());
+    let saved = repo.get(USER_ID, &selected.id).await.unwrap().unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&saved.extra).unwrap();
+    assert_eq!(extra["fork"]["expected_native_head"], "turn-selected");
+    let error = svc
+        .ensure_runtime(USER_ID, &selected.id, &stale_task)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ConversationError::Busy { reason } if reason.starts_with("FORK_HEAD_CHANGED")));
+    let pending = acp_repo.get_for_user(USER_ID, &selected.id).await.unwrap().unwrap();
+    assert!(pending.session_id.is_none());
+    let list = svc.list(USER_ID, ListConversationsQuery::default()).await.unwrap();
+    assert_eq!(list.total, 1);
+    assert_eq!(list.items[0].id, parent.id);
+    let sidebar = aionui_db::SqliteSidebarStore::new(db.pool().clone());
+    let thin = sidebar
+        .list_conversations_thin(USER_ID, aionui_db::ArchiveScope::Active)
+        .await
+        .unwrap();
+    assert!(thin.iter().all(|row| row.id != selected.id));
+    assert!(
+        sidebar
+            .hydrate_conversations(USER_ID, &[selected.id.clone()], aionui_db::ArchiveScope::Active)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !broadcaster
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.data["conversation_id"] == selected.id && event.data["action"] == "created")
+    );
+
+    let fresh = svc.fork(USER_ID, &parent.id, fork_req(&later.id)).await.unwrap();
+    acp_repo
+        .update_session_id_for_user(USER_ID, &fresh.id, "child-sid")
+        .await
+        .unwrap();
+    acp_repo
+        .save_runtime_state_for_user(
+            USER_ID,
+            &fresh.id,
+            &aionui_db::SaveRuntimeStateParams {
+                current_mode_id: Some(Some("default")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    acp_repo.clear_session_id_for_user(USER_ID, &fresh.id).await.unwrap();
+    let lost = svc.ensure_runtime(USER_ID, &fresh.id, &stale_task).await.unwrap_err();
+    assert!(matches!(lost, ConversationError::Busy { reason } if reason.starts_with("FORK_BINDING_LOST")));
+    let list = svc.list(USER_ID, ListConversationsQuery::default()).await.unwrap();
+    assert_eq!(list.total, 2);
+    assert!(list.items.iter().any(|row| row.id == fresh.id));
+    assert!(list.items.iter().all(|row| row.id != selected.id));
+    aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone())
+        .apply_handshake(
+            &agent.agent_id,
+            &UpdateAgentHandshakeParams {
+                agent_capabilities: Some(Some(r#"{"session_capabilities":{"fork":{}}}"#)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut request = fork_req(&later.id);
+    request.expected_native_head = Some("turn-later".into());
+    let error = svc.fork(USER_ID, &parent.id, request).await.unwrap_err();
+    assert!(
+        matches!(error, ConversationError::Unprocessable { reason } if reason.starts_with("FORK_HEAD_UNAVAILABLE"))
+    );
 }
 
 #[tokio::test]
@@ -867,7 +1029,10 @@ async fn fork_head_creates_lineage_row_and_copies_messages() {
     assert_eq!(fork.name, parent.name, "name defaults to the parent's");
     assert_eq!(
         fork.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: false }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: false,
+            ..Default::default()
+        }),
         "claude declares a HEAD-only fork capability"
     );
     let spec = fork.extra.get("fork").expect("fork lineage in extra");
@@ -945,7 +1110,10 @@ async fn fork_mid_history_resolves_codex_turn_anchor() {
     let fork = svc.fork(USER_ID, &parent.id, fork_req(&m1.id)).await.unwrap();
     assert_eq!(
         fork.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        }),
         "codex declares an at-turn fork capability"
     );
     assert_eq!(
@@ -1044,14 +1212,20 @@ async fn get_projects_fork_capability_on_detail_path() {
     let got = svc.get(USER_ID, &claude_conv.id).await.unwrap();
     assert_eq!(
         got.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: false })
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: false,
+            ..Default::default()
+        })
     );
 
     let codex_conv = svc.create(USER_ID, fork_create_req("codex")).await.unwrap();
     let got = svc.get(USER_ID, &codex_conv.id).await.unwrap();
     assert_eq!(
         got.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true })
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        })
     );
 }
 
@@ -1184,7 +1358,10 @@ async fn fork_head_aionrs_uses_conversation_id_anchor_without_acp_row() {
     assert_ne!(fork.id, parent.id);
     assert_eq!(
         fork.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        }),
         "aionrs declares an at-turn fork capability (migration 038)"
     );
     let spec = fork.extra.get("fork").expect("fork lineage in extra");
@@ -1260,7 +1437,10 @@ async fn get_projects_fork_capability_for_aionrs_on_detail_path() {
     let detail = svc.get(USER_ID, &conv.id).await.unwrap();
     assert_eq!(
         detail.fork_capability,
-        Some(aionui_api_types::ForkCapabilityView { at_turn: true }),
+        Some(aionui_api_types::ForkCapabilityView {
+            at_turn: true,
+            ..Default::default()
+        }),
         "detail path projects the aionrs fork capability via the builtin binding ladder"
     );
 }

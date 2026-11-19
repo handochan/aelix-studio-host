@@ -1156,6 +1156,10 @@ pub fn build_ws_state(services: &AppServices, router: Arc<dyn MessageRouter>) ->
         };
     }
 
+    build_session_ws_state(services, router)
+}
+
+pub(super) fn build_session_ws_state(services: &AppServices, router: Arc<dyn MessageRouter>) -> WsHandlerState {
     let jwt_service = services.jwt_service.clone();
     let token_validator = Arc::new(move |token: &str| jwt_service.verify(token).is_ok());
     let jwt_service = services.jwt_service.clone();

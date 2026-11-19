@@ -10,7 +10,7 @@ use std::time::Duration;
 use aionui_ai_agent::factory::acp_assembler::{WorkspaceInfo, assemble_acp_params};
 use aionui_ai_agent::manager::acp::AcpAgentManager;
 use aionui_ai_agent::registry::AgentRegistry;
-use aionui_ai_agent::{AcpBuildExtra, AcpSessionSyncService, AcpSkillManager, AgentInstance};
+use aionui_ai_agent::{AcpBuildExtra, AcpSessionSyncService, AcpSkillManager, AgentError, AgentInstance};
 use aionui_common::CommandSpec;
 use aionui_db::{
     CreateAcpSessionParams, IAcpSessionRepository, SaveRuntimeStateParams, SqliteAcpSessionRepository,
@@ -36,6 +36,8 @@ for line in sys.stdin:
             'agentCapabilities': {'loadSession': True},
             'authMethods': [],
         }
+    elif method == 'session/load' and surface == 'missing':
+        response['error'] = {'code': -32001, 'message': 'Session not found'}
     elif method == 'session/load':
         modes = {
             'currentModeId': mode,
@@ -136,6 +138,15 @@ async fn check_restore(surface: &str, saved: &str, restored: &str) {
             },
             AcpBuildExtra {
                 session_mode: Some(saved.into()),
+                fork: (surface == "missing").then(|| {
+                    serde_json::from_value(serde_json::json!({
+                        "parent_conversation_id": "parent",
+                        "parent_message_id": "message",
+                        "parent_session_id": "parent-native",
+                        "expected_native_head": "turn-visible",
+                    }))
+                    .unwrap()
+                }),
                 ..Default::default()
             },
             vec![],
@@ -157,6 +168,15 @@ async fn check_restore(surface: &str, saved: &str, restored: &str) {
             .await;
         sync.attach("restore-user".into(), "restore-conv".into(), domain_rx)
             .await;
+        if surface == "missing" {
+            let error = manager.warmup_session().await.unwrap_err();
+            assert!(matches!(error, AgentError::Conflict(reason) if reason.starts_with("FORK_BINDING_LOST")));
+            assert_eq!(manager.session_id().await.as_deref(), Some("restored-session"));
+            let instance = AgentInstance::Acp(Arc::new(manager));
+            instance.kill_and_wait(None).await;
+            assert_eq!(std::fs::read_to_string(trace).unwrap(), "initialize\nsession/load\n");
+            return;
+        }
         manager.warmup_session().await.unwrap();
         let instance = AgentInstance::Acp(Arc::new(manager));
         assert_eq!(instance.get_mode().await.unwrap().mode, restored);
@@ -211,4 +231,11 @@ async fn generic_permissions_survive_restore_and_process_rebuild() {
             .await
             .expect("generic restore timed out");
     }
+}
+
+#[tokio::test]
+async fn a_missing_guarded_child_never_opens_a_fresh_session() {
+    tokio::time::timeout(Duration::from_secs(30), check_restore("missing", "default", "default"))
+        .await
+        .expect("guarded fork recovery timed out");
 }

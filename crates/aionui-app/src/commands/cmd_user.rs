@@ -15,15 +15,16 @@
 //! outcome. No account business logic (validation, hashing, seed-vs-named-user
 //! resolution) lives here.
 //!
-//! `set-password` does NOT bump `session_generation`, so changing a password
-//! while a server is running will not revoke live sessions — restart the
-//! server after a hot change. For fresh bootstrap (server not yet started)
-//! this is irrelevant.
+//! `set-password --require-stopped` holds the server's data-directory lock and
+//! updates the password and session generation together. Ordinary provisioning
+//! retains the existing account update semantics.
 
 use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
-use aionui_auth::{AccountError, PasswordOutcome, create_local_user, set_local_password, validate_username};
+use aionui_auth::{
+    AccountError, PasswordOutcome, create_local_user, reset_local_password, set_local_password, validate_username,
+};
 use aionui_db::{
     Database, IUserRepository, SqliteUserRepository, init_database, maybe_copy_legacy_database,
     models::{User, UserStatus},
@@ -52,11 +53,31 @@ async fn set_password(cli: &Cli, args: &SetPasswordArgs) -> Result<ExitCode, Cli
         validate_username(name).map_err(|_| input_error("username does not meet the required format"))?;
     }
 
+    let _guard = if args.require_stopped {
+        let db_path = cli.data_dir.join("aionui-backend.db");
+        Some(
+            aionui_db::DataDirInstanceGuard::try_acquire(&db_path)
+                .map_err(|_| database_error())?
+                .ok_or_else(|| {
+                    CliBoundaryError::new(
+                        CliBoundaryCode::CliUserInputInvalid,
+                        SUBCOMMAND,
+                        "Stop WebUI before resetting its password.",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let password = read_new_password(args.password_stdin)?;
 
     let database = open_database(cli).await?;
     let repo = SqliteUserRepository::new(database.pool().clone());
-    let outcome = set_local_password(&repo, args.username.as_deref(), &password).await;
+    let outcome = if args.require_stopped {
+        reset_local_password(&repo, args.username.as_deref(), &password).await
+    } else {
+        set_local_password(&repo, args.username.as_deref(), &password).await
+    };
     database.close().await;
     let outcome = outcome.map_err(map_account_error)?;
 

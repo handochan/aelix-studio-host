@@ -92,6 +92,11 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError
         Some(Command::Secret(ref args)) => Ok(commands::run_secret(&cli, args).await?),
         Some(Command::PrepareManagedResources(args)) => Ok(commands::run_prepare_managed_resources(args).await?),
         None => {
+            let studio_secret = if cli.studio_auth {
+                Some(read_studio_secret(&cli.host)?)
+            } else {
+                None
+            };
             let mut env = bootstrap::init_environment(&cli, &merged_path)?;
 
             // Acquire the data-dir process-level guard before binding a port or
@@ -122,6 +127,16 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError
                                 "another aelix-studio-host already owns this data directory",
                             )));
                         }
+                        Err(error) if cli.studio_auth => {
+                            return Err(MainError::Bootstrap(
+                                bootstrap::BootstrapError::new(
+                                    bootstrap::BootstrapErrorCode::ConfigInvalid,
+                                    "instance_guard.acquire",
+                                    "Studio authentication requires an exclusive data directory",
+                                )
+                                .with_source(error),
+                            ));
+                        }
                         Err(error) => {
                             tracing::warn!(
                                 code = "BOOTSTRAP_DEGRADED_INSTANCE_GUARD",
@@ -132,6 +147,16 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError
                             None
                         }
                     }
+                }
+                Err(error) if cli.studio_auth => {
+                    return Err(MainError::Bootstrap(
+                        bootstrap::BootstrapError::new(
+                            bootstrap::BootstrapErrorCode::ConfigInvalid,
+                            "instance_guard.acquire",
+                            "Studio authentication requires an exclusive data directory",
+                        )
+                        .with_source(error),
+                    ));
                 }
                 Err(error) => {
                     // flock unavailable (e.g. some network filesystems): proceed
@@ -158,9 +183,38 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError
                 .with_source(error)
             })?;
             let parent_exit = parent_exit_signal(cli.parent_pid);
-            Ok(commands::run_server(env, services, listener, parent_exit).await?)
+            let studio_auth = studio_secret.map(|secret| aionui_app::StudioAuth::new(env.config.port, secret));
+            Ok(commands::run_server(env, services, listener, parent_exit, studio_auth).await?)
         }
     }
+}
+
+fn read_studio_secret(host: &str) -> Result<[u8; 64], bootstrap::BootstrapError> {
+    use std::io::Read;
+
+    let invalid = || {
+        bootstrap::BootstrapError::new(
+            bootstrap::BootstrapErrorCode::ConfigInvalid,
+            "config.studio_auth",
+            "Studio authentication requires IPv4 loopback and a credential on stdin",
+        )
+    };
+    if host != "127.0.0.1" {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::with_capacity(65);
+    std::io::stdin()
+        .take(65)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    let secret: [u8; 64] = bytes.try_into().map_err(|_| invalid())?;
+    if !secret
+        .iter()
+        .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(value))
+    {
+        return Err(invalid());
+    }
+    Ok(secret)
 }
 
 #[cfg(test)]

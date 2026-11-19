@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::{
     AudioContent, AuthMethod, ContentBlock, ForkSessionRequest, ImageContent, LoadSessionRequest, PromptRequest,
     PromptResponse, SessionId, StopReason, Usage, UsageUpdate,
 };
-use aionui_api_types::SlashCommandItem;
+use aionui_api_types::{AELIX_EXPECTED_FORK_HEAD, FORK_HEAD_CHANGED, SlashCommandItem};
 use serde_json::Value;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -22,6 +22,12 @@ use super::agent_close::STDERR_PEEK_LINES;
 use super::error_mapping::{AcpSendFailure, is_acp_session_not_found, is_missing_resumed_session};
 use super::legacy_session_model::LegacySessionModelState;
 use tracing::warn;
+
+fn aelix_fork_head_capability(meta: Option<&serde_json::Map<String, Value>>) -> bool {
+    meta.and_then(|value| value.get(AELIX_EXPECTED_FORK_HEAD))
+        .and_then(Value::as_u64)
+        == Some(1)
+}
 
 #[derive(Debug)]
 pub(super) enum PromptOutcome {
@@ -85,6 +91,17 @@ impl AcpAgentManager {
     /// Emits a `warn!` so ops can still see the original failure that
     /// triggered the rebuild.
     async fn rebuild_after_session_not_found(&self, stale_sid: &str, err: &AcpError) -> Result<String, AgentError> {
+        if self
+            .params
+            .config
+            .fork
+            .as_ref()
+            .is_some_and(|fork| fork.expected_native_head.is_some())
+        {
+            return Err(AgentError::conflict(
+                "FORK_BINDING_LOST: the guarded fork's ACP session cannot be replaced with a fresh session",
+            ));
+        }
         warn!(
             conversation_id = %self.params.conversation_id,
             stale_session_id = %stale_sid,
@@ -251,19 +268,18 @@ impl AcpAgentManager {
     pub(super) async fn open_session_fork(&self, fork: &aionui_api_types::ForkSpec) -> Result<String, AgentError> {
         // Live capability gate (second line of defense behind the fork API's
         // agent_metadata check — the DB declaration can lag the installed CLI).
-        let supports_fork = {
+        let capability = {
             let session = self.session.read().await;
             session
                 .agent_capabilities()
-                .map(|c| c.session_capabilities.fork.is_some())
-                .unwrap_or(false)
+                .and_then(|c| c.session_capabilities.fork.clone())
         };
-        if !supports_fork {
+        let Some(capability) = capability else {
             return Err(AgentError::Conflict(format!(
                 "agent '{}' does not advertise session/fork; cannot materialize the forked conversation",
                 self.backend().unwrap_or("<unknown>")
             )));
-        }
+        };
 
         let mut req = ForkSessionRequest::new(
             SessionId::new(fork.parent_session_id.as_str()),
@@ -272,8 +288,32 @@ impl AcpAgentManager {
         if !self.params.mcp_servers.is_empty() {
             req = req.mcp_servers(self.params.mcp_servers.clone());
         }
+        let requires_head = aelix_fork_head_capability(capability.meta.as_ref());
+        let is_aelix = self
+            .protocol
+            .initialize_response()
+            .and_then(|response| response.agent_info)
+            .is_some_and(|info| info.name == "aelix-acp");
+        if requires_head || is_aelix || fork.expected_native_head.is_some() {
+            let expected = fork
+                .expected_native_head
+                .as_ref()
+                .filter(|value| requires_head && !value.is_empty())
+                .ok_or_else(|| AgentError::conflict("FORK_HEAD_UNAVAILABLE: no common native HEAD reference"))?;
+            req = req.meta(serde_json::Map::from_iter([(
+                AELIX_EXPECTED_FORK_HEAD.to_owned(),
+                Value::String(expected.clone()),
+            )]));
+        }
         let fork_response = match self.protocol.fork_session(req).await {
             Ok(r) => r,
+            Err(
+                AcpError::OtherProtocolError { code: -33003, .. } | AcpError::ApplicationError { code: -33003, .. },
+            ) if requires_head => {
+                return Err(AgentError::conflict(format!(
+                    "{FORK_HEAD_CHANGED}: the native fork point changed"
+                )));
+            }
             Err(e) if is_acp_session_not_found(&e) => {
                 // NOT rebuild_after_session_not_found: an initial fork must not
                 // silently degrade to a fresh, context-free session.
@@ -339,6 +379,20 @@ impl AcpAgentManager {
         // calls); see `is_empty_turn` below.
         let mut probe_rx = self.runtime.subscribe();
 
+        let mut request = PromptRequest::new(SessionId::new(sid), prompt_blocks);
+        if let Some(anchor) = data.turn_id.as_ref()
+            && self
+                .protocol
+                .agent_capabilities()
+                .and_then(|c| c.session_capabilities.fork)
+                .is_some_and(|fork| aelix_fork_head_capability(fork.meta.as_ref()))
+        {
+            self.runtime.emit(AgentStreamEvent::BackendTurnBound(anchor.clone()));
+            request = request.meta(serde_json::Map::from_iter([(
+                "aelix/forkHead".to_owned(),
+                Value::String(anchor.clone()),
+            )]));
+        }
         // Emit Start event
         self.runtime.emit(AgentStreamEvent::Start(StartEventData {
             session_id: Some(sid.to_owned()),
@@ -348,11 +402,7 @@ impl AcpAgentManager {
         // earlier turn cannot override a later benign empty turn.
         self.process.clear_stderr().await;
 
-        let prompt_response = self
-            .protocol
-            .prompt(PromptRequest::new(SessionId::new(sid), prompt_blocks))
-            .await
-            .map_err(AcpSendFailure::from)?;
+        let prompt_response = self.protocol.prompt(request).await.map_err(AcpSendFailure::from)?;
 
         // End-of-turn usage: agents that never emit UsageUpdate notifications
         // report token usage on the prompt response instead — either via the

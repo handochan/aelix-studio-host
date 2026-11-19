@@ -323,6 +323,22 @@ impl IUserRepository for SqliteUserRepository {
         Ok(row.0)
     }
 
+    async fn reset_password(&self, user_id: &str, password_hash: &str) -> Result<(), DbError> {
+        let result = sqlx::query(
+            "UPDATE users SET password_hash = ?, session_generation = session_generation + 1, updated_at = ? \
+             WHERE id = ? AND user_type = 'local'",
+        )
+        .bind(password_hash)
+        .bind(aionui_common::now_ms())
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("User '{user_id}' not found")));
+        }
+        Ok(())
+    }
+
     async fn update_password(&self, user_id: &str, password_hash: &str) -> Result<(), DbError> {
         let now = aionui_common::now_ms();
         let result = sqlx::query(

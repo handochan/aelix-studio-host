@@ -75,6 +75,24 @@ pub async fn set_local_password(
     username: Option<&str>,
     plaintext: &str,
 ) -> Result<PasswordOutcome, AccountError> {
+    set_password(repo, username, plaintext, false).await
+}
+
+/// Set a local password and revoke the account's existing sessions in the same write.
+pub async fn reset_local_password(
+    repo: &dyn IUserRepository,
+    username: Option<&str>,
+    plaintext: &str,
+) -> Result<PasswordOutcome, AccountError> {
+    set_password(repo, username, plaintext, true).await
+}
+
+async fn set_password(
+    repo: &dyn IUserRepository,
+    username: Option<&str>,
+    plaintext: &str,
+    revoke: bool,
+) -> Result<PasswordOutcome, AccountError> {
     if let Some(name) = username {
         validate_username(name).map_err(|e| AccountError::InvalidUsername(e.to_string()))?;
     }
@@ -89,12 +107,12 @@ pub async fn set_local_password(
 
     let outcome = match username {
         None => {
-            repo.update_password(SYSTEM_DEFAULT_USER_ID, &hash).await?;
+            store_password(repo, SYSTEM_DEFAULT_USER_ID, &hash, revoke).await?;
             PasswordOutcome::DefaultUser
         }
         Some(name) => match repo.find_by_username(name).await? {
             Some(user) => {
-                repo.update_password(&user.id, &hash).await?;
+                store_password(repo, &user.id, &hash, revoke).await?;
                 PasswordOutcome::UpdatedExisting {
                     id: user.id,
                     username: name.to_owned(),
@@ -113,6 +131,14 @@ pub async fn set_local_password(
     // Non-sensitive: logs the affected user's id/username, never the password.
     tracing::info!(outcome = ?outcome, "local account password set");
     Ok(outcome)
+}
+
+async fn store_password(repo: &dyn IUserRepository, user_id: &str, hash: &str, revoke: bool) -> Result<(), DbError> {
+    if revoke {
+        repo.reset_password(user_id, hash).await
+    } else {
+        repo.update_password(user_id, hash).await
+    }
 }
 
 /// Create a *new* local user with the given login password.
