@@ -53,6 +53,18 @@ pub(super) async fn build(
     ctx: FactoryContext,
 ) -> Result<AgentInstance, AgentError> {
     let mut overrides = build_context.config;
+    let team_managed_permissions = build_context.belongs_to_team;
+    if team_managed_permissions {
+        let repository = deps
+            .conversation_repo
+            .as_ref()
+            .ok_or_else(|| AgentError::internal("Aionrs Team permission storage is unavailable"))?;
+        let selected = repository
+            .aionrs_team_permission_mode(&ctx.user_id, &ctx.conversation_id)
+            .await
+            .map_err(|error| AgentError::internal(format!("Failed to load Aionrs Team permission: {error}")))?;
+        overrides.session_mode = Some(selected.unwrap_or_else(|| "default".to_owned()));
+    }
     let resolved_skills = overrides.skills.clone();
 
     // Merge preset assistant rules into system_prompt (used as custom_prompt
@@ -198,6 +210,7 @@ pub(super) async fn build(
         compat_overrides,
         session_directory,
         session_mode: overrides.session_mode,
+        team_managed_permissions,
         skills: resolved_skills,
         extra_mcp_servers,
         bedrock_config,

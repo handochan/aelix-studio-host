@@ -188,13 +188,18 @@ impl AionrsAgentManager {
             max_tool_call_failure_turns: config_extra.max_tool_call_failure_turns,
             system_prompt: config_extra.system_prompt.clone(),
             profile: None,
-            auto_approve: config_extra.session_mode.as_deref() == Some("yolo"),
+            auto_approve: !config_extra.team_managed_permissions
+                && config_extra.session_mode.as_deref() == Some("yolo"),
             thinking: None,
             thinking_budget: None,
             project_dir: Some(PathBuf::from(&workspace)),
         };
 
         let mut config = resolve_aionui_config(&cli_args)?;
+        if config_extra.team_managed_permissions {
+            // The live approval manager must be able to revoke Yolo without rebuilding the engine.
+            config.tools.auto_approve = false;
+        }
 
         // Backend-specific overrides
         config.bedrock = config_extra.bedrock_config;

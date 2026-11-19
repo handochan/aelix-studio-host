@@ -30,6 +30,17 @@ pub trait IConversationRepository: Send + Sync {
     /// Partially updates a conversation. Returns `DbError::NotFound` if ID is missing for the user.
     async fn update(&self, user_id: &str, id: &str, updates: &ConversationRowUpdate) -> Result<(), DbError>;
 
+    /// Explicit Team permission choice for an embedded Aionrs conversation.
+    async fn aionrs_team_permission_mode(&self, _user_id: &str, _id: &str) -> Result<Option<String>, DbError> {
+        Ok(None)
+    }
+
+    async fn set_aionrs_team_permission_mode(&self, _user_id: &str, _id: &str, _mode: &str) -> Result<(), DbError> {
+        Err(DbError::Init(
+            "Aionrs Team permission storage is unavailable".to_owned(),
+        ))
+    }
+
     /// Deletes a conversation (messages cascade via FK).
     /// Returns `DbError::NotFound` if ID is missing for the user.
     async fn delete(&self, user_id: &str, id: &str) -> Result<(), DbError>;

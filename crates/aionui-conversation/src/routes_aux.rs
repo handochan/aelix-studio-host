@@ -1,12 +1,13 @@
 #![allow(clippy::disallowed_types)]
 
+use crate::error::ConversationError;
 use crate::state::ConversationRouterState;
 use aionui_api_types::{
     ApiResponse, SetConfigOptionRequest, SetConfigOptionResponse, SideQuestionRequest, SideQuestionResponse,
-    SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
+    SlashCommandItem, TeamSessionBinding, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use aionui_auth::CurrentUser;
-use aionui_common::ApiError;
+use aionui_common::{AgentType, ApiError};
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
@@ -36,6 +37,23 @@ async fn set_config_option(
     body: Result<Json<SetConfigOptionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<SetConfigOptionResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
+    if option_id.trim() == "mode"
+        && state
+            .service
+            .conversation_repo()
+            .get(&user.id, &id)
+            .await
+            .map_err(ConversationError::from)
+            .map_err(ApiError::from)?
+            .is_some_and(|row| {
+                row.r#type == AgentType::Aionrs.serde_name()
+                    && TeamSessionBinding::team_id_marker_from_extra_str(&row.extra).is_some()
+            })
+    {
+        return Err(ApiError::BadRequest(
+            "Team permission mode must be selected through the Team API".to_owned(),
+        ));
+    }
     Ok(Json(ApiResponse::ok(
         state
             .service

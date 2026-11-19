@@ -648,13 +648,12 @@ impl TeamAgentProvisioner {
     ) -> Result<(), TeamError> {
         let cli_metadata = cli_backend_metadata(&self.agent_metadata_repo, user_id, &agent.backend).await?;
         let agent_type = agent_type_for_backend(cli_metadata.as_ref(), &agent.backend)?;
-        let session_mode = session_mode_for_backend(&agent.backend, agent_type, cli_metadata.as_ref());
-        let mut patch = if preserve_session_mode {
+        let mut patch = if preserve_session_mode || agent_type == AgentType::Aionrs {
             serde_json::json!({ "team_mcp_stdio_config": mcp_stdio_cfg })
         } else {
             serde_json::json!({
                 "team_mcp_stdio_config": mcp_stdio_cfg,
-                "session_mode": session_mode,
+                "session_mode": session_mode_for_backend(&agent.backend, agent_type, cli_metadata.as_ref()),
             })
         };
         merge_mcp_snapshot_into_patch(&mut patch, mcp_resolution);
@@ -678,13 +677,12 @@ impl TeamAgentProvisioner {
     ) -> Result<(), TeamError> {
         let cli_metadata = cli_backend_metadata(&self.agent_metadata_repo, user_id, &agent.backend).await?;
         let agent_type = agent_type_for_backend(cli_metadata.as_ref(), &agent.backend)?;
-        let session_mode = session_mode_for_backend(&agent.backend, agent_type, cli_metadata.as_ref());
-        let mut patch = if preserve_session_mode {
+        let mut patch = if preserve_session_mode || agent_type == AgentType::Aionrs {
             serde_json::json!({ "team_mcp_stdio_config": null })
         } else {
             serde_json::json!({
                 "team_mcp_stdio_config": null,
-                "session_mode": session_mode,
+                "session_mode": session_mode_for_backend(&agent.backend, agent_type, cli_metadata.as_ref()),
             })
         };
         merge_mcp_snapshot_into_patch(&mut patch, mcp_resolution);
@@ -700,6 +698,16 @@ impl TeamAgentProvisioner {
     }
 
     pub(crate) async fn update_session_mode_seed(&self, agent: &TeamAgent, mode: &str) -> Result<(), TeamError> {
+        if agent.backend == "aionrs" {
+            let mode = match mode {
+                "auto_edit" | "yolo" => mode,
+                _ => "default",
+            };
+            return self
+                .conversation_port
+                .save_team_permission_mode(&agent.conversation_id, mode)
+                .await;
+        }
         if matches!(mode, "default" | "yolo") {
             self.conversation_port
                 .save_team_permission_mode(&agent.conversation_id, mode)
@@ -740,7 +748,12 @@ impl TeamAgentProvisioner {
                 mcp_selection,
             )
             .await?;
-        if let Some(mode) = input.aelix_permission_mode.as_deref() {
+        let permission_mode = if input.backend == "aionrs" && input.session_mode.as_deref() == Some("auto_edit") {
+            Some("auto_edit")
+        } else {
+            input.aelix_permission_mode.as_deref()
+        };
+        if let Some(mode) = permission_mode {
             self.conversation_port
                 .save_team_permission_mode(&conversation.conversation_id, mode)
                 .await?;
@@ -896,11 +909,15 @@ impl TeamAgentProvisioner {
         session_mode: Option<&str>,
         mcp_selection: Option<&TeamMcpSelection>,
     ) -> serde_json::Value {
-        let session_mode = session_mode
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| session_mode_for_backend(backend, agent_type, cli_metadata));
+        let session_mode = if agent_type == AgentType::Aionrs {
+            "default".to_owned()
+        } else {
+            session_mode
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| session_mode_for_backend(backend, agent_type, cli_metadata))
+        };
         let mut extra = serde_json::json!({
             "teamId": team_id,
             "slot_id": slot_id,

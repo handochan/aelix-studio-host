@@ -730,6 +730,17 @@ impl TeamConversationProvisioningPort for TeamConversationAdapters {
 
     async fn save_team_permission_mode(&self, conversation_id: &str, mode: &str) -> Result<(), TeamError> {
         let user_id = self.require_owner_user_id(conversation_id).await?;
+        let conversation = self
+            .conversation_repo
+            .get(&user_id, conversation_id)
+            .await?
+            .ok_or_else(|| TeamError::AgentNotFound(conversation_id.to_owned()))?;
+        if conversation.r#type == AgentType::Aionrs.serde_name() {
+            self.conversation_repo
+                .set_aionrs_team_permission_mode(&user_id, conversation_id, mode)
+                .await?;
+            return Ok(());
+        }
         if self.ensure_team_permission_storage(&user_id, conversation_id).await?
             && !self
                 .acp_session_repo
