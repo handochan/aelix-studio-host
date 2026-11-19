@@ -1,0 +1,165 @@
+{
+  "discoveryUrl": "/api/conversations/c-17/acp-extensions",
+  "initializeRequestFragment": {
+    "clientCapabilities": {
+      "_meta": {
+        "aelix/sessionRelay": {
+          "version": 1,
+          "notifications": true
+        }
+      }
+    }
+  },
+  "initializeResultFragment": {
+    "agentCapabilities": {
+      "_meta": {
+        "aelix/sessionRelay": {
+          "version": 1,
+          "requests": [
+            "_aelix/session/input/state",
+            "_aelix/session/input/steer",
+            "_aelix/session/input/follow-up",
+            "_aelix/session/selections/list",
+            "_aelix/session/selections/set",
+            "_aelix/session/children/list",
+            "_aelix/session/children/steer",
+            "_aelix/session/children/wrap-up",
+            "_aelix/session/children/stop",
+            "_aelix/session/children/events"
+          ],
+          "notifications": [
+            "_aelix/session/children/activity"
+          ]
+        }
+      }
+    }
+  },
+  "openRequest": {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "session/new",
+    "params": {
+      "cwd": "/fixture/workspace",
+      "mcpServers": [],
+      "_meta": {
+        "aelix/sessionRelay": {
+          "bindingId": "b-21"
+        }
+      }
+    }
+  },
+  "openResponse": {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": {
+      "sessionId": "s-42",
+      "_meta": {
+        "aelix/sessionRelay": {
+          "bindingId": "b-21"
+        }
+      }
+    }
+  },
+  "discoveryResponse": {
+    "success": true,
+    "data": {
+      "version": 1,
+      "bindingId": "b-21",
+      "requests": [
+        "_aelix/session/input/state",
+        "_aelix/session/input/steer",
+        "_aelix/session/input/follow-up",
+        "_aelix/session/selections/list",
+        "_aelix/session/selections/set",
+        "_aelix/session/children/list",
+        "_aelix/session/children/steer",
+        "_aelix/session/children/wrap-up",
+        "_aelix/session/children/stop",
+        "_aelix/session/children/events"
+      ],
+      "notifications": [
+        "_aelix/session/children/activity"
+      ]
+    }
+  },
+  "subscribe": {
+    "name": "conversation.subscribeAcpExtensions",
+    "data": {
+      "conversationId": "c-17",
+      "bindingId": "b-21"
+    }
+  },
+  "subscribed": {
+    "name": "conversation.acpExtensionsSubscribed",
+    "data": {
+      "conversationId": "c-17",
+      "bindingId": "b-21",
+      "seq": 7
+    }
+  },
+  "acpNotification": {
+    "jsonrpc": "2.0",
+    "method": "_aelix/session/children/activity",
+    "params": {
+      "sessionId": "s-42",
+      "bindingId": "b-21",
+      "payload": {
+        "epoch": "native-e3",
+        "childId": "child-b",
+        "seq": 12,
+        "state": "running",
+        "event": "activity"
+      }
+    }
+  },
+  "rendererNotification": {
+    "name": "conversation.acpExtension",
+    "data": {
+      "conversationId": "c-17",
+      "bindingId": "b-21",
+      "seq": 8,
+      "method": "_aelix/session/children/activity",
+      "payload": {
+        "epoch": "native-e3",
+        "childId": "child-b",
+        "seq": 12,
+        "state": "running",
+        "event": "activity"
+      }
+    }
+  },
+  "unsubscribe": {
+    "name": "conversation.unsubscribeAcpExtensions",
+    "data": {
+      "conversationId": "c-17",
+      "bindingId": "b-21"
+    }
+  },
+  "resync": {
+    "name": "conversation.acpExtensionError",
+    "data": {
+      "conversationId": "c-17",
+      "bindingId": "b-21",
+      "code": "EXT_RESYNC_REQUIRED"
+    }
+  },
+  "deniedBeforeDispatch": {
+    "status": 403,
+    "body": {
+      "success": false,
+      "error": "Extension method denied.",
+      "code": "EXT_METHOD_DENIED"
+    }
+  },
+  "transportLostAfterDispatch": {
+    "status": 502,
+    "body": {
+      "success": false,
+      "error": "Extension outcome unknown.",
+      "code": "EXT_OUTCOME_UNKNOWN",
+      "details": {
+        "retryable": false
+      }
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "postUrl": "/api/conversations/c-17/acp-extensions",
+  "exchanges": [
+    {
+      "case": "discover current native turn",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/state",
+        "payload": {}
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "result": {
+          "turnId": "turn-8",
+          "active": true
+        }
+      }
+    },
+    {
+      "case": "steer the active turn",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/steer",
+        "payload": {
+          "turnId": "turn-8",
+          "message": "비교 범위를 두 파일로 좁혀 주세요."
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "_aelix/session/input/steer",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "turnId": "turn-8",
+            "message": "비교 범위를 두 파일로 좁혀 주세요."
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "result": {
+          "turnId": "turn-8",
+          "accepted": true,
+          "delivery": "native-queue"
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "turnId": "turn-8",
+              "accepted": true,
+              "delivery": "native-queue"
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "queue a follow-up in native",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/follow-up",
+        "payload": {
+          "turnId": "turn-8",
+          "message": "끝나면 차이를 표로 정리해 주세요."
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "result": {
+          "turnId": "turn-8",
+          "accepted": true,
+          "delivery": "native-queue"
+        }
+      }
+    },
+    {
+      "case": "old turn finished before dispatch to native",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/input/steer",
+        "payload": {
+          "turnId": "turn-7",
+          "message": "이전 턴 입력"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 13,
+        "error": {
+          "code": -33101,
+          "message": "Turn is no longer active."
+        }
+      },
+      "rendererResponse": {
+        "status": 422,
+        "body": {
+          "success": false,
+          "error": "Extension request failed.",
+          "code": "EXT_AGENT_ERROR",
+          "details": {
+            "rpcCode": -33101
+          }
+        }
+      }
+    }
+  ]
+}

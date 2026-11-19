@@ -1,0 +1,180 @@
+{
+  "postUrl": "/api/conversations/c-17/acp-extensions",
+  "status": "candidate ACP contract pending aelix-ai #612",
+  "exchanges": [
+    {
+      "case": "discover children under bound parent",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/list",
+        "payload": {}
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 30,
+        "result": {
+          "epoch": "native-e3",
+          "seq": 10,
+          "children": [
+            {
+              "childId": "child-a",
+              "state": "running"
+            },
+            {
+              "childId": "child-b",
+              "state": "running"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "case": "steer the second child",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/steer",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "message": "두 번째 결과만 확인해 주세요."
+        }
+      },
+      "acpRequest": {
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "_aelix/session/children/steer",
+        "params": {
+          "sessionId": "s-42",
+          "bindingId": "b-21",
+          "payload": {
+            "epoch": "native-e3",
+            "childId": "child-b",
+            "message": "두 번째 결과만 확인해 주세요."
+          }
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 31,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "accepted": true
+        }
+      },
+      "rendererResponse": {
+        "status": 200,
+        "body": {
+          "success": true,
+          "data": {
+            "result": {
+              "epoch": "native-e3",
+              "childId": "child-b",
+              "accepted": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "case": "ask that child to wrap up",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/wrap-up",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 32,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "accepted": true
+        }
+      }
+    },
+    {
+      "case": "stop that child explicitly",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/stop",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 33,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "accepted": true
+        }
+      }
+    },
+    {
+      "case": "read missed native events within one epoch",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/events",
+        "payload": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "afterSeq": 11
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 34,
+        "result": {
+          "epoch": "native-e3",
+          "childId": "child-b",
+          "events": [
+            {
+              "epoch": "native-e3",
+              "childId": "child-b",
+              "seq": 12,
+              "state": "running",
+              "event": "activity"
+            }
+          ],
+          "nextSeq": 12
+        }
+      }
+    },
+    {
+      "case": "reject a stale epoch",
+      "rendererRequest": {
+        "bindingId": "b-21",
+        "method": "_aelix/session/children/stop",
+        "payload": {
+          "epoch": "native-e2",
+          "childId": "child-b"
+        }
+      },
+      "acpResponse": {
+        "jsonrpc": "2.0",
+        "id": 35,
+        "error": {
+          "code": -33103,
+          "message": "Child binding is no longer current."
+        }
+      },
+      "rendererResponse": {
+        "status": 422,
+        "body": {
+          "success": false,
+          "error": "Extension request failed.",
+          "code": "EXT_AGENT_ERROR",
+          "details": {
+            "rpcCode": -33103
+          }
+        }
+      }
+    }
+  ]
+}
