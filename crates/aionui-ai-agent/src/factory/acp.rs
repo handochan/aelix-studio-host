@@ -307,7 +307,7 @@ pub(super) async fn build(
 
     let (agent, domain_rx, notification_rx) = AcpAgentManager::build(Arc::new(params), skill_mgr, &catalog_tx).await?;
 
-    let arc = Arc::new(agent);
+    let arc = Arc::new(agent.with_session_repository(deps.acp_agent_service.repo()));
     arc.start_permission_handler();
     arc.start_session_event_tracker(notification_rx);
     CatalogForwarder::spawn(

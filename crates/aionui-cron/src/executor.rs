@@ -3443,6 +3443,15 @@ mod tests {
         ) -> Result<bool, aionui_db::DbError> {
             Ok(false)
         }
+        async fn update_aelix_prelude_for_user(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _session_id: &str,
+            _change: aionui_db::AelixPreludeChange,
+        ) -> Result<bool, aionui_db::DbError> {
+            Ok(false)
+        }
         async fn delete_for_user(&self, _user_id: &str, _conversation_id: &str) -> Result<bool, aionui_db::DbError> {
             Ok(false)
         }

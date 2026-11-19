@@ -88,18 +88,9 @@ pub struct AcpSession {
     /// (transient in-flight state); no invariant depends on it being distinct.
     config_set_in_flight: Arc<AtomicBool>,
     pending_events: Vec<AcpSessionEvent>,
-    /// Whether `open_session_new` has just completed and the next prompt
-    /// should receive preset_context / skill-index injection.
-    ///
-    /// Lifecycle:
-    /// - writer: `AcpAgentManager::open_session_new` after a successful
-    ///   `session/new` handshake.
-    /// - reader: `SessionNewPreludeHook` via `take_pending_session_new_prelude`.
-    /// - invalidation: any `take_*` call drains it to `false`.
-    ///
-    /// Starts `false` so resume paths, warmup-only flows, and aborted
-    /// session/new attempts all correctly observe "no prelude pending".
-    pending_session_new_prelude: bool,
+    /// One-shot first-prompt injection, set on session/new or restored for an
+    /// Aelix session whose initial /compact deferred delivery.
+    pending_session_new_prelude: Option<SessionNewPrelude>,
     /// Why the session most recently terminated, if at all.
     ///
     /// Lifecycle (see also `CloseReason` doc comment):
@@ -158,7 +149,7 @@ impl AcpSession {
         Self {
             session_id: None,
             opened: false,
-            pending_session_new_prelude: false,
+            pending_session_new_prelude: None,
             desired: Desired {
                 mode_id: initial_mode,
                 model_id: initial_model,
@@ -266,18 +257,32 @@ impl AcpSession {
     /// Set the flag signalling that the next prompt carries the first
     /// post-`session/new` payload. Idempotent.
     pub fn mark_pending_session_new_prelude(&mut self) {
-        self.pending_session_new_prelude = true;
+        self.pending_session_new_prelude = Some(SessionNewPrelude::Fresh);
     }
 
     pub fn has_pending_session_new_prelude(&self) -> bool {
-        self.pending_session_new_prelude
+        self.pending_session_new_prelude.is_some()
+    }
+
+    pub(super) fn mark_deferred_aelix_prelude(&mut self) {
+        self.pending_session_new_prelude = Some(SessionNewPrelude::Deferred);
+    }
+
+    pub(super) fn has_deferred_aelix_prelude(&self) -> bool {
+        matches!(self.pending_session_new_prelude, Some(SessionNewPrelude::Deferred))
     }
 
     /// Consume the prelude flag. Returns `true` exactly once after
     /// `mark_pending_session_new_prelude`; subsequent calls return `false`.
     pub fn take_pending_session_new_prelude(&mut self) -> bool {
-        std::mem::replace(&mut self.pending_session_new_prelude, false)
+        self.pending_session_new_prelude.take().is_some()
     }
+}
+
+#[derive(Debug, Clone)]
+enum SessionNewPrelude {
+    Fresh,
+    Deferred,
 }
 
 // ─── Getters Setters desired ───────────────────────────────────────────────────────

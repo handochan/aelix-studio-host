@@ -14,6 +14,7 @@ use agent_client_protocol::schema::v1::{
     PromptResponse, SessionId, StopReason, Usage, UsageUpdate,
 };
 use aionui_api_types::{AELIX_EXPECTED_FORK_HEAD, FORK_HEAD_CHANGED, SlashCommandItem};
+use aionui_db::AelixPreludeChange;
 use serde_json::Value;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -39,6 +40,23 @@ pub(super) enum PromptOutcome {
 }
 
 impl AcpAgentManager {
+    pub(super) async fn persist_aelix_prelude(&self, sid: &str, change: AelixPreludeChange) -> Result<(), AgentError> {
+        let Some(repo) = &self.session_repo else {
+            return Ok(());
+        };
+        let updated = repo
+            .update_aelix_prelude_for_user(&self.params.user_id, &self.params.conversation_id, sid, change)
+            .await
+            .map_err(|error| {
+                warn!(%error, conversation_id = %self.params.conversation_id, "Could not save Aelix prelude state");
+                AgentError::internal("Could not save the Aelix prelude state")
+            })?;
+        if !updated {
+            return Err(AgentError::conflict("The Aelix session binding changed"));
+        }
+        Ok(())
+    }
+
     /// Establish a fresh ACP session (session/new) and apply desired
     /// mode/model/config via reconcile. Does NOT send a prompt and
     /// does NOT emit Start/Finish — callers wrap that around if needed.
@@ -207,17 +225,28 @@ impl AcpAgentManager {
                 }
                 Err(e) => return Err(e.into()),
             };
+            let is_aelix = self
+                .protocol
+                .initialize_response()
+                .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"));
+            let pending_prelude = if is_aelix && let Some(repo) = &self.session_repo {
+                repo.get_for_user(&self.params.user_id, &self.params.conversation_id)
+                    .await
+                    .map_err(|error| {
+                        warn!(%error, conversation_id = %self.params.conversation_id, "Could not load Aelix prelude state");
+                        AgentError::internal("Could not load the Aelix prelude state")
+                    })?
+                    .is_some_and(|row| row.has_pending_aelix_prelude(session_id))
+            } else {
+                false
+            };
 
             {
                 let mut session = self.session.write().await;
                 let legacy_models = legacy_models
                     .as_ref()
                     .and_then(LegacySessionModelState::from_state_value);
-                if self
-                    .protocol
-                    .initialize_response()
-                    .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"))
-                {
+                if is_aelix {
                     session.adopt_aelix_restored_selections(
                         legacy_models.as_ref(),
                         load_response.config_options.as_deref().unwrap_or_default(),
@@ -228,6 +257,9 @@ impl AcpAgentManager {
                 }
                 session.apply_restored_configuration(load_response.modes, load_response.config_options);
                 session.set_session_id(DomainSessionId::new(session_id.to_owned()));
+                if pending_prelude {
+                    session.mark_deferred_aelix_prelude();
+                }
                 self.commit_session_changes(&mut session).await;
             }
             self.emit_snapshot_events().await;
@@ -363,6 +395,7 @@ impl AcpAgentManager {
         data: &SendMessageData,
         session_id: Option<&str>,
         matched_command: Option<&SlashCommandItem>,
+        consumed_prelude: bool,
     ) -> Result<PromptOutcome, AcpSendFailure> {
         let sid = session_id
             .ok_or_else(|| AgentError::internal("Cannot prompt: no session ID available"))
@@ -402,7 +435,22 @@ impl AcpAgentManager {
         // earlier turn cannot override a later benign empty turn.
         self.process.clear_stderr().await;
 
-        let prompt_response = self.protocol.prompt(request).await.map_err(AcpSendFailure::from)?;
+        let prompt_response = match self.protocol.prompt(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                if consumed_prelude && prompt_was_rejected(&error, &mut probe_rx) {
+                    let mut session = self.session.write().await;
+                    if session.session_id() == Some(sid) {
+                        match self.persist_aelix_prelude(sid, AelixPreludeChange::Restore).await {
+                            Ok(()) => session.mark_deferred_aelix_prelude(),
+                            Err(failure) => warn!(%failure, conversation_id = %self.params.conversation_id,
+                                "Could not restore the deferred Aelix prelude after prompt rejection"),
+                        }
+                    }
+                }
+                return Err(error.into());
+            }
+        };
 
         // End-of-turn usage: agents that never emit UsageUpdate notifications
         // report token usage on the prompt response instead — either via the
@@ -617,6 +665,30 @@ struct TurnObservations {
     /// The tolerant transport absorbed at least one CodeBuddy dialect signal
     /// (`session_end` or token-pressure/compaction) during this turn/near-window.
     dialect_signal: bool,
+}
+
+fn prompt_was_rejected(error: &AcpError, rx: &mut tokio::sync::broadcast::Receiver<AgentStreamEvent>) -> bool {
+    // Only the pre-SDK connection check returns NotConnected. A loss after
+    // handoff is PromptOutcomeUnknown and cannot restore the prelude.
+    if matches!(error, AcpError::NotConnected) {
+        return true;
+    }
+    // Require an explicit request rejection and disqualify it if the peer
+    // reported activity before that reply or if the receiver fell behind.
+    if !matches!(
+        error,
+        AcpError::InvalidRequest { .. }
+            | AcpError::InvalidParams { .. }
+            | AcpError::MethodNotFound { .. }
+            // The negotiated Aelix adapter uses -32000 for prompt admission
+            // failures, including the activity lease before dispatch_request.
+            // Other ACP peers map -32000 to AuthRequired.
+            | AcpError::ApplicationError { code: -32000, .. }
+    ) {
+        return false;
+    }
+    let observations = drain_turn_observations(rx);
+    observations.empty && !observations.dialect_signal
 }
 
 /// Drain the turn-scoped receiver once, recording both the empty-turn condition
@@ -1453,6 +1525,17 @@ mod tests {
             }
             other => panic!("expected InfoTip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prelude_restoration_distinguishes_pre_sdk_failure_from_unknown_delivery() {
+        let (_tx, mut rx) = broadcast::channel::<AgentStreamEvent>(8);
+        assert!(super::prompt_was_rejected(&super::AcpError::NotConnected, &mut rx));
+        assert!(!super::prompt_was_rejected(&super::AcpError::AuthRequired, &mut rx));
+        assert!(!super::prompt_was_rejected(
+            &super::AcpError::PromptOutcomeUnknown,
+            &mut rx
+        ));
     }
 
     #[tokio::test]

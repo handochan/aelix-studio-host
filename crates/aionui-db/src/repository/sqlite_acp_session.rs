@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use crate::error::DbError;
 use crate::models::AcpSessionRow;
 use crate::repository::acp_session::{
-    CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams,
+    AelixPreludeChange, CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams,
 };
 
 #[derive(Clone, Debug)]
@@ -324,6 +324,40 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn update_aelix_prelude_for_user(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        session_id: &str,
+        change: AelixPreludeChange,
+    ) -> Result<bool, DbError> {
+        use AelixPreludeChange::{Consume, Defer, Restore};
+
+        let result = sqlx::query(
+            "UPDATE acp_session SET session_id = COALESCE(session_id, ?), session_config = CASE \
+             WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
+             ELSE json_remove(session_config, '$.aelix_pending_prelude') END \
+             WHERE conversation_id = ? AND (session_id = ? OR (? AND session_id IS NULL \
+               AND json_type(session_config, '$.aelix_pending_prelude') IS NULL)) \
+               AND (NOT ? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
+               AND (NOT ? OR json_type(session_config, '$.aelix_pending_prelude') IS NULL) \
+               AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
+        )
+        .bind(session_id)
+        .bind(change != Consume)
+        .bind(session_id)
+        .bind(conversation_id)
+        .bind(session_id)
+        .bind(change == Defer)
+        .bind(change == Consume)
+        .bind(session_id)
+        .bind(change == Restore)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() != 0)
+    }
+
     async fn delete_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError> {
         let result = sqlx::query(
             "DELETE FROM acp_session \
@@ -464,6 +498,173 @@ mod tests {
 
         let fetched = repo.get_unscoped("conv-1").await.unwrap().unwrap();
         assert_eq!(fetched.conversation_id, "conv-1");
+    }
+
+    #[tokio::test]
+    async fn deferred_aelix_prelude_is_scoped_to_its_owner_conversation_and_backend_session() {
+        let (repo, _db) = setup().await;
+        repo.create(&create_params("conv-1")).await.unwrap();
+        insert_conversation(&repo, "user-2", "conv-2").await;
+        repo.create(&CreateAcpSessionParams {
+            user_id: "user-2",
+            ..create_params("conv-2")
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-2", "conv-1", "backend", AelixPreludeChange::Defer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", AelixPreludeChange::Defer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.get_for_user("user-1", "conv-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .has_pending_aelix_prelude("backend")
+        );
+        for (user, conv) in [("user-1", "conv-1"), ("user-2", "conv-2")] {
+            assert!(repo.update_session_id_for_user(user, conv, "backend").await.unwrap());
+        }
+
+        assert!(repo.get_for_user("user-2", "conv-1").await.unwrap().is_none());
+        assert!(
+            !repo
+                .get_for_user("user-2", "conv-2")
+                .await
+                .unwrap()
+                .unwrap()
+                .has_pending_aelix_prelude("backend")
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-2", "conv-1", "backend", AelixPreludeChange::Consume)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "wrong", AelixPreludeChange::Defer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "wrong", AelixPreludeChange::Consume)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.get_for_user("user-1", "conv-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .has_pending_aelix_prelude("backend")
+        );
+
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "replacement")
+                .await
+                .unwrap()
+        );
+        let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
+        assert!(!row.has_pending_aelix_prelude("backend"));
+        assert!(!row.has_pending_aelix_prelude("replacement"));
+    }
+
+    #[tokio::test]
+    async fn aelix_prelude_restore_requires_the_original_bound_owner_and_an_empty_marker() {
+        use AelixPreludeChange::{Consume, Defer, Restore};
+
+        let (repo, _db) = setup().await;
+        repo.create(&create_params("conv-1")).await.unwrap();
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Consume)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Defer)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Consume)
+                .await
+                .unwrap()
+        );
+
+        for (user, session) in [("user-2", "backend"), ("user-1", "wrong")] {
+            assert!(
+                !repo
+                    .update_aelix_prelude_for_user(user, "conv-1", session, Restore)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.get_for_user("user-1", "conv-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .has_pending_aelix_prelude("backend")
+        );
+
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "replacement")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "replacement", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(repo.clear_session_id_for_user("user-1", "conv-1").await.unwrap());
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Restore)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Defer)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
