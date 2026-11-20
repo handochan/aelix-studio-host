@@ -1368,7 +1368,9 @@ impl AcpAgentManager {
             let mut session = self.session.write().await;
             let deferred = session.has_deferred_aelix_prelude();
             let pending = session.has_pending_session_new_prelude();
-            if pending && has_slash_command_shape(&raw_user_input) {
+            // Without attachments the ACP block builder emits one text block.
+            // Path-only fallback files still belong to an ordinary prompt.
+            if pending && data.files.is_empty() && has_slash_command_shape(&raw_user_input) {
                 // Keep the command at the start of the ACP text and save the
                 // rules for the first ordinary prompt in this session.
                 if !deferred {

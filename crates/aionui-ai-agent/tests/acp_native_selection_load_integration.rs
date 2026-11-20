@@ -49,6 +49,8 @@ for line in sys.stdin:
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
             'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
         }
+        if load_surface == 'media-wire':
+            response['result']['agentCapabilities']['promptCapabilities'] = {'image': True}
         if load_surface == 'fork-recovery':
             response['result']['agentCapabilities']['sessionCapabilities'] = {'fork': {}}
     elif method == 'session/fork':
@@ -77,6 +79,9 @@ for line in sys.stdin:
         selections[key] = value
         response['result'] = {'configOptions': options()}
     elif method == 'session/prompt' and params['sessionId'] in ('selector-session', 'replacement-session'):
+        if load_surface == 'media-wire':
+            with open(trace + '.blocks', 'a') as output:
+                output.write(json.dumps(params['prompt']) + '\n')
         text = params['prompt'][0]['text']
         entry += ' ' + json.dumps(text)
         body = text.splitlines()[-1]
@@ -829,4 +834,60 @@ async fn legacy_conversation_without_session_row_binds_before_its_first_command(
     assert!(prelude_pending(&sync).await);
     assert_eq!(prompt_trace(temp.path(), "legacy-row.txt"), ["/extension list"]);
     agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn first_slash_prompt_with_attachments_consumes_the_prelude_as_ordinary_input() {
+    for (attachment, wire_types) in [("fixture.png", vec!["text", "image"]), ("fixture.txt", vec!["text"])] {
+        let (temp, registry, sync) = setup().await;
+        let agent = open_session(
+            temp.path(),
+            &registry,
+            &sync,
+            "aelix-acp",
+            "attachments.txt",
+            "media-wire",
+        )
+        .await;
+        let file = temp.path().join(attachment);
+        std::fs::write(&file, b"wire fixture bytes").unwrap();
+        let path = file.to_string_lossy().into_owned();
+
+        agent
+            .send_message(SendMessageData {
+                content: format!("/extension list\n\n[[AION_FILES]]\n{path}"),
+                msg_id: "attachment".into(),
+                turn_id: None,
+                files: vec![path.clone()],
+                inject_skills: vec![],
+            })
+            .await
+            .unwrap();
+
+        let captured = std::fs::read_to_string(temp.path().join("attachments.txt.blocks")).unwrap();
+        let first: Vec<serde_json::Value> = serde_json::from_str(captured.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|block| block["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            wire_types,
+            "{attachment}",
+        );
+        assert_eq!(
+            first[0]["text"].as_str().unwrap(),
+            format!(
+                "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n/extension list\n\n[[AION_FILES]]\n{path}"
+            ),
+            "{attachment}",
+        );
+        assert!(!prelude_pending(&sync).await, "{attachment}");
+        prompt(&agent, "Continue").await.unwrap();
+        assert_eq!(
+            prompt_trace(temp.path(), "attachments.txt")[1],
+            "Continue",
+            "{attachment}"
+        );
+        agent.kill_and_wait(None).await;
+    }
 }

@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::{
     AudioContent, AuthMethod, ContentBlock, ForkSessionRequest, ImageContent, LoadSessionRequest, PromptRequest,
     PromptResponse, SessionId, StopReason, Usage, UsageUpdate,
 };
-use aionui_api_types::{AELIX_EXPECTED_FORK_HEAD, AgentSource, FORK_HEAD_CHANGED, SlashCommandItem};
+use aionui_api_types::{AELIX_EXPECTED_FORK_HEAD, AgentSource, FORK_HEAD_CHANGED};
 use aionui_db::{AelixPreludeChange, CreateAcpSessionParams, DbError};
 use serde_json::Value;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -600,7 +600,6 @@ impl AcpAgentManager {
             sid,
             prompt_response.stop_reason,
             empty_turn,
-            None,
             auth_hint,
             observations.dialect_signal,
         ))
@@ -906,7 +905,6 @@ fn prompt_outcome_from_stop_reason(
     session_id: &str,
     stop_reason: StopReason,
     empty_turn: bool,
-    _matched_command: Option<&SlashCommandItem>,
     auth_hint: Option<Value>,
     token_limit_signal: bool,
 ) -> PromptOutcome {
@@ -1416,7 +1414,7 @@ mod tests {
         ToolCallEventData, ToolCallStatus,
     };
     use agent_client_protocol::schema::v1::StopReason;
-    use aionui_api_types::{AgentErrorCode, SlashCommandCompletionBehavior, SlashCommandItem};
+    use aionui_api_types::AgentErrorCode;
     use tokio::sync::broadcast;
 
     /// Lifecycle-only events (`Start`/`Finish`) must NOT count as
@@ -1522,7 +1520,7 @@ mod tests {
 
     #[test]
     fn benign_empty_turn_returns_info_tip() {
-        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, None, false);
+        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, false);
 
         match outcome {
             super::PromptOutcome::InfoTip { session_id, tips } => {
@@ -1530,6 +1528,7 @@ mod tests {
                 assert_eq!(tips.tip_type, TipType::Info);
                 assert_eq!(tips.code.as_deref(), Some("ACP_EMPTY_TURN"));
                 assert_eq!(tips.content, "");
+                assert_eq!(tips.params, None);
             }
             other => panic!("expected InfoTip, got {other:?}"),
         }
@@ -1545,7 +1544,7 @@ mod tests {
             "hint": "Run `kilo auth login` in the terminal",
         });
         let outcome =
-            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, Some(auth_hint), false);
+            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, Some(auth_hint), false);
 
         match outcome {
             super::PromptOutcome::InfoTip { session_id, tips } => {
@@ -1578,7 +1577,7 @@ mod tests {
             "hint": "Login with iOA",
         });
         let outcome =
-            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, Some(auth_hint), true);
+            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, Some(auth_hint), true);
         match outcome {
             super::PromptOutcome::InfoTip { tips, .. } => {
                 assert_eq!(tips.code.as_deref(), Some("ACP_EMPTY_TURN_TOKEN_LIMIT"));
@@ -1602,7 +1601,7 @@ mod tests {
             "hint": "Login with iOA",
         });
         let outcome =
-            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, Some(auth_hint), false);
+            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, Some(auth_hint), false);
         match outcome {
             super::PromptOutcome::InfoTip { tips, .. } => {
                 assert_eq!(tips.code.as_deref(), Some("ACP_EMPTY_TURN_NEEDS_AUTH"));
@@ -1613,7 +1612,7 @@ mod tests {
 
     #[test]
     fn empty_end_turn_with_token_signal_and_no_auth_hint_is_token_limit() {
-        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, None, true);
+        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, None, true);
         match outcome {
             super::PromptOutcome::InfoTip { tips, .. } => {
                 assert_eq!(tips.code.as_deref(), Some("ACP_EMPTY_TURN_TOKEN_LIMIT"));
@@ -1685,33 +1684,8 @@ mod tests {
     }
 
     #[test]
-    fn metadata_driven_command_empty_turn_uses_generic_tip_code() {
-        let command = SlashCommandItem {
-            command: "ctx-flush".into(),
-            description: "Flush context".into(),
-            completion_behavior: Some(SlashCommandCompletionBehavior::NeutralTipOnEmpty),
-            empty_turn_tip_code: Some("ACP_CTX_FLUSH_COMPLETED".into()),
-            empty_turn_tip_params: Some(serde_json::json!({ "scope": "session" })),
-        };
-
-        let outcome =
-            super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, true, Some(&command), None, false);
-
-        match outcome {
-            super::PromptOutcome::InfoTip { session_id, tips } => {
-                assert_eq!(session_id, "sess-1");
-                assert_eq!(tips.tip_type, TipType::Info);
-                assert_eq!(tips.code.as_deref(), Some("ACP_EMPTY_TURN"));
-                assert_eq!(tips.content, "");
-                assert_eq!(tips.params, None);
-            }
-            other => panic!("expected InfoTip, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn non_benign_empty_turn_can_stay_warning_tip() {
-        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::MaxTokens, true, None, None, false);
+        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::MaxTokens, true, None, false);
 
         match outcome {
             super::PromptOutcome::WarningTip { session_id, tips } => {
@@ -1726,7 +1700,7 @@ mod tests {
 
     #[test]
     fn prompt_outcome_cancelled_takes_priority_over_empty_response() {
-        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::Cancelled, true, None, None, false);
+        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::Cancelled, true, None, false);
 
         match outcome {
             super::PromptOutcome::Cancelled { session_id } => {
@@ -1738,7 +1712,7 @@ mod tests {
 
     #[test]
     fn prompt_outcome_completed_when_visible_output_exists() {
-        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, false, None, None, false);
+        let outcome = super::prompt_outcome_from_stop_reason("sess-1", StopReason::EndTurn, false, None, false);
 
         match outcome {
             super::PromptOutcome::Completed { session_id } => {
