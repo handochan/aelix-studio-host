@@ -632,10 +632,10 @@ impl crate::traits::IFileService for FileService {
             // embeds the path in its `NotFound` message — fine for the
             // client-supplied-path caller (`get_file_metadata`), which is only
             // echoing back what the request contained, but a disclosure here. Swap
-            // in the payload-free variant; the path stays in the log.
+            // in the payload-free variant and log only the code.
             .map_err(|err| match err {
-                FileError::NotFound(cause) => {
-                    tracing::warn!(target: "chat_file", error = %cause, "resolved metadata target is unreadable");
+                FileError::NotFound(_) => {
+                    tracing::warn!(target: "chat_file", code = "FILE_NOT_FOUND", "resolved metadata target is unreadable");
                     FileError::TargetNotFound
                 }
                 other => other,

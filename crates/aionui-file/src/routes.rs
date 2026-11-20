@@ -376,7 +376,7 @@ async fn copy_absolute_path_resolved(
 /// fixed.
 fn chat_file_resolve_error(err: aionui_project::ProjectError) -> ApiError {
     let code = err.code();
-    tracing::warn!(target: "chat_file", error = %err, code, "could not resolve chat file reference");
+    tracing::warn!(target: "chat_file", code, "could not resolve chat file reference");
     match err {
         aionui_project::ProjectError::Database(_) => ApiError::Internal("failed to resolve target".to_owned()),
         _ => ApiError::coded(

@@ -260,18 +260,33 @@ pub fn validate_workspace_path_availability(workspace: &str) -> Result<String, W
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.into_response_with_log_context(true)
+    }
+}
+
+impl ApiError {
+    /// Preserve the client response when its message contains sensitive data.
+    pub fn into_response_with_code_only_log(self) -> Response {
+        self.into_response_with_log_context(false)
+    }
+
+    fn into_response_with_log_context(self, log_message: bool) -> Response {
         let status = self.status_code();
         let code = self.error_code();
         let message = self.public_message();
         let details = self.error_details();
+        let log_message = if log_message { message.clone() } else { String::new() };
         let body = ErrorBody {
             success: false,
-            error: message.clone(),
+            error: message,
             code: code.to_owned(),
             details,
         };
         let mut response = (status, axum::Json(body)).into_response();
-        response.extensions_mut().insert(ApiErrorLogContext { code, message });
+        response.extensions_mut().insert(ApiErrorLogContext {
+            code,
+            message: log_message,
+        });
         response
     }
 }

@@ -26,6 +26,11 @@ pub enum ConversationError {
     #[error("Bad request: {reason}")]
     BadRequest { reason: String },
 
+    /// The original error determines the client response. Reference data in
+    /// its message must stay out of the HTTP access log.
+    #[error(transparent)]
+    ReferenceResolution(Box<ConversationError>),
+
     #[error("Conversation is busy: {reason}")]
     Busy { reason: String },
 
@@ -111,6 +116,7 @@ impl ConversationError {
             Self::ActiveAgentNotFound { .. } => AgentError::not_found("No active agent for this conversation"),
             Self::Archived { reason, .. } => AgentError::conversation_archived(reason.clone()),
             Self::BadRequest { reason } => AgentError::bad_request(reason.clone()),
+            Self::ReferenceResolution(error) => error.to_agent_error(),
             Self::Busy { reason } => AgentError::conflict(reason.clone()),
             Self::Forbidden { reason } => AgentError::forbidden(reason.clone()),
             Self::NotFoundReason { reason } => AgentError::not_found(reason.clone()),
@@ -147,6 +153,7 @@ impl ConversationError {
             | Self::ActiveAgentNotFound { .. }
             | Self::NotFoundReason { .. } => "NOT_FOUND",
             Self::BadRequest { .. } => "BAD_REQUEST",
+            Self::ReferenceResolution(error) => error.error_code(),
             Self::Unauthorized { .. } => "UNAUTHORIZED",
             Self::Forbidden { .. } => "FORBIDDEN",
             Self::Busy { .. } => "CONFLICT",

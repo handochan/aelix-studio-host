@@ -547,8 +547,15 @@ impl ConversationService {
         project
             .resolve_chat_message(user_id, content, files, &upload_root)
             .await
-            .map_err(|err| ConversationError::BadRequest {
-                reason: err.to_string(),
+            .map_err(|err| {
+                warn!(
+                    code = err.code(),
+                    ref_count = files.len(),
+                    "could not resolve message attachments"
+                );
+                ConversationError::BadRequest {
+                    reason: err.to_string(),
+                }
             })
     }
 
@@ -3914,7 +3921,15 @@ impl ConversationService {
         } else {
             let sender_workspace = session_mentions::workspace_from_extra(&row.extra);
             self.resolve_session_mentions(user_id, &req.content, &req.sessions, sender_workspace.as_deref())
-                .await?
+                .await
+                .map_err(|error| {
+                    warn!(
+                        code = error.error_code(),
+                        ref_count = req.sessions.len(),
+                        "could not resolve session mentions"
+                    );
+                    ConversationError::ReferenceResolution(Box::new(error))
+                })?
         };
 
         // Resolve file attachments at the send boundary before any persist/claim
@@ -3922,7 +3937,8 @@ impl ConversationService {
         // `[[AION_FILES]]` content used for persistence, broadcast, and the turn.
         let resolved = self
             .resolve_message_attachments(user_id, &content_with_sessions, &req.files)
-            .await?;
+            .await
+            .map_err(|error| ConversationError::ReferenceResolution(Box::new(error)))?;
 
         // ── Mid-turn delivery (B5, spec §4.3) ────────────────────────────
         // An ACTIVE turn + a backend that supports mid-turn delivery → the
