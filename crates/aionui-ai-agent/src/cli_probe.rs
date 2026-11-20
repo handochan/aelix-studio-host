@@ -104,7 +104,7 @@ pub(crate) async fn validate_with_budget(meta: &AgentMetadata, budget: Duration)
     validate_version_with_timeout(&path, budget).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn resolve_and_validate_command(command: &str) -> Result<PathBuf, ProbeFailure> {
     let path = resolve_command_path(command).ok_or_else(|| ProbeFailure::CommandNotFound {
         command: command.to_owned(),

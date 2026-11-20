@@ -1,7 +1,5 @@
 use aionui_common::{CommandSpec, ErrorChain};
 use aionui_runtime::Builder as CmdBuilder;
-#[cfg(test)]
-use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
@@ -150,14 +148,14 @@ mod tests {
     use super::*;
     use aionui_common::EnvVar;
     use std::time::Duration;
-    use tokio::io::AsyncReadExt;
-    use tokio::time::timeout;
 
     // ── SDK mode tests ───────────────────────────────────────────────
 
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_for_sdk_uses_clean_agent_env_and_explicit_overrides() {
+        use tokio::{io::AsyncReadExt as _, time::timeout};
+
         const CHILD_ENV: &str = "AIONUI_TEST_SDK_AGENT_ENV_CHILD";
 
         if std::env::var_os(CHILD_ENV).is_none() {
@@ -228,7 +226,7 @@ printf '%s\n' \
     }
 
     #[cfg(unix)]
-    fn write_fake_shell(path: &Path, contents: &str) {
+    fn write_fake_shell(path: &std::path::Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::write(path, contents).unwrap();

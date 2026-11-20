@@ -1835,7 +1835,7 @@ impl AcpAgentManager {
 mod tests {
     use super::{
         build_acp_final_input_dump_value, emit_kill_terminal, exit_status_parts, normalize_config_option_request_value,
-        register_spawned_process, user_facing_message,
+        user_facing_message,
     };
     use crate::agent_runtime::AgentRuntime;
     use crate::error::AgentError;
@@ -2415,6 +2415,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn register_failure_kills_spawned_process() {
+        use super::register_spawned_process;
         use std::os::unix::fs::PermissionsExt;
         use std::path::PathBuf;
 
