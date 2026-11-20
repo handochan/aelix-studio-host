@@ -481,6 +481,383 @@
       }
     }
   },
+  "stage1QueueReceipt": {
+    "nativePin": "cad65ce9bbc8da4bfa02c444d20e07301ee057f4",
+    "duringPrompt": {
+      "admittedWriteRpcIds": [
+        11,
+        12
+      ],
+      "orderedAcpFrames": [
+        {
+          "jsonrpc": "2.0",
+          "id": 100,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "두 파일을 검토해 주세요."
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "agent_message_chunk",
+              "content": {
+                "type": "text",
+                "text": "두 파일을 비교했습니다."
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "agent_message_chunk",
+              "content": {
+                "type": "text",
+                "text": "요청한 표입니다."
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 100,
+          "result": {
+            "stopReason": "end_turn"
+          }
+        }
+      ],
+      "originalPromptUserRows": 1,
+      "additionalUserRows": 0,
+      "newTurnClaimsFromRelay": 0
+    },
+    "afterLastDrain": {
+      "queuedWriteRpcId": 17,
+      "endedPrompt": {
+        "request": {
+          "jsonrpc": "2.0",
+          "id": 101,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "첫 작업을 시작해 주세요."
+              }
+            ]
+          }
+        },
+        "response": {
+          "jsonrpc": "2.0",
+          "id": 101,
+          "result": {
+            "stopReason": "end_turn"
+          }
+        }
+      },
+      "stateAfterEnd": {
+        "active": false,
+        "turnId": null
+      },
+      "rendererOnTurnEnd": {
+        "scope": "session",
+        "notice": "큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음",
+        "attributesConsumptionToRequestId": false
+      },
+      "autoPromptRequests": 0,
+      "onExplicitNewSend": {
+        "route": "POST /api/conversations/c-17/messages",
+        "orderedAcpFrames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "session/prompt",
+            "params": {
+              "sessionId": "s-42",
+              "prompt": [
+                {
+                  "type": "text",
+                  "text": "새 작업을 시작해 주세요."
+                }
+              ]
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+              "sessionId": "s-42",
+              "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                  "type": "text",
+                  "text": "새 작업에 반영했습니다."
+                }
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+              "stopReason": "end_turn"
+            }
+          }
+        ],
+        "originalNewPromptUserRows": 1,
+        "additionalUserRows": 0
+      }
+    },
+    "ordinarySendAdmission": {
+      "duringNativePreflight": {
+        "orderedAcpFrames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/prompt",
+            "params": {
+              "sessionId": "s-42",
+              "prompt": [
+                {
+                  "type": "text",
+                  "text": "prompt during native preflight"
+                }
+              ]
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "_aelix/session/input/state",
+            "params": {
+              "sessionId": "s-42",
+              "bindingId": "b-21",
+              "payload": {}
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": {
+              "active": false,
+              "turnId": null
+            }
+          }
+        ],
+        "hostTurn": "active",
+        "ordinaryPostRequests": 0,
+        "preserveDraft": true
+      },
+      "whenExplicitlySentWithBothIdle": {
+        "route": "POST /api/conversations/c-17/messages",
+        "inputState": {
+          "active": false,
+          "turnId": null
+        },
+        "hostTurnAtClick": "idle",
+        "onHostTurnClaimConflict": {
+          "httpStatus": 409,
+          "additionalUserRows": 0,
+          "preserveDraftTextAndAttachments": true,
+          "automaticRetries": 0
+        }
+      }
+    },
+    "stopBeforeReceipt": {
+      "orderedAcpFrames": [
+        {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "prompt to cancel"
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 5,
+          "method": "_aelix/session/input/steer",
+          "params": {
+            "sessionId": "s-42",
+            "bindingId": "b-21",
+            "payload": {
+              "turnId": "turn-8",
+              "requestId": "01a1f392-16c0-7000-8000-000000000001",
+              "message": "withdrawn queued input"
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 6,
+          "method": "_aelix/session/requests/lookup",
+          "params": {
+            "sessionId": "s-42",
+            "bindingId": "b-21",
+            "payload": {
+              "requestId": "01a1f392-16c0-7000-8000-000000000001"
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 6,
+          "result": {
+            "status": "pending"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/cancel",
+          "params": {
+            "sessionId": "s-42"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "result": {
+            "stopReason": "cancelled"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 7,
+          "method": "_aelix/session/input/state",
+          "params": {
+            "sessionId": "s-42",
+            "bindingId": "b-21",
+            "payload": {}
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 7,
+          "result": {
+            "active": false,
+            "turnId": null
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 9,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "prompt after cancellation"
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 10,
+          "method": "_aelix/session/input/state",
+          "params": {
+            "sessionId": "s-42",
+            "bindingId": "b-21",
+            "payload": {}
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 10,
+          "result": {
+            "active": true,
+            "turnId": "turn-9"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 5,
+          "result": {
+            "turnId": "turn-8",
+            "accepted": true,
+            "delivery": "native-queue"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 11,
+          "method": "_aelix/session/requests/lookup",
+          "params": {
+            "sessionId": "s-42",
+            "bindingId": "b-21",
+            "payload": {
+              "requestId": "01a1f392-16c0-7000-8000-000000000001"
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 11,
+          "result": {
+            "status": "completed",
+            "result": {
+              "turnId": "turn-8",
+              "accepted": true,
+              "delivery": "native-queue"
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "agent_message_chunk",
+              "content": {
+                "type": "text",
+                "text": "native answer"
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 9,
+          "result": {
+            "stopReason": "end_turn"
+          }
+        }
+      ],
+      "rendererOnLateReceipt": {
+        "scope": "session",
+        "bindingId": "b-21",
+        "receiptTurnId": "turn-8",
+        "activeTurnId": "turn-9",
+        "notice": "큐에 접수됨 · Stop 이후 처리 여부 미확인",
+        "updatesActiveTurnQueue": false,
+        "applyAfterBindingChange": false
+      },
+      "additionalUserRowsFromRelay": 0,
+      "nextModelHasWithdrawnInput": false
+    }
+  },
+  "stage2RequiresNativeObservation": "https://github.com/handochan/aelix-ai/issues/865",
   "consumedWithinPrompt": {
     "bindingId": "b-21",
     "hostTurn": "host-turn-8",

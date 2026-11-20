@@ -2,7 +2,7 @@
 
 **설계안 · host #32 · 2026-11-19.** 첫 검증 대상은 Studio #24다. 사용자가 보는 대화가 실행 중일 때 steer와 follow-up을 해당 실행 세션의 native 큐에 보낼 수 있어야 한다. host는 호출 자격, 대상 연결, 전달 한도를 책임진다. 입력의 의미와 실제 실행 시점은 ACP와 native가 결정한다. 기존 host에 이 계약이 구현됐다는 뜻으로 예시를 사용하지 않는다. [host #32](https://github.com/handochan/aelix-studio-host/issues/32) · [Studio 결정 D05·D12·D16·D17 및 확인 기록](https://github.com/handochan/aelix-studio/blob/844e6b30/docs/studio-release-train/decisions.md)
 
-**사용자 확정 (2026-11-19).** U1은 세션 prefix와 방향별 광고의 교집합, U2는 desktop과 로그인 WebUI 동시 공개, U3은 세션 내 project 쓰기와 helper의 global 쓰기, U4는 native 큐 접수 표시다. U5-b로 활성화하고 U6-a로 실행 중 추가 입력의 이력을 H1에 넣는다. 아래 PR과 D16 JSON은 이 결정을 구현할 계약이다. [사용자 결정](https://github.com/handochan/aelix-studio-host/issues/32#issuecomment-7010830532) · [독립 설계 리뷰](https://github.com/handochan/aelix-studio-host/pull/48#issuecomment-7010774663)
+**사용자 확정 (2026-11-19).** U1은 세션 prefix와 방향별 광고의 교집합, U2는 desktop과 로그인 WebUI 동시 공개, U3은 세션 내 project 쓰기와 helper의 global 쓰기, U4는 native 큐 접수 표시다. U5-b로 활성화하고 H1에 U6-a 사용자 이력 수신을 둔다. 2026-11-20 결정으로 ACP의 이력 송신은 A1 2단계로 옮겼다. 아래 PR과 D16 JSON은 이 결정을 구현할 계약이다. [사용자 결정](https://github.com/handochan/aelix-studio-host/issues/32#issuecomment-7010830532) · [독립 설계 리뷰](https://github.com/handochan/aelix-studio-host/pull/48#issuecomment-7010774663)
 
 ## 출발점과 변경 위치
 
@@ -67,7 +67,7 @@ dispatch 직전 취소라면 보내지 않는다. 이후 브라우저의 AbortSi
 
 ### 쓰기 중복 제거 (S2·S9)
 
-renderer는 새 쓰기 의도마다 UUIDv7 `payload.requestId`를 한 번 생성한다. steer·follow-up, selections/set, 자식 steer·wrap-up·stop에 적용한다. **최초 실행**은 쓰기 메서드로 보내고, **수동 재확인**은 읽기 전용 `_aelix/session/requests/lookup`으로 보낸다. 조회 payload는 원래 쓰기의 `requestId` 하나다. H1부터 ACP가 lookup을 광고한다. host는 다른 광고 메서드와 같은 envelope로 전달하고 SDK는 조회마다 새 JSON-RPC id를 붙인다. renderer는 HTTP 재인증·재연결·수동 재확인 때 쓰기 메서드를 재발행하지 않는다.
+renderer는 새 쓰기 의도마다 UUIDv7 `payload.requestId`를 한 번 생성한다. steer·follow-up, selections/set, 자식 steer·wrap-up·stop에 적용한다. **최초 실행**은 쓰기 메서드로 보내고, **수동 재확인**은 읽기 전용 `_aelix/session/requests/lookup`으로 보낸다. 조회 payload는 원래 쓰기의 `requestId` 하나다. A1 1단계 ACP가 lookup을 광고한다. host는 다른 광고 메서드와 같은 envelope로 전달하고 SDK는 조회마다 새 JSON-RPC id를 붙인다. renderer는 HTTP 재인증·재연결·수동 재확인 때 쓰기 메서드를 재발행하지 않는다.
 
 **쓰기 접수.** ACP는 소유 세션·권한 확인 뒤 현재 binding의 키를 조회하고, 새 키면 native 송신 전에 원자적으로 예약한다. 10분 창의 `firstSeen`은 ACP가 그 binding에서 쓰기 키를 처음 받은 단조 시각이다. UUIDv7은 고유성에만 사용한다. 기존 키로 중복 전달된 쓰기는 메서드·정규화한 payload digest를 대조한 뒤 이미 진행 중인 작업이나 결과를 재사용한다. 턴·epoch·파일 잠금 상태가 바뀌어도 저장된 결과는 유지한다. 다른 내용으로 키가 충돌하면 native 호출 없이 -32602로 거부한다. binding당 최대 256개 키와 응답 바이트 예산을 예약하며, 공간 부족이면 새 쓰기는 dispatch 전 `accepted:false,reason:"dedup-capacity"`로 거부한다. 기한 안의 항목을 일찍 퇴출하지 않는다. 미회수 작업은 기한이 지나도 정산할 때까지 슬롯에 보관한다.
 
@@ -106,19 +106,24 @@ JSON 파일의 HTTP·ACP 교환은 **제안하는 v1 golden 예시**다. 서로 
 
 ### #24의 큐 접수와 이력 경계 (B1 · U4 · U6-a)
 
-`input/state`가 `active:false,turnId:null`이면 새로 누른 보내기는 기존 일반 send를 쓴다. 이전 steer POST를 일반 send로 바꾸지 않는다. 활성 턴으로 전송했더라도 종료와 native enqueue가 경합할 수 있다. 접수 영수증을 본 renderer는 턴 종료 시 **세션 단위 안내** “큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음”을 표시한다. 개별 쓰기는 접수까지만 표시한다. 표준 이력의 messageId와 쓰기 requestId는 독립이므로 어느 영수증이 소비됐는지, 남은 건수나 텍스트를 추정하지 않는다. 안내는 사용자가 닫거나 대화를 바꾸면 지운다. 다시 열면 서버에 저장된 사용자 이력만 표시한다. 다음 prompt를 자동으로 시작하지 않는다. 새 prompt에서 실제로 소비되면 그때 그 prompt의 이력에 남는다. verified: `aelix-ai@e19ab55e/packages/aelix-coding-agent/src/aelix_coding_agent/rpc/rpc_types.py:68–84`, `packages/aelix-agent-core/src/aelix_agent_core/harness/core.py:1783–1812`(turnId 없는 enqueue).
+**1단계 · Beta.** 고정 native `cad65ce9`에서 `input/state`, `input/steer`, `input/follow-up`, `requests/lookup`을 제공한다. ACP는 이미 끝났다고 관찰했거나 다른 턴을 가리키는 쓰기를 `stale-turn`으로 거절한다. `accepted:true,delivery:"native-queue"`의 `turnId`는 native 송신 직전에 adapter가 확인한 값이다. 마지막 drain 뒤에 들어간 입력은 다음 명시적 prompt에서 처리될 수 있다. [사용자 결정](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037569111) · [고정 native 캡처](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037137219)
 
-| 시점 | ACP와 host가 기록할 일 |
+**일반 전송 조건.** 사용자가 새로 보낼 때 `input/state`가 `active:false,turnId:null`이고 host 대화에 활성 턴이 없어야 일반 send를 사용한다. Native preflight, Stop 직후, 종료 정리 중에는 ACP가 비활성으로 응답해도 host 턴이 열려 있을 수 있다. 그동안 입력을 유지하고 일반 POST를 보내지 않는다. 전송 직전에 다른 작업이 host 턴을 선점해 409가 오면 텍스트와 첨부를 보존하고 다음 명시적 사용자 동작을 기다린다. 사용자가 다시 보내면 당시 상태로 경로를 고른다. Host는 claim 거절 전에 사용자 행을 쓰지 않는다. [실제 ACP preflight 확인](https://github.com/handochan/aelix-studio-host/pull/56#discussion_bucket) · [host claim과 저장 순서](../../crates/aionui-conversation/src/service.rs#L3982-L4027) · [`stage1QueueReceipt.ordinarySendAdmission`](examples/running-input.json)
+
+**늦은 접수 표시.** 표시 상태는 요청의 bindingId와 확인된 turnId에 귀속한다. 턴이 끝나기 전에 접수 영수증을 받은 경우, 턴 종료 시 “큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음”을 세션 단위로 표시한다. 같은 binding에서 종료 이벤트 뒤 수락 응답이 도착하면 그때 원래 턴에 귀속된 세션 안내를 표시한다. 새 턴이 이미 열렸더라도 그 턴의 큐 상태나 소비 여부를 갱신하지 않는다. Stop 뒤 영수증은 당시 큐 접수 사실을 표시하며 “큐에 접수됨 · Stop 이후 처리 여부 미확인”으로 안내한다. Binding이 바뀐 뒤 도착한 응답은 새 binding의 표시 상태에 반영하지 않는다. 사용자가 안내를 닫거나 대화를 바꾸면 표시를 지운다. [실제 ACP Stop 경합 검증](https://github.com/handochan/aelix-acp/pull/42) · [`stage1QueueReceipt.stopBeforeReceipt`](examples/running-input.json)
+
+1단계 예시의 assistant chunk는 고정 native를 사용한 실제 ACP stdio 형태를 따른다. Preflight와 Stop 배열은 해당 캡처에서 필요한 프레임을 골라 세션·바인딩·턴 ID를 예시 값으로 바꿨다. [1단계 예시](examples/running-input.json)
+
+| 시점 | 1단계 동작 |
 | --- | --- |
-| 일반 prompt 시작 | host가 원래 사용자 입력을 기존 경로로 한 번 저장하고 턴을 선점한다. adapter는 이 prompt 자체의 native user 이벤트를 live `user_message_chunk`로 재송신하지 않는다. 원래 prompt와 추가 입력의 **발생 경로**를 구분한다. text 비교로 제거하면 동일한 문장을 두 번 보낸 경우가 사라진다. |
-| 큐 접수 | `accepted:true,delivery:"native-queue"`는 접수 영수증이다. host DB에 사용자 행을 추가하거나 새 턴을 선점하지 않는다. 취소되어 소비되지 않은 입력에는 이력 행이 없다. |
-| 실제 소비 | native가 추가 사용자 메시지를 이번 prompt의 모델 context에 반영한 시점에 adapter가 표준 `session/update`의 `user_message_chunk`를 보낸다. v1 text 입력 하나는 완전한 text block 하나와 안정적인 표준 `messageId` 하나다. host는 U5-b 세션의 **현재 실행 중인 prompt**에 속한 업데이트만 정상 사용자 이력으로 저장·표시한다. (owner, 대화, live binding, prompt, messageId)로 중복 반영을 막고, 동일 문장의 별도 입력은 별도 ID로 남긴다. host는 feature requestId와 native 입력 내용을 대조하지 않는다. |
-| follow-up 출력과 종료 | 현재 prompt에서 drain한 follow-up의 사용자 행과 후속 assistant 출력은 **같은 미완료 ACP prompt 및 host turn**에 속한다. adapter는 native prompt의 실제 idle과 해당 prompt에서 발생한 표준 업데이트 송신이 끝난 뒤 `session/prompt` 응답을 보낸다. host도 그 응답 전에 받은 이벤트의 저장을 마친 뒤 claim을 해제한다. 마지막 drain을 놓쳐 큐에 남은 입력은 이번 턴을 붙잡지 않는다. 다음 prompt에서 drain·출력·저장하며 끝난 턴으로 출력하지 않는다. |
-| load·재접속 | host는 load replay 중, prompt 바깥, 폐기된 binding 및 다른 agent의 추가 입력을 이 경로에서 저장하지 않는다. 다시 열 때 GET messages로 기존 사용자·assistant 이력을 읽는다. 확장 메시지를 재생해 이력을 만들지 않는다. |
+| 일반 prompt 시작 | host가 원래 사용자 입력을 기존 경로로 한 번 저장하고 턴을 선점한다. adapter는 원래 prompt의 native user 이벤트를 live `user_message_chunk`로 재송신하지 않는다. |
+| 큐 접수·소비·취소 | 접수·lookup·native drain에서 추가 사용자 행은 0건이다. renderer는 접수까지만 표시한다. 개별 입력의 소비 여부·남은 건수는 추정하지 않는다. Stop은 표준 `session/cancel`이다. |
+| 종료·다음 prompt | adapter는 기존대로 native idle을 기다리고 표준 출력을 마친 뒤 응답한다. 늦은 입력을 처리하기 위해 턴을 붙잡거나 자동 prompt를 보내지 않는다. 이전 POST를 일반 send로 바꾸거나 재발행하지 않는다. |
+| 재접속·다시 열기 | 같은 binding에서는 원래 키로 결과만 조회할 수 있다. 상태와 기존 사용자·assistant 이력은 현재 binding의 상태 조회와 owner의 GET messages로 읽는다. |
 
-현행 host의 `SessionUpdate::UserMessageChunk` 분기는 비어 있고 load에는 별도 replay 억제가 있다. H1은 표준 update의 수신 시점에 binding·prompt 세대를 고정하고 기존 사용자 메시지 저장/표시 경로에 연결한다. host는 Assistant text/thinking을 segment로 버퍼링한다. 추가 사용자 행 앞에서 기존 segment를 flush·종료하고, 사용자 행을 저장·전달한 뒤 같은 턴의 다음 assistant 출력을 새 segment로 연다. live 화면과 다시 연 이력 모두에서 “이전 답변 → 추가 입력 → 다음 답변”의 순서·내용·개수를 검사한다. host가 발급하는 assistant 행 ID는 wire의 messageId와 독립이다. [기존 segment 처리](../../crates/aionui-conversation/src/stream_relay.rs#L441-L485) · verified: `agent-client-protocol-schema-1.5.0/src/v1/client.rs::ContentChunk`의 `messageId`는 메시지 식별자다. [현재 번역 분기](../../crates/aionui-ai-agent/src/protocol/events/translate.rs#L45) · [load 억제](../../crates/aionui-ai-agent/src/protocol/acp.rs#L711-L736)
+**2단계 · U6-a.** 입력 출처·안정 ID·훅 반영 최종 내용·소비와 철회 경계를 제공하는 native가 pin에 들어오면 ACP가 확정된 추가 사용자 입력을 표준 `user_message_chunk`로 보낸다. `messageId`는 쓰기 `requestId`와 독립이다. 고정 pin의 `message_end`는 reducer 전 내용을 내보냈고, 동일한 사용자 이벤트와 이력 관측값에서 실제 steer 위치가 달랐다. 임의 queue 길이·본문 일치·단독 `agent_end`로 소비를 판정하지 않는다. [고정 native 캡처 및 리뷰](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037137219) · [native 요청](https://github.com/handochan/aelix-ai/issues/865)
 
-native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 user start/end를 발생시키고, follow-up을 drain한 뒤 loop를 계속한다. adapter의 현재 prompt 경로는 최초 입력을 자체 이력에 append하고 native prompt 뒤 idle을 기다린다. A1은 일반 prompt의 최초 사용자 batch를 분리하고 이후 drain된 user 메시지의 확정 내용당 한 번만 내보낸다. 같은 문장이 반복되거나 extension 훅이 메시지를 바꾸는 경우에도 native context의 최종 내용을 사용한다. 원본 prompt/반복된 텍스트/끝 경합/취소를 고정 native에서 캡처해 관찰 가능한 구분과 출력 순서를 입증한 뒤 입력 메서드를 광고한다. 임의 queue 길이·본문 일치·단독 `agent_end`를 소비 증거로 쓰지 않는다. verified: `aelix-ai@e19ab55e/packages/aelix-agent-core/src/aelix_agent_core/loop.py:108–143,187–211,268–278`, `aelix-acp@3bdb9451/src/aelix_acp/session.py::event,_prompt,wait_until_idle`. [정상·늦은 입력의 순서 예시](examples/running-input.json)
+H1의 표준 사용자 업데이트 수신 경로를 사용한다. host는 U5-b 세션의 현재 미완료 prompt에서 받은 추가 사용자 행을 (owner, 대화, live binding, prompt, messageId)로 중복 방지한다. 기존 assistant text/thinking segment를 닫고 사용자 행을 저장·전달한 뒤 같은 턴의 다음 assistant segment를 연다. follow-up은 실제로 소비한 prompt에 남긴다. adapter는 해당 prompt의 표준 업데이트 송신과 native idle 이후 응답하고 host는 저장이 끝나면 claim을 해제한다. load replay, 완료된 prompt, 폐기된 binding 및 다른 agent의 추가 입력은 이 경로에서 저장하지 않는다. [H1 구현](https://github.com/handochan/aelix-studio-host/pull/49) · [2단계 예시 `consumedWithinPrompt`와 `lateConsumptionInNextPrompt`](examples/running-input.json)
 
 ## 관측과 검증
 
@@ -128,7 +133,7 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 | --- | --- |
 | Host wire 계약 | fixtures의 HTTP→실제 ACP stdio→HTTP, stdio→WS를 각각 대조한다. 누락·중복된 선행 underscore, id 혼선, unknown future field·Unicode·배열·null 변형을 검출한다. 새로운 가상 세션 메서드 하나를 ACP 광고에만 추가해 동일 host에서 양방향 통과를 보인다. 무광고/구버전·비Aelix·위장 agent, 표준 메서드와 `_aelix/manage`, 반대 방향 요청은 ACP 송신/WS 전달 0회다. 호환성 대조군에서 표준 prompt, permission, tool metadata가 기존과 같은 프레임과 이력을 낸다. |
 | Auth·격리 | 보호된 router/실제 WS에서 로그인 전·만료·폐기 401, 잘못된/중복 Host·Origin, CSRF 없음/불일치, 위조 desktop, runtime/helper 및 비보호 local 리스너를 각각 검사한다(자격 증명 오류 401, 출처·권한 403, 기능 미등록 404). desktop·로그인 WebUI 각각 정상 POST/WS를 검증한다. owner A/B, 같은 owner의 서로 다른 대화/탭, 같은 프로세스의 다른 ACP 세션, 같은 connection/sessionId를 다시 load한 뒤 도착한 이전 nonce의 알림, 구독 해제·삭제·재시작 직전/직후를 경합시켜 잘못된 쓰기와 수신을 **0건**으로 단언한다. |
-| 경계와 장애 | 바이트 한도 바로 아래·경계·바로 위, chunked, 중복 envelope 필드, 깊이, 양방향 burst·슬롯 고갈, 큰 오류 응답, 한 소켓만 느린 경우를 각각 고정 code·계속 동작하는 대조군과 확인한다. handoff 직전/직후·native 적용 뒤 reply 직전 연결 손실, 늦은 응답·알림, ACK 전후 재연결을 주입한다. 미발송 0건/전달 후 native 최대 1회, unknown·강제 resync, 늦은 결과가 새 binding에 들어가지 않음을 검사한다. 릴레이 전용 비밀 표식은 host·ACP adapter·renderer 로그, 진단, host DB, 비인가 소켓에 없어야 한다. 별개 표식을 넣은 실제 소비 사용자 텍스트는 U6-a 시험에서 owner의 일반 이력에 정확히 한 번 있어야 한다. |
+| 경계와 장애 | 바이트 한도 바로 아래·경계·바로 위, chunked, 중복 envelope 필드, 깊이, 양방향 burst·슬롯 고갈, 큰 오류 응답, 한 소켓만 느린 경우를 각각 고정 code·계속 동작하는 대조군과 확인한다. handoff 직전/직후·native 적용 뒤 reply 직전 연결 손실, 늦은 응답·알림, ACK 전후 재연결을 주입한다. 미발송 0건/전달 후 native 최대 1회, unknown·강제 resync, 늦은 결과가 새 binding에 들어가지 않음을 검사한다. 릴레이 전용 비밀 표식은 host·ACP adapter·renderer 로그, 진단, host DB, 비인가 소켓에 없어야 한다. 추가 입력 표식은 1단계 이력에 없어야 하며, 2단계 U6-a에서는 owner 이력에 정확히 한 번 있어야 한다. |
 | 첫 수직 검증 | #24에서 **실제 번들 adapter와 native**, 제어 가능한 모델 응답으로 턴을 열어 둔다. desktop와 로그인 WebUI에서 steer 1회와 follow-up 1회를 보내어 native ack, 현재/다음 처리 순서, 모드와 명시적 Stop의 경합, adapter가 이미 끝난 것으로 아는 stale turn 거절, ACP 송신과 native 수신 사이 턴이 끝나는 경합에서 보장한 접수 수준, 재접속 뒤 중복 입력 0건을 관찰한다. 가짜 agent의 echo만으로 이 항목을 통과시키지 않는다. |
 | 후속 수직 검증 | #7은 native 파일과 다음 요청의 실제 도구·스킬을 관찰한다. project 파일 생성 승인/거절, global 쓰기 거부와 helper 경로, 잠금·deferred를 모두 확인한다. S3는 #612가 들어온 조합에서 동시에 실행되는 두 자식, 대상 하나만 변경, 다른 부모 거절, 승인 대기 중 이벤트 진행, epoch 전후 replay/영속 이력을 확인한다. synthetic model, 실 provider, 설치 target 근거를 구분한다. |
 
@@ -136,15 +141,16 @@ native 소스의 loop는 원래 prompt와 큐에서 꺼낸 메시지 모두에 u
 - **다른 기기의 WebUI 시계.** ACP 시각을 고정하고 로그인한 브라우저 두 대의 시계를 각각 30분 늦게·빠르게 설정한다. 각 기기가 만든 UUIDv7으로 첫 쓰기가 모두 접수되는지 확인한다. ACP가 599,999 ms에 처리한 lookup은 저장된 결과를 반환한다. 같은 가상 시계에서 599,999 ms에 출발한 별도 lookup을 지연시켜 600,001 ms에 도착하게 한다. 600,000 ms 경계와 그 이후에는 퇴출 전후 모두 unavailable, 조회에 의한 native 호출 0회, 최초 쓰기를 포함한 실행은 1회인지 검사한다. renderer가 상태·이력만 읽고 쓰기를 재발행하지 않는지도 확인한다. [시계 오차별 요청·기대값](examples/running-input.json)
 - **완료 조회 프레임 크기.** 기한 안의 저장 결과로 lookup 응답 전체가 262,143 / 262,144 / 262,145 B가 되도록 구성한다. 앞의 두 경우에는 온전한 결과를, 마지막에는 작은 `unavailable` 프레임 하나만 stdout에서 관찰한다. 최초 쓰기 응답이 정확히 262,144 B이고 조회 후보가 262,176 B인 예시도 같은 대체 경로를 검증한다. 예시의 32 B 차이는 명시한 compact JSON과 같은 자릿수 ID에서 나온다. 구현 시험은 실제 encoder와 조회 ID로 측정한다.
 - **ACP 등록표가 브라우저 노출 경계다.** A1부터 등록한 session typed handler와 방향의 정확한 snapshot을 승인된 D16 fixture와 대조한다. 메서드 추가 시 snapshot의 실제 diff를 리뷰한다. 후보별 schema·허용 scope와 native 호출 대상을 검증하고, arbitrary method/command/path를 받는 범용 dispatcher, `_aelix/manage`, 쉘·파일 프록시나 전역 handler를 등록하면 실패시킨다. 이름만 바꿔 감싼 프록시도 body/negative dispatch 시험에서 잡는다. H1 전용과 H2, #612 미지원/지원 조합의 광고를 따로 검사한다.
-- **이력·과부하.** 원래 prompt가 두 번 저장되지 않는지, 소비 전후 및 동일 문장 두 건·낱개 취소·load replay·turn 종료 뒤 늦은 이벤트에서 행 수, 메시지 ID, 실제 turn과 출력 순서를 검사한다. 30/s 초과 원천 이벤트를 발생시켜 aggregator의 10/s, terminal 반영, native cursor로 누락 복구, renderer의 단일 resync와 backoff 상한, 다른 소켓 진행을 검사한다.
+- **이력·과부하.** 1단계는 원래 prompt 한 행과 추가 사용자 행 0건을 검사한다. 2단계는 소비 전후·동일 문장 두 건·취소·load replay·turn 종료 경합에서 행 수, 메시지 ID, 실제 turn과 출력 순서를 검사한다. 30/s 초과 원천 이벤트를 발생시켜 aggregator의 10/s, terminal 반영, native cursor로 누락 복구, renderer의 단일 resync와 backoff 상한, 다른 소켓 진행을 검사한다.
 
 ## 구현 PR 순서와 선행 관계
 
 | PR | 선행과 완료 조건 |
 | --- | --- |
 | H1 · host 요청과 표준 입력 이력 | U5-b의 두 조건, protected admission, binding, v1 발견/POST, 동시 요청·결과 불명 경계를 구현한다. U6-a의 live user chunk 저장·표시, 원래 prompt 중복 방지, load 억제, prompt 종료 fence를 **같은 PR**에서 검증한다. H1은 요청만 협상한다. [바이트 측정과 큰 표준 프레임 회귀](stdio-measurement.md)를 이 PR에 첨부한다. |
-| A1 · #24 ACP | H1 계약을 기준으로 state/steer/follow-up, 쓰기 requestId 처리와 기존 결과 전용 requests/lookup, 소비 시 표준 chunk와 prompt 완료 순서, 승인된 광고 snapshot을 구현한다. H2와 병행할 수 있다. |
-| Studio #24 | **H1 + A1의 branch SHA**로 독립 클라이언트와 기존 입력 UI를 연결한다. desktop·로그인 WebUI에서 실제 입력, 늦은 큐 표시, 소유자의 재열기 이력, 표준 Stop을 검증한다. H2와 supervisor 변경은 선행이 아니다. |
+| A1 1단계 · #24 ACP | H1과 고정 native `cad65ce9`에서 state/steer/follow-up, requestId 중복 방지, 결과 전용 requests/lookup과 광고 snapshot을 구현한다. 큐 접수, stale turn 및 종료·취소 경합을 검증한다. 추가 사용자 행은 0건이다. H2와 병행할 수 있다. |
+| A1 2단계 · #24 ACP | [native 관찰 계약](https://github.com/handochan/aelix-ai/issues/865)이 pin에 들어오면 확정된 추가 사용자 입력의 표준 chunk와 prompt 완료 순서를 구현한다. |
+| Studio #24 | **H1 + A1 1단계 branch SHA**로 독립 클라이언트와 기존 입력 UI를 연결한다. desktop·로그인 WebUI에서 실제 입력, host 턴에 따른 일반 전송과 409의 입력 보존, Stop·종료 뒤 늦은 접수 표시, 원본 prompt 한 행을 검증한다. 추가 사용자 행의 순서와 재열기 이력 검증은 A1 2단계에서 한다. 두 단계는 H2나 supervisor 변경을 기다리지 않는다. |
 | H2 · host 확장 알림 | H1 위에 기존 realtime router의 인증된 구독·nonce 검사·ordered unicast·폐기·backpressure를 붙인다. 통과한 조합만 notifications=true를 광고한다. H2 병합 전에도 #24는 H1으로 검증한다. `AppServices`가 조립하며 별도 port·worker는 두지 않는다(D12). |
 | A2 → Studio #7 | H1 요청 경로, A1 공통 중복 방지, native selection pin을 재사용한다. ACP에서 scope 투영·쓰기 제한·동의·기능 거절을 검증한 뒤 Studio가 비활성 세션 안내와 선택 UI를 연결한다. 표준 permission은 H2에 의존하지 않는다. |
 | A3 → Studio S3 | #612의 확정 wire와 H1 요청/H2 알림이 선행이다. ACP가 부모별 제어·cursor·병합·등록표를 검증하고 renderer는 독립 모듈로 자식 패널과 backoff를 연결한다. 그 전에는 children 메서드를 광고하지 않는다. #612가 beta.3에 빠지면 S3는 다음 릴리스 대상이다. |
