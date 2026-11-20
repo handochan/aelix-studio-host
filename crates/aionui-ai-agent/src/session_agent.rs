@@ -7126,8 +7126,11 @@ mod pump_tests {
                 stop_reason: aionui_session::StopReason::EndTurn,
             },
         };
-        let backend: Arc<dyn SessionBackend> =
-            Arc::new(ScriptBackend(vec![env(detached), env(foreground), env(clean_end)]));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let backend: Arc<dyn SessionBackend> = Arc::new(GatedScriptBackend {
+            script: vec![env(detached), env(foreground), env(clean_end)],
+            gate: gate.clone(),
+        });
         let task = SessionAgentTask::new(
             AgentType::Acp,
             "conv-1".into(),
@@ -7137,6 +7140,7 @@ mod pump_tests {
             None,
         );
         let mut rx = crate::agent_task::IAgentTask::subscribe(task.as_ref());
+        gate.notify_one();
         let _ = task;
 
         let mut canceled: Vec<String> = Vec::new();
