@@ -330,11 +330,6 @@ impl ConversationTurnOrchestrator {
                         }
                     }
                     Ok(RequiredFullAutoApplication::Skipped { resolved }) => {
-                        // look-before-leap: the resolved native YOLO is not
-                        // selectable on this backend. The sunk method already
-                        // logged a warn with backend/conversation_id/resolved;
-                        // keep the session's already-resolved mode and continue
-                        // this turn rather than failing the whole turn.
                         info!(
                             conversation_id = %input.conv_id,
                             turn_id = %input.turn_id,
@@ -788,6 +783,16 @@ async fn apply_required_runtime_mode(
     backend: Option<&str>,
     mode: &str,
 ) -> Result<RequiredFullAutoApplication, AgentError> {
+    let team_managed = match agent {
+        AgentInstance::Aionrs(manager) => manager.has_team_permission_policy(),
+        AgentInstance::Acp(manager) => manager.has_team_permission_policy(),
+        _ => false,
+    };
+    if team_managed {
+        return Ok(RequiredFullAutoApplication::Skipped {
+            resolved: mode.to_owned(),
+        });
+    }
     // a-pure (ELECTRON-3RQ): for metadata-bearing ACP agents (Kimi et al.),
     // resolve cron's full-auto request to the backend-native YOLO id and apply
     // it look-before-leap. This logic is sunk into aionui-ai-agent because the

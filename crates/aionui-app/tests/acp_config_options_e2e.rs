@@ -227,3 +227,67 @@ async fn old_mode_and_model_routes_are_removed() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn runtime_release_requires_authentication_csrf_and_conversation_ownership() {
+    let (mut app, services) = build_app_with_mock_agents().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let id = create_conversation(&mut app, &token, &csrf).await;
+    let (other, other_csrf) = setup_and_login(&mut app, &services, "other-user", "StrongP@ss2").await;
+    let path = format!("/api/conversations/{id}/runtime/release");
+    let body = json!({"view_id":"view-a"});
+
+    for (request, expected, code) in [
+        (
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("x-csrf-token", &csrf)
+                .header("cookie", format!("aionui-csrf-token={csrf}"))
+                .body(Body::empty())
+                .unwrap(),
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+        ),
+        (
+            Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+            StatusCode::FORBIDDEN,
+            "CSRF_INVALID",
+        ),
+        (
+            json_with_token("POST", &path, body.clone(), &other, &other_csrf),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+        ),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(body_json(response).await["code"], code);
+    }
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            &path,
+            json!({"view_id":"bad/view"}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(response).await["code"], "BAD_REQUEST");
+
+    let response = app
+        .oneshot(json_with_token("POST", &path, body, &token, &csrf))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["data"]["outcome"], "inactive");
+}

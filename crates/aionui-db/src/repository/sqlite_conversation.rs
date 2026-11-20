@@ -304,6 +304,32 @@ impl super::conversation::AcpRelayWriteLock for sqlx::Transaction<'static, sqlx:
 impl IConversationRepository for SqliteConversationRepository {
     // ── Conversation CRUD ───────────────────────────────────────────
 
+    async fn aionrs_team_permission_mode(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError> {
+        let mode = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT aionrs_team_permission_mode FROM conversations WHERE user_id = ? AND id = ? AND type = 'aionrs'",
+        )
+        .bind(user_id)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(mode.flatten())
+    }
+
+    async fn set_aionrs_team_permission_mode(&self, user_id: &str, id: &str, mode: &str) -> Result<(), DbError> {
+        let result = sqlx::query(
+            "UPDATE conversations SET aionrs_team_permission_mode = ? WHERE user_id = ? AND id = ? AND type = 'aionrs'",
+        )
+        .bind(mode)
+        .bind(user_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(id.to_owned()));
+        }
+        Ok(())
+    }
+
     async fn get(&self, user_id: &str, id: &str) -> Result<Option<ConversationRow>, DbError> {
         let row = sqlx::query_as::<_, ConversationRow>("SELECT * FROM conversations WHERE user_id = ? AND id = ?")
             .bind(user_id)

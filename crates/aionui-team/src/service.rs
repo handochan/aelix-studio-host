@@ -1931,8 +1931,9 @@ impl TeamSessionService {
         // confirmation deliberately still reads back the OLD value, so echoing the
         // readback would persist the model the user just switched away from.
         let requested_model = is_model_option.then(|| request.value.trim().to_owned());
-        let requested_permission_mode = (is_mode_option && matches!(request.value.trim(), "default" | "yolo"))
-            .then(|| request.value.trim().to_owned());
+        let requested_mode = request.value.trim();
+        let requested_permission_mode =
+            (is_mode_option && matches!(requested_mode, "default" | "yolo")).then(|| requested_mode.to_owned());
 
         let response = self
             .conversation_port
@@ -3170,7 +3171,21 @@ impl TeamSessionService {
             .await?;
 
         let mut incomplete = false;
+        let mut incomplete_aionrs = false;
         for agent in &team.agents {
+            if agent.backend == "aionrs" {
+                if let Err(error) = provisioner.update_session_mode_seed(agent, mode).await {
+                    incomplete_aionrs = true;
+                    warn!(
+                        team_id,
+                        slot_id = %agent.slot_id,
+                        conversation_id = %agent.conversation_id,
+                        %error,
+                        "failed to apply Team permission to Aionrs slot"
+                    );
+                }
+                continue;
+            }
             let instance = self.task_manager.get_task(&agent.conversation_id);
             // A Ready Aelix slot without a task may be rebuilding in the
             // turn executor. Persist the selection for rebuild and report the
@@ -3228,6 +3243,11 @@ impl TeamSessionService {
             }
         }
 
+        if incomplete_aionrs {
+            return Err(TeamError::InvalidRequest(
+                "Team permission change could not be applied to every Aionrs slot".to_owned(),
+            ));
+        }
         if incomplete {
             return Err(TeamError::InvalidRequest(
                 "Team permission change could not be applied to every Aelix slot".to_owned(),

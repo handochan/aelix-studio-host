@@ -626,7 +626,7 @@ pub struct AcpAgentManager {
     pub(super) process: Arc<CliAgentProcess>,
 
     /// Mutex for serializing session operations (new/load/send).
-    session_lock: Mutex<()>,
+    pub(super) session_lock: Mutex<()>,
 }
 
 impl AcpAgentManager {
