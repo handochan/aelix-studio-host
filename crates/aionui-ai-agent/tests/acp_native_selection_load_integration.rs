@@ -62,6 +62,8 @@ for line in sys.stdin:
                 'currentModelId': model['currentValue'],
                 'availableModels': [{'modelId': item['value'], 'name': item['name']} for item in model['options']],
             }
+    elif method == 'session/load':
+        response['error'] = {'code': -32002, 'message': 'Session not found'}
     elif method == 'session/set_config_option':
         key, value = params['configId'], params['value']
         entry += f' {key}={value}'
@@ -531,6 +533,50 @@ async fn aelix_defers_and_sends_in_the_same_session_when_assignment_persistence_
     assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
     assert!(!prelude_pending(&sync).await);
     instance.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn first_command_after_a_stale_session_defers_rules_before_assignment_is_persisted() {
+    for clear_binding in [false, true] {
+        let (temp, registry, sync) = setup().await;
+        let repo = sync.repo();
+        assert!(
+            repo.update_aelix_prelude_for_user(
+                USER,
+                CONVERSATION,
+                "stale-session",
+                aionui_db::AelixPreludeChange::Defer,
+            )
+            .await
+            .unwrap()
+        );
+        if clear_binding {
+            assert!(repo.clear_session_id_for_user(USER, CONVERSATION).await.unwrap());
+        }
+
+        let (manager, _domain_rx) =
+            build_session(temp.path(), &registry, &sync, "aelix-acp", "stale.txt", "generic").await;
+        manager.warmup_session().await.unwrap();
+        let agent = AgentInstance::Acp(Arc::new(manager));
+
+        let expected_binding = if clear_binding { None } else { Some(SESSION) };
+        assert_eq!(
+            sync.load_session_id(USER, CONVERSATION).await.as_deref(),
+            expected_binding
+        );
+        prompt(&agent, "/extension list").await.unwrap();
+        assert!(prelude_pending(&sync).await);
+        prompt(&agent, "Continue").await.unwrap();
+        assert_eq!(
+            prompt_trace(temp.path(), "stale.txt"),
+            [
+                "/extension list",
+                "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nContinue",
+            ]
+        );
+        assert!(!prelude_pending(&sync).await);
+        agent.kill_and_wait(None).await;
+    }
 }
 
 #[tokio::test]

@@ -69,14 +69,14 @@ impl AcpAgentManager {
                 AgentError::internal("Could not load the ACP prelude state")
             })?
             .is_some_and(|row| row.has_pending_aelix_prelude(previous_sid));
-        if pending && sid != previous_sid {
-            self.persist_acp_prelude(
-                sid,
-                AelixPreludeChange::Rebind {
-                    previous_session_id: previous_sid.to_owned(),
-                },
-            )
-            .await?;
+        if sid != previous_sid {
+            let previous_session_id = previous_sid.to_owned();
+            let change = if pending {
+                AelixPreludeChange::Rebind { previous_session_id }
+            } else {
+                AelixPreludeChange::ReplaceBinding { previous_session_id }
+            };
+            self.persist_acp_prelude(sid, change).await?;
         }
         Ok(pending)
     }
@@ -87,10 +87,24 @@ impl AcpAgentManager {
     ///
     /// Returns the CLI-assigned session id.
     pub(super) async fn open_session_new(&self) -> Result<String, AgentError> {
+        self.open_fresh_session(None).await
+    }
+
+    async fn open_fresh_session(&self, stale_session_id: Option<&str>) -> Result<String, AgentError> {
         let req = self.params.new_session_request();
         let (session_response, legacy_models) = self.protocol.new_session(req).await?;
 
         let sid = session_response.session_id.to_string();
+        if let Some(stale_session_id) = stale_session_id {
+            // SessionAssigned may still be queued when the first prompt begins.
+            self.persist_acp_prelude(
+                &sid,
+                AelixPreludeChange::ReplaceBinding {
+                    previous_session_id: stale_session_id.to_owned(),
+                },
+            )
+            .await?;
+        }
 
         {
             let mut session = self.session.write().await;
@@ -156,7 +170,7 @@ impl AcpAgentManager {
             session.clear_session_id();
             self.commit_session_changes(&mut session).await;
         }
-        self.open_session_new().await
+        self.open_fresh_session(Some(stale_sid)).await
     }
 
     async fn rebuild_after_acp_session_not_found(&self, stale_sid: &str, err: AcpError) -> Result<String, AgentError> {

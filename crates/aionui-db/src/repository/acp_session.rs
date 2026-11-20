@@ -75,6 +75,10 @@ pub enum AelixPreludeChange {
     Rebind {
         previous_session_id: String,
     },
+    /// Replace a known binding without transferring the old prelude.
+    ReplaceBinding {
+        previous_session_id: String,
+    },
 }
 
 #[async_trait::async_trait]
@@ -116,7 +120,8 @@ pub trait IAcpSessionRepository: Send + Sync {
     /// its matching backend session. Initial deferral can bind a fresh session
     /// and store the marker atomically before the session-assigned event.
     /// Consumption and restoration require the bound ID. Rebinding requires
-    /// both the old binding and its matching marker.
+    /// both the old binding and its matching marker. Replacement requires
+    /// the old binding and does not transfer its prelude.
     async fn update_aelix_prelude_for_user(
         &self,
         user_id: &str,

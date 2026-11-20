@@ -331,21 +331,30 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         session_id: &str,
         change: AelixPreludeChange,
     ) -> Result<bool, DbError> {
-        use AelixPreludeChange::{Consume, Defer, Rebind, Restore};
+        use AelixPreludeChange::{Consume, Defer, Rebind, ReplaceBinding, Restore};
 
         // Keep the persisted key compatible with earlier Host versions.
-        if let Rebind { previous_session_id } = &change {
+        if let Rebind { previous_session_id } | ReplaceBinding { previous_session_id } = &change {
+            let carry_prelude = matches!(change, Rebind { .. });
             let result = sqlx::query(
-                "UPDATE acp_session SET session_id = ?, \
-                 session_config = json_set(session_config, '$.aelix_pending_prelude', ?) \
+                "UPDATE acp_session SET session_id = ?, session_config = CASE \
+                   WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
+                   WHEN (CASE WHEN json_valid(session_config) \
+                     THEN json_extract(session_config, '$.aelix_pending_prelude') END) = ? \
+                     THEN json_remove(session_config, '$.aelix_pending_prelude') \
+                   ELSE session_config END \
                  WHERE conversation_id = ? AND session_id = ? \
-                   AND json_extract(session_config, '$.aelix_pending_prelude') = ? \
+                   AND (NOT ? OR (CASE WHEN json_valid(session_config) \
+                     THEN json_extract(session_config, '$.aelix_pending_prelude') END) = ?) \
                    AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
             )
+            .bind(session_id)
+            .bind(carry_prelude)
             .bind(session_id)
             .bind(session_id)
             .bind(conversation_id)
             .bind(previous_session_id)
+            .bind(carry_prelude)
             .bind(previous_session_id)
             .bind(user_id)
             .execute(&self.pool)
@@ -358,7 +367,7 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
              WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
              ELSE json_remove(session_config, '$.aelix_pending_prelude') END \
              WHERE conversation_id = ? AND (session_id = ? OR (? AND session_id IS NULL \
-               AND json_type(session_config, '$.aelix_pending_prelude') IS NULL)) \
+               AND json_extract(session_config, '$.aelix_pending_prelude') IS NOT ?)) \
                AND (NOT ? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
                AND (NOT ? OR json_type(session_config, '$.aelix_pending_prelude') IS NULL) \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
@@ -369,6 +378,7 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         .bind(conversation_id)
         .bind(session_id)
         .bind(change == Defer)
+        .bind(session_id)
         .bind(change == Consume)
         .bind(session_id)
         .bind(change == Restore)
@@ -550,6 +560,50 @@ mod tests {
         assert!(!rebind("user-1", "backend").await.unwrap());
         let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
         assert!(row.has_pending_aelix_prelude("resumed"));
+    }
+
+    #[tokio::test]
+    async fn replacing_a_stale_binding_leaves_the_previous_marker_inactive() {
+        let (repo, _db) = setup().await;
+        repo.create(&create_params("conv-1")).await.unwrap();
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "stale", AelixPreludeChange::Defer)
+                .await
+                .unwrap()
+        );
+        let replace = |user, previous: &str| {
+            repo.update_aelix_prelude_for_user(
+                user,
+                "conv-1",
+                "fresh",
+                AelixPreludeChange::ReplaceBinding {
+                    previous_session_id: previous.to_owned(),
+                },
+            )
+        };
+        assert!(!replace("user-2", "stale").await.unwrap());
+        assert!(!replace("user-1", "other").await.unwrap());
+        assert!(replace("user-1", "stale").await.unwrap());
+        let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("fresh"));
+        assert!(!row.has_pending_aelix_prelude("fresh"));
+
+        // A reused backend ID must not reactivate a marker from its old binding.
+        assert!(
+            repo.update_aelix_prelude_for_user(
+                "user-1",
+                "conv-1",
+                "stale",
+                AelixPreludeChange::ReplaceBinding {
+                    previous_session_id: "fresh".into()
+                },
+            )
+            .await
+            .unwrap()
+        );
+        let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("stale"));
+        assert!(!row.has_pending_aelix_prelude("stale"));
     }
 
     #[tokio::test]
