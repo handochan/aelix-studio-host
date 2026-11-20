@@ -86,11 +86,18 @@ while True:
         result(rpc_id, out)
     elif method == "session/prompt":
         prompt = rpc_id
-        update("agent_message_chunk", "before input")
+        if counter.with_suffix(".watch-shutdown").exists():
+            # Fill stdout while the host drains stdin in the opposite direction.
+            update("agent_message_chunk", "x" * (512 * 1024))
+        else:
+            update("agent_message_chunk", "before input")
         counter.with_suffix(".prompt-started").touch()
-    elif method == "session/cancel" and prompt is not None:
-        result(prompt, {"stopReason": "cancelled"})
-        prompt = None
+    elif method == "session/cancel":
+        if counter.with_suffix(".watch-shutdown").exists():
+            counter.with_suffix(".stop-recorded").write_text(params["sessionId"])
+        if prompt is not None:
+            result(prompt, {"stopReason": "cancelled"})
+            prompt = None
     elif method and method.startswith("_"):
         assert set(params) == {"sessionId", "bindingId", "payload"}
         assert params["sessionId"] == session and params["bindingId"] == binding

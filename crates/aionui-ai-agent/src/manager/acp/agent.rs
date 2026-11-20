@@ -1706,6 +1706,13 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
     }
 
     fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AgentError> {
+        self.start_kill(reason, false);
+        Ok(())
+    }
+}
+
+impl AcpAgentManager {
+    fn start_kill(&self, reason: Option<AgentKillReason>, graceful: bool) -> tokio::task::JoinHandle<()> {
         info!(
             conversation_id = %self.params.conversation_id,
             ?reason,
@@ -1745,8 +1752,24 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
         let backend = backend.to_owned();
         let idle_timeout = matches!(reason, Some(AgentKillReason::IdleTimeout));
 
+        self.permission_router.cancel_all();
+        let drain = if graceful {
+            self.protocol.drain_relay_on_shutdown()
+        } else {
+            None
+        };
+
+        emit_kill_terminal(&self.runtime, reason, |close_reason| {
+            if let Ok(mut session) = self.session.try_write() {
+                session.record_close_reason(Some(close_reason));
+            }
+        });
+
         tokio::spawn(async move {
             let started_at = now_ms();
+            if let Some(drain) = drain {
+                drain.await;
+            }
             match process.kill(grace).await {
                 Ok(()) => {
                     if idle_timeout {
@@ -1776,30 +1799,16 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
                     );
                 }
             }
-        });
-
-        self.permission_router.cancel_all();
-
-        emit_kill_terminal(&self.runtime, reason, |close_reason| {
-            if let Ok(mut session) = self.session.try_write() {
-                session.record_close_reason(Some(close_reason));
-            }
-        });
-
-        Ok(())
+        })
     }
-}
 
-impl AcpAgentManager {
     pub fn kill_and_wait(
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
-        let process = Arc::clone(&self.process);
-        let grace = Duration::from_millis(ACP_KILL_GRACE_MS);
+        let process_shutdown = self.start_kill(reason, reason.is_none());
         Box::pin(async move {
-            let _ = process.kill(grace).await;
+            let _ = process_shutdown.await;
         })
     }
 

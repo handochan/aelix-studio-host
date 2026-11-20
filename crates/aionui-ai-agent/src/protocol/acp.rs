@@ -43,6 +43,7 @@ use futures_util::{Sink, SinkExt, StreamExt, TryStreamExt};
 use tokio::process::ChildStdout;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
 
 use crate::protocol::acp_dialect;
@@ -140,9 +141,9 @@ pub struct AcpProtocol {
     /// shared by every method. Kept alive by the background task parked
     /// on `shutdown_rx` in `connect_with`'s `main_fn`.
     connection: ConnectionTo<Agent>,
-    /// Signal dropped on `Drop` to make `main_fn` return, which in turn
-    /// lets the SDK background actors shut down cleanly.
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Signal sent on explicit shutdown or `Drop` to make `main_fn` return.
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    stdin_closed: CancellationToken,
     /// Flipped to `false` when the background task exits. Used by
     /// [`Self::is_connected`] as a fast synchronous check.
     alive: Arc<AtomicBool>,
@@ -205,6 +206,7 @@ impl AcpProtocol {
         // Signal from us → background task telling `main_fn` to return,
         // which triggers a clean SDK shutdown.
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let stdin_closed = CancellationToken::new();
 
         tokio::spawn(run_sdk_background(
             stdin,
@@ -219,6 +221,7 @@ impl AcpProtocol {
             Arc::clone(&replay_suppression),
             Arc::clone(&terminal_registry),
             Arc::clone(&relay),
+            stdin_closed.clone().drop_guard(),
         ));
 
         // Wait for init to complete with timeout.
@@ -252,7 +255,8 @@ impl AcpProtocol {
 
         Ok(Self {
             connection,
-            shutdown_tx: Some(shutdown_tx),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
+            stdin_closed,
             alive,
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
             replay_suppression,
@@ -526,6 +530,29 @@ impl AcpProtocol {
         self.relay.invalidate();
     }
 
+    /// Close the relay transport after the caller has queued its final Stop.
+    /// The completion signal covers the SDK and the physical stdin writer.
+    pub(crate) fn drain_relay_on_shutdown(&self) -> Option<impl Future<Output = ()> + use<>> {
+        if !self.relay.candidate {
+            return None;
+        }
+        self.signal_shutdown();
+        let stdin_closed = self.stdin_closed.clone();
+        Some(async move {
+            // Also bound SDK shutdown if its outgoing actor cannot reach EOF.
+            let timeout = super::acp_relay_writer::STANDARD_DRAIN_TIMEOUT + std::time::Duration::from_secs(1);
+            if tokio::time::timeout(timeout, stdin_closed.cancelled()).await.is_err() {
+                warn!("Timed out waiting for ACP relay transport shutdown");
+            }
+        })
+    }
+
+    fn signal_shutdown(&self) {
+        if let Some(tx) = self.shutdown_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
+
     /// Send an extension notification (fire-and-forget, method name must start with `_`).
     pub fn ext_notify(&self, notification: ExtNotification) {
         if !self.is_connected() {
@@ -678,9 +705,7 @@ impl Drop for AcpProtocol {
         // returns, which drives SDK shutdown. The bg_task joins naturally
         // (we don't await it here — Drop can't be async; the task is
         // `tokio::spawn`ed, so it gets cleaned up by the runtime).
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+        self.signal_shutdown();
     }
 }
 
@@ -726,6 +751,7 @@ async fn run_sdk_background(
     replay_suppression: Arc<AtomicBool>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
     relay: Arc<RelayConnection>,
+    mark_stdin_closed: DropGuard,
 ) {
     // Tolerant transport: intercept incoming lines *before* the SDK parses them
     // so CodeBuddy's non-standard dialect notifications (`session_end` /
@@ -741,7 +767,18 @@ async fn run_sdk_background(
     let eof_alive = Arc::clone(&alive);
     let wire_in = relay.clone();
     let candidate = relay.candidate;
-    let incoming = FramedRead::new(stdout, acp_relay::stdio_codec(candidate))
+    let stdout = FramedRead::new(stdout, acp_relay::stdio_codec(candidate));
+    let (raw_incoming, drain_stdout) = if candidate {
+        let stdout = Arc::new(tokio::sync::Mutex::new(stdout));
+        let incoming = futures_util::stream::unfold(stdout.clone(), |stdout| async move {
+            let line = stdout.lock().await.next().await?;
+            Some((line, stdout))
+        });
+        (futures_util::future::Either::Left(incoming), Some(stdout))
+    } else {
+        (futures_util::future::Either::Right(stdout), None)
+    };
+    let incoming = raw_incoming
         .map(move |line| {
             if candidate {
                 line.and_then(acp_relay::check_stdio_line)
@@ -980,11 +1017,32 @@ async fn run_sdk_background(
     relay.disconnected();
     let close_phase = *phase.lock().unwrap();
     if let Some(writer) = writer_task {
-        super::acp_relay_writer::finish(
-            writer,
-            result.is_ok() && close_phase == AcpConnectionPhase::ShuttingDown,
-        )
-        .await;
+        let graceful = result.is_ok() && close_phase == AcpConnectionPhase::ShuttingDown;
+        let finish = super::acp_relay_writer::finish(writer, graceful);
+        if let Some(stdout) = drain_stdout.filter(|_| graceful) {
+            // After the SDK drops its read stream, continue draining stdout
+            // while writing so a full-duplex peer can still consume stdin.
+            let discard_stdout = async {
+                let mut stdout = stdout.lock().await;
+                let _ = tokio::io::copy(stdout.get_mut(), &mut tokio::io::sink()).await;
+            };
+            tokio::pin!(finish, discard_stdout);
+            let stdout_closed = tokio::select! {
+                () = &mut finish => false,
+                () = &mut discard_stdout => {
+                    finish.await;
+                    true
+                }
+            };
+            drop(mark_stdin_closed);
+            // A peer may finish reading the last command only after stdin
+            // closes. Let it finish writing while the process exits.
+            if !stdout_closed {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), discard_stdout).await;
+            }
+        } else {
+            finish.await;
+        }
     }
 
     match result {

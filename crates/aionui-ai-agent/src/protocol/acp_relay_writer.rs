@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use super::acp_relay::{OutgoingFrame, RelayConnection, RelayError, RelayFrame, StandardFrame, check_stdio_line};
 
-const STANDARD_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const STANDARD_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const PIPE_RETRY: Duration = Duration::from_millis(5);
 
 pub(super) fn sink(

@@ -858,6 +858,60 @@ async fn acp_relay_generation_change_rejects_a_queued_request_with_a_still_valid
     rejects_queued_request(QueuedRevocation::DatabaseGeneration).await;
 }
 
+#[tokio::test]
+async fn acp_relay_host_shutdown_drains_final_stop_before_reaping_the_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = StudioHost::start_with_db(dir.path(), fixture(dir.path()).await, true).await;
+    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let root = format!("{}/api/conversations/{id}", host.url);
+    let binding = ensure_and_discover(&host, &root).await;
+    std::fs::write(dir.path().join("relay-calls.watch-shutdown"), "").unwrap();
+    read(
+        invoke(&host, &root, &binding, "pause", json!({}))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    read(
+        host.client
+            .post(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"content": "p".repeat(512 * 1024)}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    wait_until(|| dir.path().join("relay-calls.pipe-blocked").exists()).await;
+
+    // Run the same task-manager shutdown called by the Host signal handler.
+    assert_eq!(host.tasks.active_count(), 1);
+    host.conversations.runtime_state().mark_shutting_down();
+    let tasks = host.tasks.clone();
+    let clearing = tokio::spawn(async move { tasks.clear().await });
+    wait_until(|| host.tasks.active_count() == 0).await;
+    // Resume past the original 500 ms process grace but within the writer's
+    // two-second drain. The child also writes enough stdout to fill a pipe.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    std::fs::write(dir.path().join("relay-calls.resume-read"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), clearing)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("relay-calls.stop-recorded"))
+            .as_deref()
+            .ok(),
+        Some("sdk-session"),
+        "the live agent must receive and parse the final standard Stop before teardown"
+    );
+}
+
 #[derive(Clone, Copy)]
 enum QueuedRevocation {
     Logout,
