@@ -106,7 +106,13 @@ JSON 파일의 HTTP·ACP 교환은 **제안하는 v1 golden 예시**다. 서로 
 
 ### #24의 큐 접수와 이력 경계 (B1 · U4 · U6-a)
 
-**1단계 · Beta.** 고정 native `cad65ce9`에서 `input/state`, `input/steer`, `input/follow-up`, `requests/lookup`을 제공한다. `input/state`가 `active:false,turnId:null`이면 새로 누른 보내기는 기존 일반 send를 쓴다. ACP는 이미 끝났다고 관찰했거나 다른 턴을 가리키는 쓰기를 `stale-turn`으로 거절한다. `accepted:true,delivery:"native-queue"`의 `turnId`는 native 송신 직전에 adapter가 확인한 값이다. 마지막 drain 뒤에 들어간 입력은 다음 명시적 prompt에서 처리될 수 있다. renderer는 턴 종료 시 “큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음”을 세션 단위로 표시한다. 사용자가 닫거나 대화를 바꾸면 안내를 지운다. [사용자 결정](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037569111) · [고정 native 캡처](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037137219) · [1단계 예시 `stage1QueueReceipt`](examples/running-input.json)
+**1단계 · Beta.** 고정 native `cad65ce9`에서 `input/state`, `input/steer`, `input/follow-up`, `requests/lookup`을 제공한다. ACP는 이미 끝났다고 관찰했거나 다른 턴을 가리키는 쓰기를 `stale-turn`으로 거절한다. `accepted:true,delivery:"native-queue"`의 `turnId`는 native 송신 직전에 adapter가 확인한 값이다. 마지막 drain 뒤에 들어간 입력은 다음 명시적 prompt에서 처리될 수 있다. [사용자 결정](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037569111) · [고정 native 캡처](https://github.com/handochan/aelix-acp/issues/41#issuecomment-7037137219)
+
+**일반 전송 조건.** 사용자가 새로 보낼 때 `input/state`가 `active:false,turnId:null`이고 host 대화에 활성 턴이 없어야 일반 send를 사용한다. Native preflight, Stop 직후, 종료 정리 중에는 ACP가 비활성으로 응답해도 host 턴이 열려 있을 수 있다. 그동안 입력을 유지하고 일반 POST를 보내지 않는다. 전송 직전에 다른 작업이 host 턴을 선점해 409가 오면 텍스트와 첨부를 보존하고 다음 명시적 사용자 동작을 기다린다. 사용자가 다시 보내면 당시 상태로 경로를 고른다. Host는 claim 거절 전에 사용자 행을 쓰지 않는다. [실제 ACP preflight 확인](https://github.com/handochan/aelix-studio-host/pull/56#discussion_bucket) · [host claim과 저장 순서](../../crates/aionui-conversation/src/service.rs#L3982-L4027) · [`stage1QueueReceipt.ordinarySendAdmission`](examples/running-input.json)
+
+**늦은 접수 표시.** 표시 상태는 요청의 bindingId와 확인된 turnId에 귀속한다. 턴이 끝나기 전에 접수 영수증을 받은 경우, 턴 종료 시 “큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음”을 세션 단위로 표시한다. 같은 binding에서 종료 이벤트 뒤 수락 응답이 도착하면 그때 원래 턴에 귀속된 세션 안내를 표시한다. 새 턴이 이미 열렸더라도 그 턴의 큐 상태나 소비 여부를 갱신하지 않는다. Stop 뒤 영수증은 당시 큐 접수 사실을 표시하며 “큐에 접수됨 · Stop 이후 처리 여부 미확인”으로 안내한다. Binding이 바뀐 뒤 도착한 응답은 새 binding의 표시 상태에 반영하지 않는다. 사용자가 안내를 닫거나 대화를 바꾸면 표시를 지운다. [실제 ACP Stop 경합 검증](https://github.com/handochan/aelix-acp/pull/42) · [`stage1QueueReceipt.stopBeforeReceipt`](examples/running-input.json)
+
+1단계 예시의 assistant chunk는 고정 native를 사용한 실제 ACP stdio 형태를 따른다. Preflight와 Stop 배열은 해당 캡처에서 필요한 프레임을 골라 세션·바인딩·턴 ID를 예시 값으로 바꿨다. [1단계 예시](examples/running-input.json)
 
 | 시점 | 1단계 동작 |
 | --- | --- |
@@ -144,7 +150,7 @@ H1의 표준 사용자 업데이트 수신 경로를 사용한다. host는 U5-b 
 | H1 · host 요청과 표준 입력 이력 | U5-b의 두 조건, protected admission, binding, v1 발견/POST, 동시 요청·결과 불명 경계를 구현한다. U6-a의 live user chunk 저장·표시, 원래 prompt 중복 방지, load 억제, prompt 종료 fence를 **같은 PR**에서 검증한다. H1은 요청만 협상한다. [바이트 측정과 큰 표준 프레임 회귀](stdio-measurement.md)를 이 PR에 첨부한다. |
 | A1 1단계 · #24 ACP | H1과 고정 native `cad65ce9`에서 state/steer/follow-up, requestId 중복 방지, 결과 전용 requests/lookup과 광고 snapshot을 구현한다. 큐 접수, stale turn 및 종료·취소 경합을 검증한다. 추가 사용자 행은 0건이다. H2와 병행할 수 있다. |
 | A1 2단계 · #24 ACP | [native 관찰 계약](https://github.com/handochan/aelix-ai/issues/865)이 pin에 들어오면 확정된 추가 사용자 입력의 표준 chunk와 prompt 완료 순서를 구현한다. |
-| Studio #24 | **H1 + A1 1단계 branch SHA**로 독립 클라이언트와 기존 입력 UI를 연결한다. desktop·로그인 WebUI에서 실제 입력, 늦은 큐 표시, 원본 prompt 한 행과 표준 Stop을 검증한다. 추가 사용자 행의 순서와 재열기 이력 검증은 A1 2단계에서 한다. 두 단계는 H2나 supervisor 변경을 기다리지 않는다. |
+| Studio #24 | **H1 + A1 1단계 branch SHA**로 독립 클라이언트와 기존 입력 UI를 연결한다. desktop·로그인 WebUI에서 실제 입력, host 턴에 따른 일반 전송과 409의 입력 보존, Stop·종료 뒤 늦은 접수 표시, 원본 prompt 한 행을 검증한다. 추가 사용자 행의 순서와 재열기 이력 검증은 A1 2단계에서 한다. 두 단계는 H2나 supervisor 변경을 기다리지 않는다. |
 | H2 · host 확장 알림 | H1 위에 기존 realtime router의 인증된 구독·nonce 검사·ordered unicast·폐기·backpressure를 붙인다. 통과한 조합만 notifications=true를 광고한다. H2 병합 전에도 #24는 H1으로 검증한다. `AppServices`가 조립하며 별도 port·worker는 두지 않는다(D12). |
 | A2 → Studio #7 | H1 요청 경로, A1 공통 중복 방지, native selection pin을 재사용한다. ACP에서 scope 투영·쓰기 제한·동의·기능 거절을 검증한 뒤 Studio가 비활성 세션 안내와 선택 UI를 연결한다. 표준 permission은 H2에 의존하지 않는다. |
 | A3 → Studio S3 | #612의 확정 wire와 H1 요청/H2 알림이 선행이다. ACP가 부모별 제어·cursor·병합·등록표를 검증하고 renderer는 독립 모듈로 자식 패널과 backoff를 연결한다. 그 전에는 children 메서드를 광고하지 않는다. #612가 beta.3에 빠지면 S3는 다음 릴리스 대상이다. |
