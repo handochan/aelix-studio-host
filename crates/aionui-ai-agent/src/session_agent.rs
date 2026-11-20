@@ -7192,8 +7192,11 @@ mod pump_tests {
             content: vec![],
             parent_tool_use_id: None,
         };
-        let backend: Arc<dyn SessionBackend> =
-            Arc::new(ScriptBackend(vec![env(detached), env(clean_end), env(late_result)]));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let backend: Arc<dyn SessionBackend> = Arc::new(GatedScriptBackend {
+            script: vec![env(detached), env(clean_end), env(late_result)],
+            gate: gate.clone(),
+        });
         let task = SessionAgentTask::new(
             AgentType::Acp,
             "conv-1".into(),
@@ -7203,6 +7206,7 @@ mod pump_tests {
             None,
         );
         let mut rx = crate::agent_task::IAgentTask::subscribe(task.as_ref());
+        gate.notify_one();
         let _ = task;
 
         let mut terminal_names: Vec<String> = Vec::new();
