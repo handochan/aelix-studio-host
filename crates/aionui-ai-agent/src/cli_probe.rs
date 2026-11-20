@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use aionui_api_types::AgentMetadata;
 use aionui_runtime::{Builder, resolve_command_path};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::path::PathBuf;
 
 /// Inline (startup) `--version` budget. Bounds backend readiness; agents that
