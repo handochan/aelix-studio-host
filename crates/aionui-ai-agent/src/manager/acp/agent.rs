@@ -521,28 +521,24 @@ fn slash_command_items(commands: &[AvailableCommand]) -> Vec<SlashCommandItem> {
     commands.iter().map(slash_command_item).collect()
 }
 
-fn leading_slash_token(raw_user_input: &str) -> Option<&str> {
-    raw_user_input
-        .split_whitespace()
-        .next()?
-        .strip_prefix('/')
-        .filter(|token| !token.is_empty())
-}
+fn has_slash_command_shape(input: &str) -> bool {
+    let Some(text) = input.strip_prefix('/') else {
+        return false;
+    };
+    // Aelix ACP @32082b6, src/aelix_acp/runtime/commands.py:
+    // split_command separates arguments at an ASCII space and rejects
+    // whitespace in the name. compact_instructions also accepts a newline
+    // or other whitespace after "compact".
+    let parser_whitespace = |c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}');
+    if let Some(arguments) = text.strip_prefix("compact")
+        && arguments.chars().next().is_none_or(parser_whitespace)
+    {
+        return true;
+    }
 
-fn matched_slash_command(raw_user_input: &str, commands: &[AvailableCommand]) -> Option<SlashCommandItem> {
-    let token = leading_slash_token(raw_user_input)?;
-    commands
-        .iter()
-        .find(|command| command.name == token)
-        .map(slash_command_item)
-}
-
-fn defer_session_prelude(raw_user_input: &str, agent_name: Option<&str>) -> bool {
-    // The adapter identifies itself through ACP initialize. Its command parser
-    // accepts /compact only at the start of the user input.
-    agent_name == Some("aelix-acp")
-        && raw_user_input.starts_with('/')
-        && leading_slash_token(raw_user_input) == Some("compact")
+    let name = text.split_once(' ').map_or(text, |(name, _)| name);
+    // A second slash belongs to an ordinary path, not the command prefix.
+    !name.is_empty() && !name.contains('/') && !name.chars().any(parser_whitespace)
 }
 
 /// Manages a single ACP Agent instance.
@@ -1368,43 +1364,42 @@ impl AcpAgentManager {
         let sid = self.ensure_session_opened().await.map_err(AcpSendFailure::from)?;
         self.runtime.reset_for_new_turn(ConversationStatus::Running);
         let raw_user_input = data.content.clone();
-        let matched_command = {
-            let session = self.session.read().await;
-            session
-                .available_commands()
-                .and_then(|commands| matched_slash_command(&raw_user_input, commands))
-        };
-
-        let agent_info = self
-            .protocol
-            .initialize_response()
-            .and_then(|response| response.agent_info);
-        let agent_name = agent_info.as_ref().map(|info| info.name.as_str());
-        let (content, consumed_prelude) = if defer_session_prelude(&raw_user_input, agent_name) {
+        let (content, consumed_prelude) = {
             let mut session = self.session.write().await;
-            if session.has_pending_session_new_prelude() && !session.has_deferred_aelix_prelude() {
-                self.persist_aelix_prelude(&sid, AelixPreludeChange::Defer)
-                    .await
-                    .map_err(AcpSendFailure::PreludePersistence)?;
-                session.mark_deferred_aelix_prelude();
+            let deferred = session.has_deferred_aelix_prelude();
+            let pending = session.has_pending_session_new_prelude();
+            // Without attachments the ACP block builder emits one text block.
+            // Path-only fallback files still belong to an ordinary prompt.
+            if pending && data.files.is_empty() && has_slash_command_shape(&raw_user_input) {
+                // Keep the command at the start of the ACP text and save the
+                // rules for the first ordinary prompt in this session.
+                if !deferred {
+                    self.persist_acp_prelude(&sid, AelixPreludeChange::Defer)
+                        .await
+                        .map_err(AcpSendFailure::PreludePersistence)?;
+                    session.mark_deferred_aelix_prelude();
+                }
+                (raw_user_input, false)
+            } else {
+                let mut ctx = PromptCtx {
+                    session: &mut session,
+                    params: &self.params,
+                    skill_manager: &self.skill_manager,
+                    runtime: &self.runtime,
+                };
+                let mut transformed = self.pipeline.pre_send(&mut ctx, raw_user_input).await;
+                if pending && transformed.starts_with('/') && !transformed.starts_with("//") {
+                    // Keep an ordinary leading-slash input out of the command
+                    // prefix even when there was no prelude text to add.
+                    transformed.insert(0, '\n');
+                }
+                if deferred && let Err(error) = self.persist_acp_prelude(&sid, AelixPreludeChange::Consume).await {
+                    session.mark_deferred_aelix_prelude();
+                    return Err(AcpSendFailure::PreludePersistence(error));
+                }
+                self.commit_session_changes(&mut session).await;
+                (transformed, deferred)
             }
-            (raw_user_input, false)
-        } else {
-            let mut s = self.session.write().await;
-            let deferred = s.has_deferred_aelix_prelude();
-            let mut ctx = PromptCtx {
-                session: &mut s,
-                params: &self.params,
-                skill_manager: &self.skill_manager,
-                runtime: &self.runtime,
-            };
-            let transformed = self.pipeline.pre_send(&mut ctx, data.content.clone()).await;
-            if deferred && let Err(error) = self.persist_aelix_prelude(&sid, AelixPreludeChange::Consume).await {
-                s.mark_deferred_aelix_prelude();
-                return Err(AcpSendFailure::PreludePersistence(error));
-            }
-            self.commit_session_changes(&mut s).await;
-            (transformed, deferred)
         };
 
         self.dump_acp_final_input(&sid, data, &content);
@@ -1413,8 +1408,7 @@ impl AcpAgentManager {
             content,
             ..data.clone()
         };
-        self.prompt_existing_session(&data, Some(&sid), matched_command.as_ref(), consumed_prelude)
-            .await
+        self.prompt_existing_session(&data, Some(&sid), consumed_prelude).await
     }
 
     fn dump_acp_final_input(&self, session_id: &str, data: &SendMessageData, final_content: &str) {
@@ -2359,42 +2353,33 @@ mod tests {
     }
 
     #[test]
-    fn matches_leading_slash_token_against_advertised_commands() {
-        let mut command = AvailableCommand::new("ctx-flush", "Flush context");
-        command.meta = Some(
-            serde_json::from_value(json!({
-                "completion_behavior": "neutral_tip_on_empty",
-            }))
-            .unwrap(),
-        );
-
-        let matched = super::matched_slash_command("/ctx-flush now", &[command]).expect("command should match");
-
-        assert_eq!(matched.command, "ctx-flush");
-        assert_eq!(
-            matched.completion_behavior,
-            Some(aionui_api_types::SlashCommandCompletionBehavior::NeutralTipOnEmpty)
-        );
-        assert_eq!(matched.empty_turn_tip_code.as_deref(), None);
-    }
-
-    #[test]
-    fn defers_prelude_for_explicit_aelix_compact_only() {
-        let aelix = Some("aelix-acp");
-        assert!(super::defer_session_prelude("/compact", aelix));
-        assert!(super::defer_session_prelude("/compact keep decisions", aelix));
-        assert!(super::defer_session_prelude(
-            "/compact\n\n[[AION_FILES]]\nnotes.txt",
-            aelix
-        ));
-        assert!(!super::defer_session_prelude(" /compact", aelix));
-        assert!(!super::defer_session_prelude("/compact-example", aelix));
-        assert!(!super::defer_session_prelude(
-            "[Assistant Rules]\nExample\n[/Assistant Rules]\n\n/compact",
-            aelix
-        ));
-        assert!(!super::defer_session_prelude("/compact", Some("other-acp")));
-        assert!(!super::defer_session_prelude("/compact", None));
+    fn slash_command_shape_matches_parser_boundaries_and_excludes_paths() {
+        for input in [
+            "/extension list",
+            "/rename Example",
+            "/exit",
+            "/skill:fixture",
+            "/한글",
+            "/extension list\nmore text",
+            "/compact\nKeep decisions",
+            "/compact\tKeep decisions",
+        ] {
+            assert!(super::has_slash_command_shape(input), "{input:?}");
+        }
+        for input in [
+            "/Users/fixture/Documents",
+            "/compact/archive",
+            "//host/Documents",
+            " /extension list",
+            "\n/extension list",
+            "/extension\nlist",
+            "/extension\tlist",
+            "/na\u{1c}me",
+            "/",
+            "/ example",
+        ] {
+            assert!(!super::has_slash_command_shape(input), "{input:?}");
+        }
     }
 
     #[test]

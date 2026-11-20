@@ -199,12 +199,8 @@ impl PendingUpdate {
     }
 }
 
-/// Consume domain events from the session aggregate and persist user
-/// intent changes with a debounce window.
-///
-/// `SessionAssigned` bypasses the debounce: the CLI-issued id must be
-/// written immediately so the next turn can take the resume path even
-/// if the process crashes before any other event fires.
+/// Persist runtime observations from the session aggregate with a debounce window.
+/// Session bindings are committed by the session-open path.
 async fn domain_event_consumer(
     user_id: String,
     conversation_id: String,
@@ -232,25 +228,6 @@ async fn domain_event_consumer(
 
         match recv {
             Some(event) => {
-                if let AcpSessionEvent::SessionAssigned { session_id } = &event {
-                    match repo
-                        .update_session_id_for_user(&user_id, &conversation_id, session_id.as_str())
-                        .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => debug!(
-                            user_id,
-                            conversation_id, "session-sync: acp_session row missing; session_id not written"
-                        ),
-                        Err(err) => warn!(
-                            user_id,
-                            conversation_id,
-                            error = %err,
-                            "session-sync: update_session_id failed"
-                        ),
-                    }
-                    continue;
-                }
                 if pending.merge_from_domain_event(&event) {
                     flush_at = Some(Instant::now() + DEBOUNCE_WINDOW);
                 }
@@ -563,15 +540,19 @@ mod tests {
         assert_eq!(parsed["size"], 200000);
     }
 
-    /// SessionAssigned must write the session_id immediately, bypassing
-    /// the debounce window used for runtime-state updates.
+    /// A late event from a discarded runtime must not rebind the row.
     #[tokio::test(flavor = "current_thread")]
-    async fn session_assigned_writes_session_id_immediately() {
+    async fn delayed_session_assigned_does_not_replace_the_current_binding() {
         let (_svc, repo) = setup().await;
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "current")
+                .await
+                .unwrap()
+        );
         let (tx, rx) = mpsc::channel(64);
 
         let cid = "conv-1".to_owned();
-        tokio::spawn(domain_event_consumer("user-1".to_owned(), cid, rx, repo.clone()));
+        let consumer = tokio::spawn(domain_event_consumer("user-1".to_owned(), cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::SessionAssigned {
             session_id: SessionId::new("sess-42"),
@@ -579,12 +560,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Well under the debounce window — the event must have already
-        // been written.
-        sleep(Duration::from_millis(100)).await;
-        let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
-        assert_eq!(row.session_id.as_deref(), Some("sess-42"));
         drop(tx);
-        sleep(Duration::from_millis(50)).await;
+        consumer.await.unwrap();
+        let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("current"));
     }
 }
