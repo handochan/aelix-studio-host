@@ -9,7 +9,7 @@ use super::permission::{
     AcpPermissionEventData, AcpPermissionOptionData, AcpPermissionOptionKind, AcpPermissionRequestData,
     AcpPermissionToolCall,
 };
-use super::session_updates::{AvailableCommandsEventData, PlanEventData, ThinkingEventData};
+use super::session_updates::{PlanEventData, ThinkingEventData};
 use super::tool_call::{
     AcpToolCallContentItem, AcpToolCallEventData, AcpToolCallKind, AcpToolCallLocationItem,
     AcpToolCallSessionUpdateKind, AcpToolCallStatus, AcpToolCallTextBlock, AcpToolCallTextBlockType,
@@ -102,12 +102,6 @@ pub(crate) fn session_notification_to_events(notif: &SessionNotification) -> Vec
             events.push(AgentStreamEvent::Plan(PlanEventData {
                 session_id: Some(session_id),
                 entries,
-            }));
-        }
-
-        SessionUpdate::AvailableCommandsUpdate(update) => {
-            events.push(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData {
-                commands: update.available_commands.clone(),
             }));
         }
 

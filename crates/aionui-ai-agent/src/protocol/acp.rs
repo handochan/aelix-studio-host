@@ -47,7 +47,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
 
-use super::acp_command_catalog::CommandCatalog;
+use super::acp_command_catalog::{CatalogSetup, CommandCatalog};
 
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
@@ -292,8 +292,18 @@ impl AcpProtocol {
         .flatten()
     }
 
+    pub(crate) fn prepare_command_catalog(&self) -> CatalogSetup<'_> {
+        self.command_catalog.setup()
+    }
+
+    pub(crate) fn discard_command_attempt(&self, session_id: &str) {
+        self.command_catalog.discard(Some(session_id));
+    }
+
     pub(crate) fn adopt_command_session(&self, session_id: &str) {
-        self.command_catalog.activate(SessionId::new(session_id));
+        let id = SessionId::new(session_id);
+        let generation = self.command_catalog.begin_attempt(Some(id.clone()));
+        self.command_catalog.identify(generation, id);
     }
 
     fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
@@ -329,13 +339,13 @@ impl AcpProtocol {
         &self,
         mut req: NewSessionRequest,
     ) -> Result<(NewSessionResponse, Option<serde_json::Value>), AcpError> {
-        let catalog_open = self.command_catalog.begin_open();
+        let generation = self.command_catalog.begin_attempt(None);
         let nonce = self.relay.prepare_open(&mut req.meta);
         let (response, models) = self
             .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
             .await?;
         let response: NewSessionResponse = response;
-        catalog_open.finish(response.session_id.clone());
+        self.command_catalog.identify(generation, response.session_id.clone());
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok((response, models))
@@ -362,24 +372,24 @@ impl AcpProtocol {
         mut req: LoadSessionRequest,
     ) -> Result<(LoadSessionResponse, Option<serde_json::Value>), AcpError> {
         let _guard = ReplaySuppressionGuard::new(&self.replay_suppression);
-        let catalog_open = self.command_catalog.begin_open();
         let nonce = self.relay.prepare_open(&mut req.meta);
         let sid = req.session_id.clone();
+        let generation = self.command_catalog.begin_attempt(Some(sid.clone()));
         let (response, models) = self
             .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
             .await?;
         let response: LoadSessionResponse = response;
-        catalog_open.finish(sid.clone());
+        self.command_catalog.identify(generation, sid.clone());
         self.relay.opened(sid, nonce, response.meta.as_ref());
         Ok((response, models))
     }
 
     /// Fork an existing ACP session into a new session.
     pub async fn fork_session(&self, mut req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
-        let catalog_open = self.command_catalog.begin_open();
+        let generation = self.command_catalog.begin_attempt(None);
         let nonce = self.relay.prepare_open(&mut req.meta);
         let response = self.send_request(req, AGENT_METHOD_NAMES.session_fork).await?;
-        catalog_open.finish(response.session_id.clone());
+        self.command_catalog.identify(generation, response.session_id.clone());
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok(response)
@@ -387,10 +397,10 @@ impl AcpProtocol {
 
     /// Resume an existing ACP session.
     pub async fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, AcpError> {
-        let catalog_open = self.command_catalog.begin_open();
         let session_id = req.session_id.clone();
+        let generation = self.command_catalog.begin_attempt(Some(session_id.clone()));
         let response = self.send_request(req, AGENT_METHOD_NAMES.session_resume).await?;
-        catalog_open.finish(session_id);
+        self.command_catalog.identify(generation, session_id);
         Ok(response)
     }
 

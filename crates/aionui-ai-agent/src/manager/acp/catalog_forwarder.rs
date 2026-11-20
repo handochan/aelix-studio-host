@@ -5,6 +5,8 @@
 //! auth methods) into `AgentHandshake` partials that the registry's
 //! catalog consumer writes to `agent_metadata`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use agent_client_protocol::schema::v1::{SessionConfigOption, SessionModeState};
 use aionui_api_types::AgentHandshake;
 use aionui_common::normalize_keys_to_snake_case;
@@ -14,7 +16,9 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 
 use crate::protocol::events::AgentStreamEvent;
-use crate::registry::CatalogSender;
+use crate::registry::{CatalogSender, CommandCatalogChange, CommandCatalogOwner};
+
+static NEXT_CATALOG_OWNER: AtomicU64 = AtomicU64::new(0);
 
 /// Subscriber that projects session-driven ACP events into the
 /// `agent_metadata` catalog so the stored handshake blob stays in sync
@@ -31,15 +35,34 @@ impl CatalogForwarder {
     pub fn spawn(
         user_id: String,
         agent_id: String,
+        conversation_id: String,
         mut event_rx: broadcast::Receiver<AgentStreamEvent>,
         catalog_tx: CatalogSender,
     ) -> JoinHandle<()> {
+        let owner = CommandCatalogOwner {
+            conversation_id,
+            instance: NEXT_CATALOG_OWNER.fetch_add(1, Ordering::Relaxed),
+        };
         tokio::spawn(async move {
             loop {
                 match event_rx.recv().await {
                     Ok(event) => {
                         if let Some(partial) = catalog_partial_from_event(&event) {
-                            catalog_tx.send_partial(user_id.clone(), agent_id.clone(), partial);
+                            if let AgentStreamEvent::AvailableCommands(data) = &event {
+                                catalog_tx
+                                    .send_commands(
+                                        user_id.clone(),
+                                        agent_id.clone(),
+                                        partial,
+                                        CommandCatalogChange {
+                                            owner: owner.clone(),
+                                            invalidated: data.invalidated,
+                                        },
+                                    )
+                                    .await;
+                            } else {
+                                catalog_tx.send_partial(user_id.clone(), agent_id.clone(), partial);
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,

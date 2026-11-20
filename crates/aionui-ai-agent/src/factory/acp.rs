@@ -313,6 +313,7 @@ pub(super) async fn build(
     CatalogForwarder::spawn(
         ctx.user_id.clone(),
         arc.agent_id().to_owned(),
+        ctx.conversation_id.clone(),
         crate::IAgentTask::subscribe(arc.as_ref()),
         catalog_tx,
     );
@@ -330,7 +331,6 @@ pub(super) async fn build(
     // reconcile pass have completed. Matches aionrs factory behaviour:
     // the caller sees "warmed up" == "ready for PUT /mode | /model".
     arc.warmup_session().await?;
-    arc.enforce_team_permission_mode().await?;
 
     let instance = AgentInstance::Acp(Arc::clone(&arc));
 

@@ -193,6 +193,7 @@ impl AcpAgentManager {
         previous_binding: Option<&str>,
         err: &AcpError,
     ) -> Result<String, AgentError> {
+        self.protocol.discard_command_attempt(stale_sid);
         if self
             .params
             .config

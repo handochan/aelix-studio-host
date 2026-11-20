@@ -37,6 +37,25 @@ pub struct PlanEventData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailableCommandsEventData {
     pub commands: Vec<AvailableCommand>,
+    /// Runtime-only provenance for scoped metadata invalidation.
+    #[serde(skip)]
+    pub(crate) invalidated: bool,
+}
+
+impl AvailableCommandsEventData {
+    pub fn new(commands: Vec<AvailableCommand>) -> Self {
+        Self {
+            commands,
+            invalidated: false,
+        }
+    }
+
+    pub(crate) fn invalidated() -> Self {
+        Self {
+            commands: Vec::new(),
+            invalidated: true,
+        }
+    }
 }
 
 /// Data for the `SkillSuggest` event.

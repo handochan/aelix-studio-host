@@ -788,3 +788,82 @@ async fn background_recheck_marks_corrupted_install_offline() {
             .is_some_and(|message| message.contains("native binary missing"))
     );
 }
+
+#[tokio::test]
+async fn failed_open_clears_only_its_conversations_owned_catalog() {
+    let db = init_database_memory().await.unwrap();
+    let repo = Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone()));
+    let registry = AgentRegistry::new(repo.clone());
+    registry.hydrate().await.unwrap();
+    let agent = registry.find_builtin_by_backend("gemini").await.unwrap();
+    let sender = registry.catalog_sender();
+
+    let catalog = |names: Vec<&str>| {
+        Value::Array(
+            names
+                .into_iter()
+                .map(|name| json!({"name": name, "description": name}))
+                .collect(),
+        )
+    };
+    for (marker, conversation_id, instance, invalidated, names, expected) in [
+        (0, "confirmed", 1, false, vec!["review"], vec!["review"]),
+        (1, "unrelated", 2, true, vec![], vec!["review"]),
+        (2, "confirmed", 0, true, vec![], vec!["review"]),
+        (3, "confirmed", 3, false, vec!["new"], vec!["new"]),
+        (4, "unrelated", 4, false, vec!["other"], vec!["other"]),
+        (5, "confirmed", 1, false, vec!["retired"], vec!["other"]),
+        (6, "confirmed", 5, true, vec![], vec!["other"]),
+        (7, "confirmed", 3, false, vec!["retired"], vec!["other"]),
+        (8, "unrelated", 6, true, vec![], vec![]),
+        (9, "unrelated", 4, false, vec!["retired"], vec![]),
+        (10, "confirmed", 7, false, vec!["live"], vec!["live"]),
+        (11, "confirmed", 8, true, vec![], vec![]),
+    ] {
+        sender
+            .send_commands(
+                SYSTEM_DEFAULT_USER_ID.into(),
+                agent.id.clone(),
+                AgentHandshake {
+                    available_commands: Some(catalog(names)),
+                    ..Default::default()
+                },
+                CommandCatalogChange {
+                    owner: CommandCatalogOwner {
+                        conversation_id: conversation_id.into(),
+                        instance,
+                    },
+                    invalidated,
+                },
+            )
+            .await;
+        // Both writes use the same sender. Reading the marker proves the
+        // preceding scoped update has been consumed before the assertion.
+        sender.send_partial(
+            SYSTEM_DEFAULT_USER_ID.into(),
+            agent.id.clone(),
+            AgentHandshake {
+                agent_capabilities: Some(json!({"fixture_marker": marker})),
+                ..Default::default()
+            },
+        );
+        let row = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let row = repo.get(&agent.id).await.unwrap().unwrap();
+                if row
+                    .agent_capabilities
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    == Some(json!({"fixture_marker": marker}))
+                {
+                    return row;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let stored: Value = serde_json::from_str(row.available_commands.as_deref().unwrap()).unwrap();
+        assert_eq!(stored, catalog(expected), "{marker}: {conversation_id}/{instance}");
+    }
+}

@@ -1340,6 +1340,7 @@ impl AcpAgentManager {
             (s.session_id().map(ToOwned::to_owned), s.is_opened())
         };
 
+        let catalog_setup = (!opened).then(|| self.protocol.prepare_command_catalog());
         let sid = match (session_id, opened) {
             // Unbound + fork spec: the forked conversation's backend session
             // has not materialized yet → session/fork against the parent sid
@@ -1353,6 +1354,10 @@ impl AcpAgentManager {
             (Some(sid), true) => sid,
         };
 
+        if catalog_setup.is_some() {
+            self.enforce_team_permission_mode().await?;
+        }
+
         {
             let mut s = self.session.write().await;
             let sid = mark_session_opened_after_protocol_ready(
@@ -1363,6 +1368,9 @@ impl AcpAgentManager {
                 self.backend(),
             )?;
             self.commit_session_changes(&mut s).await;
+            if let Some(catalog_setup) = catalog_setup {
+                catalog_setup.finish(&sid);
+            }
             Ok(sid)
         }
     }
@@ -1509,8 +1517,8 @@ impl AcpAgentManager {
         self.team_permission_mode.is_some()
     }
 
-    /// Enforce the Team selection before the factory makes the task available.
-    pub(crate) async fn enforce_team_permission_mode(&self) -> Result<(), AgentError> {
+    /// Enforce the Team selection before completing session setup.
+    async fn enforce_team_permission_mode(&self) -> Result<(), AgentError> {
         let Some(mode) = self.team_permission_mode else {
             return Ok(());
         };

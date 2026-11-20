@@ -21,17 +21,28 @@ use aionui_db::{
 
 const PEER: &str = r#"
 import json
+from pathlib import Path
 import sys
+import time
 
 agent_name, trace, load_surface = sys.argv[1:]
 selections = {'model': 'fixture/two', 'thinking_level': 'high'}
 phase = None
+reconcile_held = False
 catalog = ['extension', 'compact', 'help', 'name', 'quit', 'example', 'skill:fixture']
 
 def advertise(session_id, names):
     print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
         'sessionId': session_id, 'update': {'sessionUpdate': 'available_commands_update',
         'availableCommands': [{'name': name, 'description': name} for name in names]}}}), flush=True)
+
+def hold_reconcile():
+    Path(trace + '.reconciling').touch()
+    deadline = time.monotonic() + 10
+    while not Path(trace + '.release').exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Timed out waiting for test to release reconcile')
+        time.sleep(0.01)
 
 def options():
     return [
@@ -55,17 +66,23 @@ for line in sys.stdin:
     if method == 'initialize':
         response['result'] = {
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
-            'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
+            'agentCapabilities': {'loadSession': load_surface not in ('legacy-no-load', 'hold-legacy')}, 'authMethods': [],
         }
-        if load_surface in ('fork-recovery', 'foreign-catalog', 'foreign-catalog-active'):
+        if load_surface in ('fork-recovery', 'foreign-catalog', 'foreign-catalog-active',
+                            'hold-fork', 'hold-recovery', 'fork-failure-no-catalog'):
             response['result']['agentCapabilities']['sessionCapabilities'] = {'fork': {}}
     elif method == 'session/fork':
         response['result'] = {'sessionId': 'forked-session', 'configOptions': options()}
+        advertise('forked-session', ['before-response' if load_surface == 'hold-fork' else 'failed-fork'])
     elif method == 'session/new':
         phase = 'new'
         resumed = params.get('_meta', {}).get('claudeCode', {}).get('options', {}).get('resume')
         session_id = 'replacement-session' if resumed == 'selector-session' else 'selector-session'
-        response['result'] = {'sessionId': session_id, 'configOptions': options()}
+        if load_surface == 'fail-new-on-wire':
+            advertise(session_id, ['rejected-open'])
+            response['error'] = {'code': -32602, 'message': 'Fixture refused session/new'}
+        else:
+            response['result'] = {'sessionId': session_id, 'configOptions': options()}
     elif method == 'session/load' and params['sessionId'] == 'selector-session':
         phase = 'load'
         response['result'] = {'configOptions': options()}
@@ -78,20 +95,31 @@ for line in sys.stdin:
             }
     elif method == 'session/load':
         response['error'] = {'code': -32002, 'message': 'Session not found'}
-    elif method == 'session/set_config_option' and params['sessionId'] == 'forked-session':
+    elif method == 'session/set_config_option' and (
+            (params['sessionId'] == 'forked-session' and load_surface != 'hold-fork')
+            or load_surface == 'fail-new-reconcile'):
         entry += ' forked-session'
         response['error'] = {'code': -32001, 'message': 'Session not found'}
-    elif method == 'session/set_config_option' and load_surface == 'same-id-catalog' and phase == 'load':
+    elif method == 'session/set_config_option' and load_surface in ('same-id-catalog', 'same-id-late-catalog') and phase == 'load':
         entry += ' stale'
         response['error'] = {'code': -32001, 'message': 'Session not found'}
     elif method == 'session/set_config_option':
+        if load_surface.startswith('hold-') and not reconcile_held:
+            reconcile_held = True
+            if load_surface in ('hold-load', 'hold-legacy'):
+                advertise(params['sessionId'], ['ready-command'])
+            hold_reconcile()
         if load_surface == 'foreign-catalog-active':
             advertise('forked-session', ['old-only'])
         key, value = params['configId'], params['value']
         entry += f' {key}={value}'
         selections[key] = value
         response['result'] = {'configOptions': options()}
-    elif method == 'session/prompt' and params['sessionId'] in ('selector-session', 'replacement-session'):
+    elif method == 'session/set_mode' and load_surface == 'hold-legacy':
+        advertise(params['sessionId'], ['ready-command'])
+        hold_reconcile()
+        response['result'] = {}
+    elif method == 'session/prompt' and params['sessionId'] in ('selector-session', 'replacement-session', 'forked-session'):
         text = params['prompt'][0]['text']
         entry += ' ' + json.dumps(text)
         body = text.splitlines()[-1]
@@ -112,12 +140,24 @@ for line in sys.stdin:
     else:
         response['error'] = {'code': -32601, 'message': f'Unexpected request: {method}'}
     if method in ('session/new', 'session/load') and 'result' in response:
-        if load_surface not in ('no-catalog', 'late-catalog') and not (
-                load_surface == 'same-id-catalog' and phase == 'new'):
-            advertise(response['result'].get('sessionId', params.get('sessionId')),
-                      [] if load_surface == 'empty-catalog' else catalog)
+        if load_surface not in ('no-catalog', 'late-catalog', 'fork-failure-no-catalog') and not (
+                load_surface in ('same-id-catalog', 'same-id-late-catalog') and phase == 'new'):
+            names = catalog
+            if load_surface == 'empty-catalog':
+                names = []
+            elif load_surface == 'restart-seed':
+                names = ['previous-transport']
+            elif load_surface.startswith('hold-'):
+                names = ['before-response']
+            advertise(response['result'].get('sessionId', params.get('sessionId')), names)
         if load_surface == 'foreign-catalog' and method == 'session/new':
             advertise('forked-session', ['old-only'])
+        if load_surface == 'same-id-late-catalog' and method == 'session/new':
+            advertise('selector-session', ['retired-only'])
+    elif method == 'session/set_config_option' and load_surface == 'same-id-late-catalog' and phase == 'new':
+        advertise(params['sessionId'], ['retired-only'])
+    elif method == 'session/prompt' and load_surface == 'same-id-late-catalog':
+        advertise(params['sessionId'], ['retired-after-ready'])
     elif method == 'session/prompt' and load_surface == 'late-catalog':
         advertise(params['sessionId'], catalog)
     with open(trace, 'a') as output:
@@ -158,8 +198,17 @@ async fn build_session(
     let mut metadata = registry.find_builtin_by_backend("gemini").await.unwrap();
     metadata.backend = None;
     metadata.handshake = Default::default();
-    metadata.behavior_policy.session_load_via_meta_field = load_surface == "meta";
-    let params = assemble_acp_params(
+    if load_surface == "hold-legacy" {
+        metadata.handshake.available_modes = Some(serde_json::json!({
+            "current_mode_id": "default",
+            "available_modes": [
+                {"id": "default", "name": "Default"},
+                {"id": "ask", "name": "Ask"}
+            ]
+        }));
+    }
+    metadata.behavior_policy.session_load_via_meta_field = matches!(load_surface, "meta" | "hold-meta");
+    let mut params = assemble_acp_params(
         CONVERSATION.into(),
         USER.into(),
         WorkspaceInfo {
@@ -181,10 +230,16 @@ async fn build_session(
         AcpBuildExtra {
             current_model_id: Some("fixture/one".into()),
             thought_level: Some("low".into()),
+            session_mode: (load_surface == "hold-legacy").then(|| "ask".into()),
             preset_context: (load_surface != "no-rules").then(|| "Fixture conversation rules".into()),
             fork: matches!(
                 load_surface,
-                "fork-recovery" | "foreign-catalog" | "foreign-catalog-active"
+                "fork-recovery"
+                    | "foreign-catalog"
+                    | "foreign-catalog-active"
+                    | "hold-fork"
+                    | "hold-recovery"
+                    | "fork-failure-no-catalog"
             )
             .then(|| aionui_api_types::ForkSpec {
                 parent_conversation_id: "parent".into(),
@@ -201,6 +256,9 @@ async fn build_session(
         false,
     )
     .await;
+    if load_surface == "fail-team-reconcile" {
+        params.team_permission_mode = Some("default");
+    }
     let skills = Arc::new(aionui_extension::resolve_skill_paths(directory, directory));
     let (manager, domain_rx, _notifications) = AcpAgentManager::build(
         Arc::new(params),
@@ -831,7 +889,12 @@ async fn recovered_fork_ignores_foreign_advertisements_before_and_after_the_open
         let mut published = false;
         while let Ok(event) = events.try_recv() {
             if let AgentStreamEvent::AvailableCommands(update) = event {
-                assert!(!update.commands.iter().any(|command| command.name == "old-only"));
+                assert!(
+                    !update
+                        .commands
+                        .iter()
+                        .any(|command| matches!(command.name.as_str(), "old-only" | "failed-fork"))
+                );
                 published |= update.commands.iter().any(|command| command.name == "example");
             }
         }
@@ -895,5 +958,277 @@ async fn legacy_conversation_without_session_row_binds_before_its_first_command(
     prompt(&agent, "/extension list").await.unwrap();
     assert!(prelude_pending(&sync).await);
     assert_eq!(prompt_trace(temp.path(), "legacy-row.txt"), ["/extension list"]);
+    agent.kill_and_wait(None).await;
+}
+
+async fn agent_metadata_commands(registry: &AgentRegistry, expected: &[&str]) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let meta = registry.find_builtin_by_backend("gemini").await.unwrap();
+            if let Some(list) = meta.handshake.available_commands
+                && let Some(names) = list.as_array()
+                && names
+                    .iter()
+                    .filter_map(|command| command.get("name")?.as_str())
+                    .eq(expected.iter().copied())
+                && names.len() == expected.len()
+            {
+                return list;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("agent metadata never received {expected:?}"))
+}
+
+#[tokio::test]
+async fn failed_fork_and_load_clear_agent_metadata_when_replacement_does_not_advertise() {
+    for surface in ["same-id-catalog", "fork-failure-no-catalog"] {
+        let (temp, registry, sync) = setup().await;
+        if surface == "same-id-catalog" {
+            assert!(
+                sync.repo()
+                    .update_session_id_for_user(USER, CONVERSATION, SESSION)
+                    .await
+                    .unwrap()
+            );
+        }
+        let (manager, _domain_rx) =
+            build_session(temp.path(), &registry, &sync, "other-acp", "registry.txt", surface).await;
+        let manager = Arc::new(manager);
+        let agent = AgentInstance::Acp(Arc::clone(&manager));
+        let mut events = agent.subscribe();
+        let catalog = registry.catalog_sender();
+        let _forwarder = aionui_ai_agent::manager::acp::CatalogForwarder::spawn(
+            USER.into(),
+            manager.agent_id().to_owned(),
+            CONVERSATION.into(),
+            agent.subscribe(),
+            catalog.clone(),
+        );
+        catalog.send_partial(
+            USER.into(),
+            manager.agent_id().to_owned(),
+            aionui_api_types::AgentHandshake {
+                available_commands: Some(
+                    serde_json::json!([{"name": "previous-valid", "description": "Previous catalog"}]),
+                ),
+                ..Default::default()
+            },
+        );
+        agent_metadata_commands(&registry, &["previous-valid"]).await;
+
+        manager.warmup_session().await.unwrap();
+        assert!(agent.get_slash_commands().await.unwrap().is_empty(), "{surface}");
+        agent_metadata_commands(&registry, &[]).await;
+        assert_eq!(published_catalogs(&mut events), [Vec::<String>::new()], "{surface}");
+
+        prompt(&agent, "/example").await.unwrap();
+        assert_eq!(
+            prompt_trace(temp.path(), "registry.txt"),
+            ["[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n/example"]
+        );
+        agent.kill_and_wait(None).await;
+    }
+}
+
+type Events = tokio::sync::broadcast::Receiver<AgentStreamEvent>;
+
+fn published_catalogs(events: &mut Events) -> Vec<Vec<String>> {
+    let mut catalogs = Vec::new();
+    loop {
+        match events.try_recv() {
+            Ok(AgentStreamEvent::AvailableCommands(update)) => {
+                catalogs.push(update.commands.into_iter().map(|command| command.name).collect());
+            }
+            Ok(_) => {}
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+            Err(error) => panic!("catalog stream missed events: {error}"),
+        }
+    }
+    catalogs
+}
+
+#[tokio::test]
+async fn retired_same_id_advertisements_never_reach_lookup_prompt_or_events() {
+    let (temp, registry, sync) = setup().await;
+    assert!(
+        sync.repo()
+            .update_session_id_for_user(USER, CONVERSATION, SESSION)
+            .await
+            .unwrap()
+    );
+    let (manager, _domain_rx) = build_session(
+        temp.path(),
+        &registry,
+        &sync,
+        "other-acp",
+        "retired.txt",
+        "same-id-late-catalog",
+    )
+    .await;
+    let manager = Arc::new(manager);
+    let agent = AgentInstance::Acp(Arc::clone(&manager));
+    let mut events = agent.subscribe();
+    manager.warmup_session().await.unwrap();
+
+    assert!(agent.get_slash_commands().await.unwrap().is_empty());
+    prompt(&agent, "/retired-only").await.unwrap();
+    assert_eq!(
+        prompt_trace(temp.path(), "retired.txt"),
+        ["[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n/retired-only"]
+    );
+    assert!(agent.get_slash_commands().await.unwrap().is_empty());
+    assert_eq!(published_catalogs(&mut events), [Vec::<String>::new()]);
+    agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn opens_publish_catalogs_only_after_reconcile_and_replace_them_on_restart() {
+    for (surface, expected_sid, wire_method) in [
+        ("hold-new", SESSION, "session/new"),
+        ("hold-load", SESSION, "session/load"),
+        ("hold-fork", "forked-session", "session/fork"),
+        ("hold-recovery", SESSION, "session/fork"),
+        ("hold-restart", SESSION, "session/load"),
+        ("hold-meta", "replacement-session", "session/new"),
+        ("hold-legacy", SESSION, "session/set_mode"),
+    ] {
+        let (temp, registry, sync) = setup().await;
+        if surface == "hold-restart" {
+            let previous = open_session(
+                temp.path(),
+                &registry,
+                &sync,
+                "other-acp",
+                "previous.txt",
+                "restart-seed",
+            )
+            .await;
+            assert_eq!(
+                previous.get_slash_commands().await.unwrap()[0].command,
+                "previous-transport"
+            );
+            assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
+            previous.kill_and_wait(None).await;
+        } else if matches!(surface, "hold-load" | "hold-meta" | "hold-legacy") {
+            assert!(
+                sync.repo()
+                    .update_session_id_for_user(USER, CONVERSATION, SESSION)
+                    .await
+                    .unwrap()
+            );
+        }
+        let (manager, _domain_rx) =
+            build_session(temp.path(), &registry, &sync, "other-acp", "matrix.txt", surface).await;
+        let manager = Arc::new(manager);
+        let agent = AgentInstance::Acp(Arc::clone(&manager));
+        let mut events = agent.subscribe();
+        let opened = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.warmup_session().await }
+        });
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !temp.path().join("matrix.txt.reconciling").exists() {
+                assert!(!opened.is_finished(), "{surface}: warmup ended before reconcile");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(agent.get_slash_commands().await.unwrap().is_empty(), "{surface}");
+
+        // Only recovery clears metadata at this point. Neither the failed
+        // attempt nor the selected response may publish a nonempty catalog.
+        let before = published_catalogs(&mut events);
+        if surface == "hold-recovery" {
+            assert_eq!(before, [Vec::<String>::new()], "{surface}");
+        } else {
+            assert!(before.is_empty(), "{surface}: {before:?}");
+        }
+
+        std::fs::write(temp.path().join("matrix.txt.release"), "").unwrap();
+        opened.await.unwrap().unwrap();
+        assert_eq!(manager.session_id().await.as_deref(), Some(expected_sid), "{surface}");
+        let commands = agent.get_slash_commands().await.unwrap();
+        assert_eq!(commands.len(), 1, "{surface}: {commands:?}");
+        let expected_name = if matches!(surface, "hold-load" | "hold-legacy") {
+            "ready-command"
+        } else {
+            "before-response"
+        };
+        assert_eq!(commands[0].command, expected_name, "{surface}");
+        assert_eq!(published_catalogs(&mut events), [vec![expected_name]], "{surface}");
+        let trace = std::fs::read_to_string(temp.path().join("matrix.txt")).unwrap();
+        assert!(trace.contains(wire_method), "{surface}: {trace}");
+        if surface == "hold-recovery" {
+            assert!(
+                trace.contains("session/fork\nsession/set_config_option forked-session\nsession/new\n"),
+                "{trace}"
+            );
+        }
+        agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn open_wire_and_reconcile_failures_clear_without_announcing_provisional_commands() {
+    for (surface, agent_name) in [
+        ("fail-new-on-wire", "other-acp"),
+        ("fail-new-reconcile", "other-acp"),
+        ("fail-team-reconcile", "aelix-acp"),
+    ] {
+        let (temp, registry, sync) = setup().await;
+        let (manager, _domain_rx) =
+            build_session(temp.path(), &registry, &sync, agent_name, "failure.txt", surface).await;
+        let manager = Arc::new(manager);
+        let agent = AgentInstance::Acp(Arc::clone(&manager));
+        let mut events = agent.subscribe();
+
+        let failure = manager.warmup_session().await.unwrap_err().to_string();
+        let trace = std::fs::read_to_string(temp.path().join("failure.txt")).unwrap();
+        match surface {
+            "fail-new-on-wire" => assert!(failure.contains("Fixture refused session/new"), "{failure}"),
+            "fail-new-reconcile" => assert!(failure.contains("Session not found"), "{failure}"),
+            "fail-team-reconcile" => assert!(failure.contains("permission_mode"), "{failure}"),
+            _ => unreachable!(),
+        }
+        assert!(trace.contains("session/new"), "{surface}: {trace}");
+        assert_eq!(published_catalogs(&mut events), [Vec::<String>::new()], "{surface}");
+        assert!(agent.get_slash_commands().await.unwrap().is_empty(), "{surface}");
+        agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn canceled_reconcile_clears_metadata_without_publishing_its_catalog() {
+    let (temp, registry, sync) = setup().await;
+    let (manager, _domain_rx) =
+        build_session(temp.path(), &registry, &sync, "other-acp", "canceled.txt", "hold-new").await;
+    let manager = Arc::new(manager);
+    let agent = AgentInstance::Acp(Arc::clone(&manager));
+    let mut events = agent.subscribe();
+    let opened = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.warmup_session().await }
+    });
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !temp.path().join("canceled.txt.reconciling").exists() {
+            assert!(!opened.is_finished(), "warmup must still be reconciling");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(published_catalogs(&mut events).is_empty());
+    opened.abort();
+    assert!(opened.await.unwrap_err().is_cancelled());
+    assert!(agent.get_slash_commands().await.unwrap().is_empty());
+    assert_eq!(published_catalogs(&mut events), [Vec::<String>::new()]);
+    std::fs::write(temp.path().join("canceled.txt.release"), "").unwrap();
     agent.kill_and_wait(None).await;
 }

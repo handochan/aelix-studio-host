@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use agent_client_protocol::schema::v1::{AvailableCommand, SessionId};
@@ -6,18 +6,49 @@ use tokio::sync::broadcast;
 
 use super::events::{AgentStreamEvent, AvailableCommandsEventData};
 
-#[derive(Default)]
-enum CatalogState {
-    #[default]
-    Inactive,
-    Opening(HashMap<SessionId, Vec<AvailableCommand>>),
-    Active {
-        session_id: SessionId,
-        commands: Option<Vec<AvailableCommand>>,
-    },
+struct SessionCommands {
+    id: SessionId,
+    commands: Option<Vec<AvailableCommand>>,
 }
 
-/// The command list is scoped to the session opened on this connection.
+#[derive(Default)]
+enum OpenPhase {
+    #[default]
+    Inactive,
+    Opening {
+        expected_id: Option<SessionId>,
+        ads: HashMap<SessionId, Vec<AvailableCommand>>,
+    },
+    Reconciling(SessionCommands),
+    Ready(SessionCommands),
+}
+
+#[derive(Default)]
+struct CatalogState {
+    generation: u64,
+    retired: HashSet<SessionId>,
+    phase: OpenPhase,
+}
+
+impl CatalogState {
+    /// An ACP notification identifies the session, but carries no open
+    /// generation. A reused ID on this connection is therefore ambiguous.
+    fn retire(&mut self) -> bool {
+        match std::mem::take(&mut self.phase) {
+            OpenPhase::Inactive => return false,
+            OpenPhase::Opening { expected_id, ads } => {
+                self.retired.extend(expected_id);
+                self.retired.extend(ads.into_keys());
+            }
+            OpenPhase::Reconciling(session) | OpenPhase::Ready(session) => {
+                self.retired.insert(session.id);
+            }
+        }
+        true
+    }
+}
+
+/// The command list is scoped to a successfully prepared session on this connection.
 pub(super) struct CommandCatalog {
     state: Mutex<CatalogState>,
     events: broadcast::Sender<AgentStreamEvent>,
@@ -31,35 +62,55 @@ impl CommandCatalog {
         }
     }
 
-    /// The manager serializes session opens. Clear the previous generation
-    /// before dispatch, including when the peer will reuse the same ID.
-    pub(super) fn begin_open(&self) -> CatalogOpen<'_> {
-        *self.state.lock().unwrap() = CatalogState::Opening(HashMap::new());
-        CatalogOpen(self)
+    /// The manager holds its session lock across setup, including any recovery.
+    pub(super) fn setup(&self) -> CatalogSetup<'_> {
+        CatalogSetup {
+            catalog: self,
+            confirmed: false,
+        }
     }
 
-    pub(super) fn activate(&self, session_id: SessionId) {
+    pub(super) fn begin_attempt(&self, expected_id: Option<SessionId>) -> u64 {
         let mut state = self.state.lock().unwrap();
-        let commands = match &mut *state {
-            CatalogState::Opening(pending) => pending.remove(&session_id),
-            _ => None,
-        };
-        if let Some(commands) = &commands {
-            self.publish(commands);
+        if state.retire() {
+            // A replacement must clear the failed attempt's metadata even
+            // when the next session never advertises.
+            self.publish(AvailableCommandsEventData::invalidated());
         }
-        *state = CatalogState::Active { session_id, commands };
+        state.generation = state.generation.wrapping_add(1);
+        state.phase = OpenPhase::Opening {
+            expected_id,
+            ads: HashMap::new(),
+        };
+        state.generation
+    }
+
+    pub(super) fn identify(&self, generation: u64, id: SessionId) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation != generation {
+            return;
+        }
+        if let OpenPhase::Opening { ads, .. } = &mut state.phase {
+            let commands = ads.remove(&id);
+            state.phase = OpenPhase::Reconciling(SessionCommands { id, commands });
+        }
     }
 
     pub(super) fn advertise(&self, id: &SessionId, advertised: &[AvailableCommand]) {
         let mut state = self.state.lock().unwrap();
-        match &mut *state {
-            // The peer may advertise before the open response names its ID.
-            CatalogState::Opening(pending) => {
-                pending.insert(id.clone(), advertised.to_vec());
+        if state.retired.contains(id) {
+            return;
+        }
+        match &mut state.phase {
+            OpenPhase::Opening { expected_id, ads } if expected_id.as_ref().is_none_or(|known| known == id) => {
+                ads.insert(id.clone(), advertised.to_vec());
             }
-            CatalogState::Active { session_id, commands } if session_id == id => {
-                *commands = Some(advertised.to_vec());
-                self.publish(advertised);
+            OpenPhase::Reconciling(session) if &session.id == id => {
+                session.commands = Some(advertised.to_vec());
+            }
+            OpenPhase::Ready(session) if &session.id == id => {
+                session.commands = Some(advertised.to_vec());
+                self.publish(AvailableCommandsEventData::new(advertised.to_vec()));
             }
             _ => {}
         }
@@ -67,38 +118,59 @@ impl CommandCatalog {
 
     pub(super) fn with_commands<T>(&self, id: &str, read: impl FnOnce(&[AvailableCommand]) -> T) -> Option<T> {
         let state = self.state.lock().unwrap();
-        match &*state {
-            CatalogState::Active { session_id, commands } if session_id.0.as_ref() == id => {
-                commands.as_deref().map(read)
-            }
+        match &state.phase {
+            OpenPhase::Ready(session) if session.id.0.as_ref() == id => session.commands.as_deref().map(read),
             _ => None,
+        }
+    }
+
+    fn confirm(&self, id: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if !matches!(&state.phase, OpenPhase::Reconciling(session) if session.id.0.as_ref() == id) {
+            return false;
+        }
+        let OpenPhase::Reconciling(session) = std::mem::take(&mut state.phase) else {
+            unreachable!("checked under the state lock");
+        };
+        if let Some(commands) = &session.commands {
+            self.publish(AvailableCommandsEventData::new(commands.clone()));
+        }
+        state.phase = OpenPhase::Ready(session);
+        true
+    }
+
+    pub(super) fn discard(&self, known_id: Option<&str>) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(id) = known_id {
+            state.retired.insert(SessionId::new(id));
+        }
+        if state.retire() {
+            self.publish(AvailableCommandsEventData::invalidated());
         }
     }
 
     // Publish under the state lock so a concurrent advertisement cannot
     // overtake the initial list and then be overwritten by that snapshot.
-    fn publish(&self, commands: &[AvailableCommand]) {
-        let _ = self
-            .events
-            .send(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData {
-                commands: commands.to_vec(),
-            }));
+    fn publish(&self, update: AvailableCommandsEventData) {
+        let _ = self.events.send(AgentStreamEvent::AvailableCommands(update));
     }
 }
 
-pub(super) struct CatalogOpen<'a>(&'a CommandCatalog);
+pub(crate) struct CatalogSetup<'a> {
+    catalog: &'a CommandCatalog,
+    confirmed: bool,
+}
 
-impl CatalogOpen<'_> {
-    pub(super) fn finish(self, session_id: SessionId) {
-        self.0.activate(session_id);
+impl CatalogSetup<'_> {
+    pub(crate) fn finish(mut self, session_id: &str) {
+        self.confirmed = self.catalog.confirm(session_id);
     }
 }
 
-impl Drop for CatalogOpen<'_> {
+impl Drop for CatalogSetup<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap();
-        if matches!(*state, CatalogState::Opening(_)) {
-            *state = CatalogState::Inactive;
+        if !self.confirmed {
+            self.catalog.discard(None);
         }
     }
 }
@@ -108,20 +180,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn abandoned_open_discards_pending_and_previous_catalogs() {
-        let (events, _) = broadcast::channel(8);
+    fn abandoned_open_retires_pending_ids_and_clears_published_metadata() {
+        let (events, mut rx) = broadcast::channel(8);
         let catalog = CommandCatalog::new(events);
         let reused = SessionId::new("reused");
-        catalog.activate(reused.clone());
-        catalog.advertise(&reused, &[AvailableCommand::new("previous", "Previous command")]);
 
-        let open = catalog.begin_open();
+        let setup = catalog.setup();
+        let generation = catalog.begin_attempt(None);
         catalog.advertise(&reused, &[AvailableCommand::new("abandoned", "Abandoned command")]);
-        drop(open);
+        drop(setup);
 
+        let AgentStreamEvent::AvailableCommands(update) = rx.try_recv().unwrap() else {
+            panic!("abandoned opening must clear stale metadata");
+        };
+        assert!(update.invalidated);
+        assert!(update.commands.is_empty());
         assert_eq!(catalog.with_commands("reused", <[_]>::len), None);
-        catalog.begin_open().finish(reused);
+
+        let setup = catalog.setup();
+        let next = catalog.begin_attempt(None);
+        catalog.identify(generation, SessionId::new("old-response"));
+        catalog.advertise(&reused, &[AvailableCommand::new("late", "Late command")]);
+        catalog.identify(next, reused);
+        setup.finish("reused");
         assert_eq!(catalog.with_commands("reused", <[_]>::len), None);
+        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     #[test]
@@ -129,7 +212,10 @@ mod tests {
         let (events, mut rx) = broadcast::channel(8);
         let catalog = CommandCatalog::new(events);
         let active = SessionId::new("legacy");
-        catalog.activate(active.clone());
+        let setup = catalog.setup();
+        let generation = catalog.begin_attempt(Some(active.clone()));
+        catalog.identify(generation, active.clone());
+        setup.finish("legacy");
 
         assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
         assert_eq!(catalog.with_commands("legacy", <[_]>::len), None);
@@ -138,6 +224,7 @@ mod tests {
         let AgentStreamEvent::AvailableCommands(update) = rx.try_recv().unwrap() else {
             panic!("explicit advertisement must publish the active catalog");
         };
+        assert!(!update.invalidated);
         assert!(update.commands.is_empty());
         assert_eq!(catalog.with_commands("legacy", <[_]>::len), Some(0));
     }
