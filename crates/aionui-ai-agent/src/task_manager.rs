@@ -33,6 +33,15 @@ pub trait IWorkerTaskManager: Send + Sync {
     /// Get an existing task by conversation ID.
     fn get_task(&self, conversation_id: &str) -> Option<AgentInstance>;
 
+    /// Visit an initialized task at handoff. Implementations that replace
+    /// tasks must serialize replacement with the visitor. The visitor must
+    /// be synchronous and must not reenter the task manager.
+    fn visit_task(&self, conversation_id: &str, visit: &mut dyn FnMut(&AgentInstance)) {
+        if let Some(task) = self.get_task(conversation_id) {
+            visit(&task);
+        }
+    }
+
     /// Get an existing task or build a new one if none exists.
     ///
     /// Concurrent callers with the same `conversation_id` block on a shared
@@ -164,6 +173,14 @@ impl WorkerTaskManagerImpl {
 impl IWorkerTaskManager for WorkerTaskManagerImpl {
     fn get_task(&self, conversation_id: &str) -> Option<AgentInstance> {
         self.initialised_instance(conversation_id)
+    }
+
+    fn visit_task(&self, conversation_id: &str, visit: &mut dyn FnMut(&AgentInstance)) {
+        if let Some(slot) = self.tasks.get(conversation_id)
+            && let Some(task) = slot.get()
+        {
+            visit(&task.agent);
+        }
     }
 
     async fn get_or_build_task(

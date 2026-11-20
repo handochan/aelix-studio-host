@@ -195,7 +195,7 @@ async fn build_router(
     } else {
         build_ws_state(services, inbound_router)
     };
-    let router = create_router_with_all_state(services, states, ws_state);
+    let router = create_router_with_admission(services, states, ws_state, studio_auth.is_some());
     let router = match studio_auth {
         Some(auth) => auth.protect(router, services),
         None => router,
@@ -229,6 +229,15 @@ pub fn create_router_with_states(services: &AppServices, states: ModuleStates) -
 /// Full-control variant used by tests that need to override
 /// module services and WebSocket behaviour.
 pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates, ws_state: WsHandlerState) -> Router {
+    create_router_with_admission(services, states, ws_state, false)
+}
+
+fn create_router_with_admission(
+    services: &AppServices,
+    states: ModuleStates,
+    ws_state: WsHandlerState,
+    protected_studio: bool,
+) -> Router {
     let boot = Instant::now();
     tracing::info!("startup: route tree build with states started");
 
@@ -307,6 +316,11 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
     let conversation_authenticated = conversation_routes(states.conversation.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    let acp_extensions = if protected_studio {
+        aionui_conversation::acp_extension_routes(states.conversation.clone())
+    } else {
+        Router::new()
+    };
     let conversation_ops_authenticated = conversation_ops_routes(states.conversation)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
@@ -456,6 +470,7 @@ pub fn create_router_with_all_state(services: &AppServices, states: ModuleStates
             csrf_middleware,
         ))
     }
+    .merge(acp_extensions)
     .merge(ws_routes)
     .merge(runtime_team_tools)
     .merge(session_message_runtime)

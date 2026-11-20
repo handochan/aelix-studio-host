@@ -27,33 +27,34 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AGENT_METHOD_NAMES, AuthenticateResponse, ClientCapabilities, ClientNotification, ClientRequest,
-    ClientSessionCapabilities, CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse, ExtResponse,
-    ForkSessionResponse, Implementation, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
-    LoadSessionResponse, PromptResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome,
-    SessionConfigOptionsCapabilities, SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse,
-    TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse,
+    AGENT_METHOD_NAMES, AuthenticateResponse, ClientCapabilities, ClientNotification, ClientSessionCapabilities,
+    CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse, ForkSessionResponse, Implementation,
+    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionResponse, PromptResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigOptionsCapabilities,
+    SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse, TerminalExitStatus,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Lines, Responder, UntypedMessage, on_receive_notification, on_receive_request,
 };
 use aionui_common::ErrorChain;
-use futures_util::{SinkExt, StreamExt, TryStreamExt};
-use tokio::process::{ChildStdin, ChildStdout};
+use futures_util::{Sink, SinkExt, StreamExt, TryStreamExt};
+use tokio::process::ChildStdout;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
 
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
+use crate::protocol::acp_relay::{self, RelayCall, RelayConnection, RelayError, RelayWriteAdmission};
 use crate::protocol::error::AcpError;
 use crate::protocol::events::{self as stream_event, AgentStreamEvent};
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, CloseSessionRequest, ExtNotification,
-    ExtRequest, ForkSessionRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    ForkSessionRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     NewSessionRequest, NewSessionResponse, PromptRequest, ResumeSessionRequest, SetSessionConfigOptionRequest,
     SetSessionModeRequest,
 };
@@ -140,9 +141,9 @@ pub struct AcpProtocol {
     /// shared by every method. Kept alive by the background task parked
     /// on `shutdown_rx` in `connect_with`'s `main_fn`.
     connection: ConnectionTo<Agent>,
-    /// Signal dropped on `Drop` to make `main_fn` return, which in turn
-    /// lets the SDK background actors shut down cleanly.
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Signal sent on explicit shutdown or `Drop` to make `main_fn` return.
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    stdin_closed: CancellationToken,
     /// Flipped to `false` when the background task exits. Used by
     /// [`Self::is_connected`] as a fast synchronous check.
     alive: Arc<AtomicBool>,
@@ -162,6 +163,7 @@ pub struct AcpProtocol {
     /// Shared with the SDK background task's request handlers; torn down
     /// (all processes killed) when the protocol drops.
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
+    relay: Arc<RelayConnection>,
 }
 
 #[allow(dead_code)] // Full ACP method set; some methods await wiring (fork, close, list, auth, ext).
@@ -177,7 +179,7 @@ impl AcpProtocol {
     /// install its package — see [`crate::protocol::acp_init_budget`].
     #[allow(clippy::too_many_arguments)]
     pub async fn connect(
-        stdin: ChildStdin,
+        stdin: crate::capability::cli_process::AgentStdin,
         stdout: ChildStdout,
         event_tx: broadcast::Sender<AgentStreamEvent>,
         permission_tx: mpsc::Sender<PermissionRequest>,
@@ -185,8 +187,10 @@ impl AcpProtocol {
         terminal_label: &str,
         terminal_cwd: Option<std::path::PathBuf>,
         init_budget: InitBudget,
+        relay_candidate: bool,
     ) -> Result<Self, AcpError> {
         let alive = Arc::new(AtomicBool::new(true));
+        let relay = Arc::new(RelayConnection::new(relay_candidate));
         let replay_suppression = Arc::new(AtomicBool::new(false));
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
@@ -202,6 +206,7 @@ impl AcpProtocol {
         // Signal from us → background task telling `main_fn` to return,
         // which triggers a clean SDK shutdown.
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let stdin_closed = CancellationToken::new();
 
         tokio::spawn(run_sdk_background(
             stdin,
@@ -215,6 +220,8 @@ impl AcpProtocol {
             Arc::clone(&alive),
             Arc::clone(&replay_suppression),
             Arc::clone(&terminal_registry),
+            Arc::clone(&relay),
+            stdin_closed.clone().drop_guard(),
         ));
 
         // Wait for init to complete with timeout.
@@ -248,11 +255,13 @@ impl AcpProtocol {
 
         Ok(Self {
             connection,
-            shutdown_tx: Some(shutdown_tx),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
+            stdin_closed,
             alive,
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
             replay_suppression,
             terminal_registry,
+            relay,
         })
     }
 
@@ -291,10 +300,16 @@ impl AcpProtocol {
     /// parsing (typed parsing alone would silently drop it).
     pub async fn new_session(
         &self,
-        req: NewSessionRequest,
+        mut req: NewSessionRequest,
     ) -> Result<(NewSessionResponse, Option<serde_json::Value>), AcpError> {
-        self.send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
-            .await
+        let nonce = self.relay.prepare_open(&mut req.meta);
+        let (response, models) = self
+            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
+            .await?;
+        let response: NewSessionResponse = response;
+        self.relay
+            .opened(response.session_id.clone(), nonce, response.meta.as_ref());
+        Ok((response, models))
     }
 
     /// Load (resume) an existing ACP session.
@@ -315,16 +330,26 @@ impl AcpProtocol {
     /// alongside the typed response for legacy-surface agents.
     pub async fn load_session(
         &self,
-        req: LoadSessionRequest,
+        mut req: LoadSessionRequest,
     ) -> Result<(LoadSessionResponse, Option<serde_json::Value>), AcpError> {
         let _guard = ReplaySuppressionGuard::new(&self.replay_suppression);
-        self.send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
-            .await
+        let nonce = self.relay.prepare_open(&mut req.meta);
+        let sid = req.session_id.clone();
+        let (response, models) = self
+            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
+            .await?;
+        let response: LoadSessionResponse = response;
+        self.relay.opened(sid, nonce, response.meta.as_ref());
+        Ok((response, models))
     }
 
     /// Fork an existing ACP session into a new session.
-    pub async fn fork_session(&self, req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_fork).await
+    pub async fn fork_session(&self, mut req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
+        let nonce = self.relay.prepare_open(&mut req.meta);
+        let response = self.send_request(req, AGENT_METHOD_NAMES.session_fork).await?;
+        self.relay
+            .opened(response.session_id.clone(), nonce, response.meta.as_ref());
+        Ok(response)
     }
 
     /// Resume an existing ACP session.
@@ -334,6 +359,7 @@ impl AcpProtocol {
 
     /// Close an ACP session.
     pub async fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, AcpError> {
+        self.relay.invalidate();
         self.send_request(req, AGENT_METHOD_NAMES.session_close).await
     }
 
@@ -341,14 +367,40 @@ impl AcpProtocol {
     ///
     /// Blocks until the agent returns a `PromptResponse` (turn completed).
     /// Streaming events arrive via the `event_tx` broadcast channel.
-    pub async fn prompt(&self, req: PromptRequest) -> Result<PromptResponse, AcpError> {
+    pub async fn prompt(&self, req: PromptRequest, turn_id: Option<&str>) -> Result<PromptResponse, AcpError> {
         // A failure observed before handing the prompt to the SDK retains the
         // existing retry policy. After handoff there is no delivery receipt:
         // connection loss cannot prove that the agent did not execute it.
         self.ensure_connected()?;
         let method = AGENT_METHOD_NAMES.session_prompt;
         log_client_request(method, &json_str(&req));
-        let rsp = self.connection.send_request(req).block_task().await;
+        let rsp = if let Some(turn_id) = turn_id.filter(|_| self.relay.candidate) {
+            let (tx, rx) = oneshot::channel();
+            let relay = self.relay.clone();
+            let turn_id = turn_id.to_owned();
+            let reply_turn = turn_id.clone();
+            let sid = req.session_id.clone();
+            let registered = self.relay.begin_prompt(&sid, &turn_id, || {
+                let sent = self.connection.send_request(req);
+                let id = sent.id().clone();
+                let registered = sent.on_receiving_result(async move |result| {
+                    relay.end_prompt(&reply_turn);
+                    let _ = tx.send(result);
+                    Ok(())
+                });
+                (id, registered)
+            });
+            let result = match registered {
+                Ok(()) => rx
+                    .await
+                    .unwrap_or_else(|_| Err(agent_client_protocol::Error::internal_error())),
+                Err(error) => Err(error),
+            };
+            self.relay.end_prompt(&turn_id);
+            result
+        } else {
+            self.connection.send_request(req).block_task().await
+        };
         log_agent_response(method, &json_or_err(&rsp));
         rsp.map_err(|err| {
             let transport_closed = agent_client_protocol::is_incoming_transport_closed(&err) || !self.is_connected();
@@ -426,20 +478,79 @@ impl AcpProtocol {
         self.send_request(req, AGENT_METHOD_NAMES.authenticate).await
     }
 
-    /// Send an extension request (method name must start with `_`).
-    ///
-    /// Returns the raw JSON response value from the agent.
-    pub async fn ext_request(&self, req: ExtRequest) -> Result<ExtResponse, AcpError> {
-        self.ensure_connected()?;
-        let method = format!("_{}", req.method);
-        let wrapped = ClientRequest::ExtMethodRequest(req);
-        let value = self.send_request(wrapped, &method).await?;
-        let raw = serde_json::value::to_raw_value(&value).map_err(|e| AcpError::AgentInternal {
-            message: format!("Failed to convert ext response: {e}"),
-            code: -32603,
-            data: None,
+    pub fn relay_discovery(&self) -> Result<aionui_api_types::AcpExtensionDiscovery, RelayError> {
+        if !self.is_connected() {
+            return Err(RelayError::NoLiveTask);
+        }
+        self.relay.discovery()
+    }
+
+    pub fn relay_dispatch(
+        &self,
+        request: aionui_api_types::AcpExtensionRequest,
+        admission: RelayWriteAdmission,
+    ) -> Result<RelayCall, RelayError> {
+        if !self.is_connected() {
+            return Err(RelayError::StaleBinding);
+        }
+        let mut sent = None;
+        let mut call = self.relay.dispatch(request, admission, |method| {
+            // The SDK allocates and owns the ID. Sensitive params are inserted
+            // at the wire sink, after the SDK's outgoing tracing.
+            let request = UntypedMessage::new(method, serde_json::json!({})).expect("empty JSON object");
+            let sdk_request = self.connection.send_request(request);
+            let id = sdk_request.id().clone();
+            sent = Some(sdk_request);
+            id
         })?;
-        Ok(ExtResponse::new(raw.into()))
+        let sent = sent.expect("dispatched SDK request");
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let wire_reply = std::mem::replace(&mut call.reply, reply_rx);
+        let relay = self.relay.clone();
+        tokio::spawn(async move {
+            let id = sent.id().clone();
+            // Retain the budget until the SDK has actually reclaimed its
+            // pending ID, including when a standard update holds dispatch.
+            let result = if sent.block_task().await.is_ok() {
+                wire_reply.await.unwrap_or(Err(RelayError::TransportUnknown))
+            } else {
+                relay.discard_request(&id);
+                Err(RelayError::TransportUnknown)
+            };
+            let _ = reply_tx.send(result);
+        });
+        Ok(call)
+    }
+
+    pub fn relay_input_history(&self) -> Arc<acp_relay::AcpInputHistory> {
+        self.relay.input_history()
+    }
+
+    pub(crate) fn invalidate_relay(&self) {
+        self.relay.invalidate();
+    }
+
+    /// Close the relay transport after the caller has queued its final Stop.
+    /// The completion signal covers the SDK and the physical stdin writer.
+    pub(crate) fn drain_relay_on_shutdown(&self) -> Option<impl Future<Output = ()> + use<>> {
+        if !self.relay.candidate {
+            return None;
+        }
+        self.signal_shutdown();
+        let stdin_closed = self.stdin_closed.clone();
+        Some(async move {
+            // Also bound SDK shutdown if its outgoing actor cannot reach EOF.
+            let timeout = super::acp_relay_writer::STANDARD_DRAIN_TIMEOUT + std::time::Duration::from_secs(1);
+            if tokio::time::timeout(timeout, stdin_closed.cancelled()).await.is_err() {
+                warn!("Timed out waiting for ACP relay transport shutdown");
+            }
+        })
+    }
+
+    fn signal_shutdown(&self) {
+        if let Some(tx) = self.shutdown_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
     }
 
     /// Send an extension notification (fire-and-forget, method name must start with `_`).
@@ -594,9 +705,7 @@ impl Drop for AcpProtocol {
         // returns, which drives SDK shutdown. The bg_task joins naturally
         // (we don't await it here — Drop can't be async; the task is
         // `tokio::spawn`ed, so it gets cleaned up by the runtime).
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+        self.signal_shutdown();
     }
 }
 
@@ -630,7 +739,7 @@ impl Drop for ReplaySuppressionGuard<'_> {
 /// handle, then park on the shutdown signal until [`AcpProtocol`] is dropped.
 #[allow(clippy::too_many_arguments)]
 async fn run_sdk_background(
-    stdin: ChildStdin,
+    stdin: crate::capability::cli_process::AgentStdin,
     stdout: ChildStdout,
     event_tx: broadcast::Sender<AgentStreamEvent>,
     permission_tx: mpsc::Sender<PermissionRequest>,
@@ -641,6 +750,8 @@ async fn run_sdk_background(
     alive: Arc<AtomicBool>,
     replay_suppression: Arc<AtomicBool>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
+    relay: Arc<RelayConnection>,
+    mark_stdin_closed: DropGuard,
 ) {
     // Tolerant transport: intercept incoming lines *before* the SDK parses them
     // so CodeBuddy's non-standard dialect notifications (`session_end` /
@@ -654,7 +765,27 @@ async fn run_sdk_background(
     let dialect_event_tx = event_tx.clone();
     let incoming_alive = Arc::clone(&alive);
     let eof_alive = Arc::clone(&alive);
-    let incoming = FramedRead::new(stdout, LinesCodec::new())
+    let wire_in = relay.clone();
+    let candidate = relay.candidate;
+    let stdout = FramedRead::new(stdout, acp_relay::stdio_codec(candidate));
+    let (raw_incoming, drain_stdout) = if candidate {
+        let stdout = Arc::new(tokio::sync::Mutex::new(stdout));
+        let incoming = futures_util::stream::unfold(stdout.clone(), |stdout| async move {
+            let line = stdout.lock().await.next().await?;
+            Some((line, stdout))
+        });
+        (futures_util::future::Either::Left(incoming), Some(stdout))
+    } else {
+        (futures_util::future::Either::Right(stdout), None)
+    };
+    let incoming = raw_incoming
+        .map(move |line| {
+            if candidate {
+                line.and_then(acp_relay::check_stdio_line)
+            } else {
+                line
+            }
+        })
         .map_err(std::io::Error::other)
         .inspect(move |line| {
             if line.is_err() {
@@ -669,7 +800,12 @@ async fn run_sdk_background(
         }))
         .filter_map(move |line: std::io::Result<String>| {
             let dialect_event_tx = dialect_event_tx.clone();
+            let wire = wire_in.clone();
             async move {
+                let line = match line {
+                    Ok(line) if wire.candidate => Ok(wire.incoming(line)?),
+                    other => other,
+                };
                 match line {
                     Ok(line) => match acp_dialect::classify_incoming_line(&line) {
                         acp_dialect::LineDisposition::Forward(line) => Some(Ok(line)),
@@ -688,15 +824,31 @@ async fn run_sdk_background(
                 }
             }
         });
-    // Pin the sink item type to `String` (LinesCodec encodes any `AsRef<str>`,
-    // so the item type would otherwise be ambiguous) — `Lines` requires a
-    // `Sink<String>`.
-    let outgoing_alive = Arc::clone(&alive);
-    let outgoing = SinkExt::<String>::sink_map_err(FramedWrite::new(stdin, LinesCodec::new()), move |err| {
-        outgoing_alive.store(false, Ordering::Release);
-        std::io::Error::other(err)
+    let (local_tx, local_rx) = mpsc::unbounded_channel();
+    let incoming = futures_util::stream::unfold((Box::pin(incoming), local_rx), |(mut wire, mut local)| async move {
+        let item = tokio::select! {
+            biased;
+            Some(line) = local.recv() => Some(line),
+            item = wire.next() => item,
+        };
+        item.map(|item| (item, (wire, local)))
     });
-    let transport = Lines::new(outgoing, incoming);
+    let mut writer_task = None;
+    let outgoing: std::pin::Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>> = if candidate {
+        let (sink, task) = super::acp_relay_writer::sink(stdin, relay.clone(), local_tx, alive.clone());
+        writer_task = Some(task);
+        Box::pin(sink)
+    } else {
+        let alive = alive.clone();
+        Box::pin(SinkExt::<String>::sink_map_err(
+            FramedWrite::new(stdin, LinesCodec::new()),
+            move |error| {
+                alive.store(false, Ordering::Release);
+                std::io::Error::other(error)
+            },
+        ))
+    };
+    let transport = Lines::new(outgoing, Box::pin(incoming));
 
     // `init_tx` / `ready_tx` are consumed inside the main_fn closure; wrap
     // them in Option so we can .take() without moving out of captured state.
@@ -706,6 +858,7 @@ async fn run_sdk_background(
     let phase = Arc::new(Mutex::new(AcpConnectionPhase::Starting));
     let phase_for_main = Arc::clone(&phase);
 
+    let handshake_relay = relay.clone();
     let result = Client
         .builder()
         .on_receive_notification(
@@ -713,6 +866,7 @@ async fn run_sdk_background(
                 let event_tx = event_tx.clone();
                 let notification_tx = notification_tx.clone();
                 let replay_suppression = Arc::clone(&replay_suppression);
+                let relay = relay.clone();
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
                     // Fan out the raw SDK notification to the manager's apply-loop
                     // FIRST, so session state is consistent by the time the UI
@@ -728,7 +882,16 @@ async fn run_sdk_background(
                     // notification_tx (event_tracker still needs metadata like
                     // available_commands_update), but skip the UI broadcast.
                     if !replay_suppression.load(Ordering::Acquire) {
-                        handle_session_notification(notification, &event_tx).await;
+                        if matches!(
+                            notification.update,
+                            agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(_)
+                        ) {
+                            if let Some(event) = relay.consumed_input(&notification) {
+                                let _ = event_tx.send(event);
+                            }
+                        } else {
+                            handle_session_notification(notification, &event_tx).await;
+                        }
                     }
                     Ok(())
                 }
@@ -800,7 +963,13 @@ async fn run_sdk_background(
             // Step 1 — initialize handshake. main_fn is the canonical place
             // to call `block_task` (see SDK `connect_with` doc example).
             let init_result = {
-                let req = build_initialize_request();
+                let mut req = build_initialize_request();
+                if handshake_relay.candidate {
+                    req.client_capabilities.meta = Some(serde_json::Map::from_iter([(
+                        acp_relay::META_KEY.into(),
+                        serde_json::json!({ "version": 1, "notifications": false }),
+                    )]));
+                }
                 log_client_request("initialize", &json_str(&req));
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::Initializing;
                 let raw = connection.send_request(req).block_task().await;
@@ -813,6 +982,7 @@ async fn run_sdk_background(
             };
             match init_result {
                 Ok(resp) => {
+                    handshake_relay.negotiate(&resp);
                     let _ = tx.send(Ok(resp));
                 }
                 Err(err) => {
@@ -836,6 +1006,7 @@ async fn run_sdk_background(
             // releases the shutdown oneshot.
             if let Some(rx) = shutdown_rx.take() {
                 let _ = rx.await;
+                handshake_relay.invalidate();
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::ShuttingDown;
             }
             Ok(())
@@ -843,8 +1014,37 @@ async fn run_sdk_background(
         .await;
 
     alive.store(false, Ordering::Release);
-
+    relay.disconnected();
     let close_phase = *phase.lock().unwrap();
+    if let Some(writer) = writer_task {
+        let graceful = result.is_ok() && close_phase == AcpConnectionPhase::ShuttingDown;
+        let finish = super::acp_relay_writer::finish(writer, graceful);
+        if let Some(stdout) = drain_stdout.filter(|_| graceful) {
+            // After the SDK drops its read stream, continue draining stdout
+            // while writing so a full-duplex peer can still consume stdin.
+            let discard_stdout = async {
+                let mut stdout = stdout.lock().await;
+                let _ = tokio::io::copy(stdout.get_mut(), &mut tokio::io::sink()).await;
+            };
+            tokio::pin!(finish, discard_stdout);
+            let stdout_closed = tokio::select! {
+                () = &mut finish => false,
+                () = &mut discard_stdout => {
+                    finish.await;
+                    true
+                }
+            };
+            drop(mark_stdin_closed);
+            // A peer may finish reading the last command only after stdin
+            // closes. Let it finish writing while the process exits.
+            if !stdout_closed {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), discard_stdout).await;
+            }
+        } else {
+            finish.await;
+        }
+    }
+
     match result {
         Ok(_) => debug!(?close_phase, "ACP SDK connection closed normally"),
         Err(e) => warn!(?close_phase, error = %ErrorChain(&e), "ACP SDK connection closed with error"),

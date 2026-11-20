@@ -235,8 +235,10 @@ async fn spawn_and_connect_acp_once(
     params: &AcpSessionParams,
     runtime: &AgentRuntime,
 ) -> Result<AcpStartupConnection, AcpStartupConnectError> {
+    let relay_candidate = crate::protocol::acp_relay::is_builtin_aelix(&params.metadata);
+    // Extension content must not reach raw stderr logs or crash diagnostics.
     let process = Arc::new(
-        CliAgentProcess::spawn_for_sdk(params.command_spec.clone())
+        CliAgentProcess::spawn_sdk(params.command_spec.clone(), relay_candidate)
             .await
             .map_err(AcpStartupConnectError::Agent)?,
     );
@@ -277,6 +279,7 @@ async fn spawn_and_connect_acp_once(
         &params.conversation_id,
         Some(std::path::PathBuf::from(&params.workspace.path)),
         crate::protocol::acp_init_budget::init_budget(&params.command_spec),
+        relay_candidate,
     );
     tokio::pin!(connect_fut);
     let protocol = tokio::select! {
@@ -627,6 +630,28 @@ pub struct AcpAgentManager {
 }
 
 impl AcpAgentManager {
+    pub fn relay_owned_by(&self, owner: &str) -> bool {
+        self.params.user_id == owner
+    }
+
+    pub fn relay_discovery(
+        &self,
+    ) -> Result<aionui_api_types::AcpExtensionDiscovery, crate::protocol::acp_relay::RelayError> {
+        self.protocol.relay_discovery()
+    }
+
+    pub fn relay_dispatch(
+        &self,
+        request: aionui_api_types::AcpExtensionRequest,
+        admission: crate::protocol::acp_relay::RelayWriteAdmission,
+    ) -> Result<crate::protocol::acp_relay::RelayCall, crate::protocol::acp_relay::RelayError> {
+        self.protocol.relay_dispatch(request, admission)
+    }
+
+    pub fn relay_input_history(&self) -> Arc<crate::protocol::acp_relay::AcpInputHistory> {
+        self.protocol.relay_input_history()
+    }
+
     pub fn with_session_repository(mut self, repo: Arc<dyn aionui_db::IAcpSessionRepository>) -> Self {
         self.session_repo = Some(repo);
         self
@@ -1681,6 +1706,13 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
     }
 
     fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AgentError> {
+        self.start_kill(reason, false);
+        Ok(())
+    }
+}
+
+impl AcpAgentManager {
+    fn start_kill(&self, reason: Option<AgentKillReason>, graceful: bool) -> tokio::task::JoinHandle<()> {
         info!(
             conversation_id = %self.params.conversation_id,
             ?reason,
@@ -1689,6 +1721,7 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
 
         // Mark closing to prevent reconnect attempts
         self.permission_router.set_closing();
+        self.protocol.invalidate_relay();
 
         let backend = self.params.metadata.backend.as_deref().unwrap_or("unknown");
         let pid = self.process.pid();
@@ -1719,8 +1752,24 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
         let backend = backend.to_owned();
         let idle_timeout = matches!(reason, Some(AgentKillReason::IdleTimeout));
 
+        self.permission_router.cancel_all();
+        let drain = if graceful {
+            self.protocol.drain_relay_on_shutdown()
+        } else {
+            None
+        };
+
+        emit_kill_terminal(&self.runtime, reason, |close_reason| {
+            if let Ok(mut session) = self.session.try_write() {
+                session.record_close_reason(Some(close_reason));
+            }
+        });
+
         tokio::spawn(async move {
             let started_at = now_ms();
+            if let Some(drain) = drain {
+                drain.await;
+            }
             match process.kill(grace).await {
                 Ok(()) => {
                     if idle_timeout {
@@ -1750,30 +1799,16 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
                     );
                 }
             }
-        });
-
-        self.permission_router.cancel_all();
-
-        emit_kill_terminal(&self.runtime, reason, |close_reason| {
-            if let Ok(mut session) = self.session.try_write() {
-                session.record_close_reason(Some(close_reason));
-            }
-        });
-
-        Ok(())
+        })
     }
-}
 
-impl AcpAgentManager {
     pub fn kill_and_wait(
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
-        let process = Arc::clone(&self.process);
-        let grace = Duration::from_millis(ACP_KILL_GRACE_MS);
+        let process_shutdown = self.start_kill(reason, reason.is_none());
         Box::pin(async move {
-            let _ = process.kill(grace).await;
+            let _ = process_shutdown.await;
         })
     }
 
@@ -1809,7 +1844,7 @@ impl AcpAgentManager {
 mod tests {
     use super::{
         build_acp_final_input_dump_value, emit_kill_terminal, exit_status_parts, normalize_config_option_request_value,
-        register_spawned_process, user_facing_message,
+        user_facing_message,
     };
     use crate::agent_runtime::AgentRuntime;
     use crate::error::AgentError;
@@ -2389,6 +2424,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn register_failure_kills_spawned_process() {
+        use super::register_spawned_process;
         use std::os::unix::fs::PermissionsExt;
         use std::path::PathBuf;
 

@@ -1,7 +1,5 @@
 use aionui_common::{CommandSpec, ErrorChain};
 use aionui_runtime::Builder as CmdBuilder;
-#[cfg(test)]
-use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
@@ -10,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::AgentError;
 
-use super::{CliAgentProcess, STDERR_BUFFER_MAX, prepare_command_cwd, tracked_process_group_id};
+use super::{AgentStdin, CliAgentProcess, STDERR_BUFFER_MAX, prepare_command_cwd, tracked_process_group_id};
 
 impl CliAgentProcess {
     /// Spawn a new CLI subprocess in **SDK mode**.
@@ -23,6 +21,10 @@ impl CliAgentProcess {
     /// - stderr buffering
     /// - Process exit monitoring
     pub async fn spawn_for_sdk(config: CommandSpec) -> Result<Self, AgentError> {
+        Self::spawn_sdk(config, false).await
+    }
+
+    pub(crate) async fn spawn_sdk(config: CommandSpec, relay_candidate: bool) -> Result<Self, AgentError> {
         let mut cmd = CmdBuilder::new(&config.command);
         let agent_env = aionui_runtime::agent_process_env().await;
         cmd.args(&config.args)
@@ -31,7 +33,23 @@ impl CliAgentProcess {
             .envs(config.env.iter().map(|e| (&e.name, &e.value)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(if relay_candidate {
+                std::process::Stdio::null()
+            } else {
+                std::process::Stdio::piped()
+            });
+
+        #[cfg(windows)]
+        let direct: Option<AgentStdin> = if relay_candidate {
+            let (reader, writer) = super::direct_stdin::DirectStdin::pipe()
+                .map_err(|error| AgentError::internal(format!("Could not prepare nonblocking ACP stdin: {error}")))?;
+            cmd.stdin(std::process::Stdio::from(reader));
+            Some(Box::new(writer))
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let direct: Option<AgentStdin> = None;
 
         if let Some(ref cwd) = config.cwd {
             cmd.current_dir(prepare_command_cwd(cwd)?);
@@ -53,14 +71,13 @@ impl CliAgentProcess {
             error!(pid, "Failed to capture stdout from child process");
             AgentError::internal("Failed to capture stdout from child process")
         })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            error!(pid, "Failed to capture stderr from child process");
-            AgentError::internal("Failed to capture stderr from child process")
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            error!(pid, "Failed to capture stdin for child process");
-            AgentError::internal("Failed to capture stdin for child process")
-        })?;
+        let stderr = child.stderr.take();
+        let stdin = direct
+            .or_else(|| child.stdin.take().map(|writer| Box::new(writer) as AgentStdin))
+            .ok_or_else(|| {
+                error!(pid, "Failed to capture stdin for child process");
+                AgentError::internal("Failed to capture stdin for child process")
+            })?;
 
         let (exit_tx, exit_rx) = watch::channel(None);
 
@@ -68,6 +85,7 @@ impl CliAgentProcess {
         let stderr_buffer = Arc::new(Mutex::new(String::new()));
         let stderr_buf_clone = Arc::clone(&stderr_buffer);
         let stderr_handle = tokio::spawn(async move {
+            let Some(stderr) = stderr else { return };
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
 
@@ -130,14 +148,14 @@ mod tests {
     use super::*;
     use aionui_common::EnvVar;
     use std::time::Duration;
-    use tokio::io::AsyncReadExt;
-    use tokio::time::timeout;
 
     // ── SDK mode tests ───────────────────────────────────────────────
 
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_for_sdk_uses_clean_agent_env_and_explicit_overrides() {
+        use tokio::{io::AsyncReadExt as _, time::timeout};
+
         const CHILD_ENV: &str = "AIONUI_TEST_SDK_AGENT_ENV_CHILD";
 
         if std::env::var_os(CHILD_ENV).is_none() {
@@ -208,7 +226,7 @@ printf '%s\n' \
     }
 
     #[cfg(unix)]
-    fn write_fake_shell(path: &Path, contents: &str) {
+    fn write_fake_shell(path: &std::path::Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::write(path, contents).unwrap();

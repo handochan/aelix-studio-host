@@ -1,5 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
+type RevocationFence = dyn Fn(&mut dyn FnMut()) + Send + Sync;
+
 type Revalidation = dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync;
 
 /// Browser session checks applied to a WebSocket after its initial admission.
@@ -7,6 +9,7 @@ type Revalidation = dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Sen
 pub struct WsSessionGuard {
     current: Arc<dyn Fn() -> bool + Send + Sync>,
     revalidate: Arc<Revalidation>,
+    revocation_fence: Option<Arc<RevocationFence>>,
 }
 
 impl WsSessionGuard {
@@ -21,6 +24,26 @@ impl WsSessionGuard {
         Self {
             current: Arc::new(current),
             revalidate: Arc::new(move || Box::pin(revalidate())),
+            revocation_fence: None,
+        }
+    }
+
+    pub fn with_revocation_fence(mut self, fence: impl Fn(&mut dyn FnMut()) + Send + Sync + 'static) -> Self {
+        self.revocation_fence = Some(Arc::new(fence));
+        self
+    }
+
+    /// Run a nonblocking write under the token issuer's revocation fence.
+    pub fn while_current(&self, write: &mut dyn FnMut()) {
+        let mut checked = || {
+            if self.valid() {
+                write();
+            }
+        };
+        if let Some(fence) = &self.revocation_fence {
+            fence(&mut checked);
+        } else {
+            checked();
         }
     }
 

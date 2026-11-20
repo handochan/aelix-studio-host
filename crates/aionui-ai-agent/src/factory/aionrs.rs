@@ -932,15 +932,15 @@ mod model_settings_test;
 mod tests {
     use super::*;
     use aionui_realtime::BroadcastEventBus;
+    #[cfg(unix)]
     use aionui_runtime::{ManagedResourcesMode, init as init_runtime, set_managed_resources_mode};
-    use std::sync::OnceLock;
-    use std::{
-        mem,
-        path::{Path, PathBuf},
-    };
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::{mem, path::PathBuf, sync::OnceLock};
 
     const TEST_USER_ID: &str = "user-1";
 
+    #[cfg(unix)]
     fn path_test_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))

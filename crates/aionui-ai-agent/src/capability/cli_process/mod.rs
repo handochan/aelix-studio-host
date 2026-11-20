@@ -4,12 +4,14 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::process::ChildStdout;
 use tokio::sync::{Mutex, watch};
 use tracing::{debug, warn};
 
 use crate::error::AgentError;
 
+#[cfg(windows)]
+mod direct_stdin;
 mod spawn_sdk;
 mod stderr_monitor;
 
@@ -44,6 +46,8 @@ pub(super) fn prepare_command_cwd(cwd: &str) -> Result<PathBuf, AgentError> {
     }
 }
 
+pub type AgentStdin = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
 /// Manages a CLI subprocess used by SDK-based agent transports.
 ///
 /// ACP sessions call [`take_stdio`](Self::take_stdio) to hand raw stdin/stdout
@@ -52,7 +56,7 @@ pub(super) fn prepare_command_cwd(cwd: &str) -> Result<PathBuf, AgentError> {
 pub struct CliAgentProcess {
     /// Stdin writer, wrapped in Mutex for concurrent send safety.
     /// Set to `None` once stdin is closed, taken, or process exited.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: Mutex<Option<AgentStdin>>,
     /// Raw stdout handle. Only available before background tasks start or
     /// in SDK mode (taken by `take_stdio`). `None` once consumed.
     stdout: Mutex<Option<ChildStdout>>,
@@ -78,7 +82,7 @@ impl CliAgentProcess {
     /// Only available in SDK mode (after [`spawn_for_sdk`](Self::spawn_for_sdk)).
     /// Can only be called once. Returns `None` on subsequent calls or if
     /// spawned in legacy mode.
-    pub async fn take_stdio(&self) -> Option<(ChildStdin, ChildStdout)> {
+    pub async fn take_stdio(&self) -> Option<(AgentStdin, ChildStdout)> {
         let stdin = self.stdin.lock().await.take()?;
         let stdout = self.stdout.lock().await.take()?;
         Some((stdin, stdout))

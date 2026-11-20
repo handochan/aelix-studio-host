@@ -238,6 +238,7 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
             timeout: Duration::from_secs(INIT_TIMEOUT_SECS),
             cold_start: false,
         },
+        false,
     );
     let protocol = tokio::select! {
         biased;

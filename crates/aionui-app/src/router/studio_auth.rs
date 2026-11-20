@@ -8,6 +8,7 @@ use aionui_auth::{
     extract_token_from_headers,
 };
 use aionui_common::ApiError;
+use aionui_conversation::AcpExtensionAdmission;
 use aionui_db::IUserRepository;
 use axum::Router;
 use axum::extract::{Request, State};
@@ -44,6 +45,7 @@ impl StudioAuth {
             jwt: services.jwt_service.clone(),
             users: services.user_repo.clone(),
             runtime_tokens: services.runtime_token_service.clone(),
+            cookies: services.cookie_config.clone(),
         };
         router.layer(middleware::from_fn_with_state(Arc::new(state), admit))
     }
@@ -78,6 +80,7 @@ struct AdmissionState {
     jwt: Arc<JwtService>,
     users: Arc<dyn IUserRepository>,
     runtime_tokens: Arc<RuntimeTokenService>,
+    cookies: Arc<aionui_auth::CookieConfig>,
 }
 
 async fn admit(
@@ -95,7 +98,21 @@ async fn admit(
     }
 
     let path = request.uri().path();
-    let websocket = path == "/ws" || request.headers().contains_key(header::UPGRADE);
+    let acp_relay = path
+        .strip_prefix("/api/conversations/")
+        .and_then(|path| path.strip_suffix("/acp-extensions"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+    if acp_relay
+        && (request.headers().contains_key(RUNTIME_TOKEN_HEADER)
+            || request.headers().contains_key(RUNTIME_USER_ID_HEADER)
+            || request.headers().contains_key(RUNTIME_CONVERSATION_ID_HEADER)
+            || request.headers().contains_key("x-aioncore-bootstrap-secret")
+            || request.headers().contains_key("x-aionui-hook-token"))
+    {
+        return Err(forbidden());
+    }
+    let realtime = path == "/ws";
+    let websocket = realtime || request.headers().contains_key(header::UPGRADE);
     if desktop {
         let headers = request.headers();
         if (headers.contains_key(header::ORIGIN) || websocket || request.method() == Method::OPTIONS)
@@ -103,7 +120,16 @@ async fn admit(
         {
             return Err(forbidden());
         }
-        if path == "/ws" {
+        if acp_relay {
+            if headers.contains_key(header::AUTHORIZATION) || extract_token_from_headers(headers).is_some() {
+                return Err(forbidden());
+            }
+            request.extensions_mut().insert(AcpExtensionAdmission {
+                owner: OPERATOR.into(),
+                browser_session: None,
+            });
+        }
+        if realtime {
             let user = state
                 .users
                 .find_active_by_id(OPERATOR)
@@ -177,12 +203,12 @@ async fn admit(
     if claims.session_generation != user.session_generation {
         return Err(unauthenticated());
     }
-    if matches!(path, "/ws" | "/api/stt/stream") {
+    if acp_relay || matches!(path, "/ws" | "/api/stt/stream") {
         let jwt = Arc::clone(&state.jwt);
         let users = Arc::clone(&state.users);
         let expires = claims.exp;
         let generation = claims.session_generation;
-        request.extensions_mut().insert(aionui_common::WsSessionGuard::new(
+        let guard = aionui_common::WsSessionGuard::new(
             move || expires > (aionui_common::now_ms() / 1000) as u64 && jwt.verify_access(&token).is_ok(),
             move || {
                 let users = Arc::clone(&users);
@@ -191,7 +217,17 @@ async fn admit(
                         Ok(Some(user)) if user.session_generation == generation)
                 }
             },
-        ));
+        );
+        if acp_relay {
+            let jwt = state.jwt.clone();
+            let guard = guard.with_revocation_fence(move |write| jwt.with_revocation_fence(write));
+            request.extensions_mut().insert(AcpExtensionAdmission {
+                owner: OPERATOR.into(),
+                browser_session: Some((guard, generation)),
+            });
+            return aionui_auth::csrf_middleware(State(state.cookies.clone()), request, next).await;
+        }
+        request.extensions_mut().insert(guard);
     }
     Ok(next.run(request).await)
 }

@@ -72,3 +72,24 @@ impl ConversationService {
         Some(row)
     }
 }
+
+pub(crate) fn broadcast_finished_user_message(
+    broadcaster: &dyn aionui_realtime::EventBroadcaster,
+    user_id: &str,
+    row: &MessageRow,
+    text: &str,
+) {
+    broadcaster.broadcast(aionui_api_types::WebSocketMessage::new(
+        "message.userCreated",
+        serde_json::json!({
+            "user_id": user_id,
+            "conversation_id": row.conversation_id,
+            "msg_id": row.msg_id,
+            "content": text,
+            "position": "right",
+            "status": "finish",
+            "hidden": row.hidden,
+            "created_at": row.created_at,
+        }),
+    ));
+}

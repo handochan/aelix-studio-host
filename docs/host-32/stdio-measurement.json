@@ -1,0 +1,85 @@
+{
+  "target": "darwin-arm64",
+  "acp": "3bdb945142373629d48e51571d675998da7a46c8",
+  "acpWheelSha256": "795e9434b9a41fee309b3786598f13f4d40818b3185b15171b2227759307f8ad",
+  "native": "e19ab55e17e871a40356fc9802f3f6669ca727de",
+  "nativeWheels": [
+    {
+      "distribution": "aelix",
+      "version": "0.1.0b2",
+      "filename": "aelix-0.1.0b2-py3-none-any.whl",
+      "sha256": "ff9b0b5b6f654542eb1e505418f8057cfe1fa59176cbf9b571a559aedd58f4aa",
+      "size": 23230
+    },
+    {
+      "distribution": "aelix-agent-core",
+      "version": "0.1.0b2",
+      "filename": "aelix_agent_core-0.1.0b2-py3-none-any.whl",
+      "sha256": "4bf91cdcfd35e2c5ce21acd32d47a61d9e83cb8b900190d5c73d917a3c087c4f",
+      "size": 279612
+    },
+    {
+      "distribution": "aelix-ai",
+      "version": "0.1.0b2",
+      "filename": "aelix_ai-0.1.0b2-py3-none-any.whl",
+      "sha256": "25629aac9ea5555d2d7b0a1b73f3ed6f39798da2516ab3c4f6eaecec5c417d39",
+      "size": 491562
+    },
+    {
+      "distribution": "aelix-coding-agent",
+      "version": "0.1.0b2",
+      "filename": "aelix_coding_agent-0.1.0b2-py3-none-any.whl",
+      "sha256": "be7297c3a454593f480b7696df6c671749fbc801221f09080769c3ff10725546",
+      "size": 1796183
+    }
+  ],
+  "measurements": {
+    "text": {
+      "stdinBytes": 193,
+      "stdoutMaxBytes": 217,
+      "current_mode_update": 188,
+      "agent_message_chunk": 217,
+      "usage_update": 183
+    },
+    "maxPromptImage": {
+      "stdinBytes": 11184985,
+      "stdoutMaxBytes": 217,
+      "agent_message_chunk": 217,
+      "usage_update": 185
+    },
+    "maxEmbeddedResource": {
+      "stdinBytes": 16773119,
+      "stdoutMaxBytes": 217,
+      "agent_message_chunk": 217,
+      "usage_update": 188
+    },
+    "imageToolResult": {
+      "stdinBytes": 193,
+      "stdoutMaxBytes": 4719325,
+      "tool_call": 404,
+      "tool_call_update": 4719325,
+      "toolImageBytes": 3538941,
+      "imageToolResultFrameBytes": 4719325,
+      "agent_message_chunk": 217,
+      "usage_update": 188
+    },
+    "embeddedResourceAtAdapterLimit": {
+      "stdinBytes": 16777215,
+      "stdoutMaxBytes": 217,
+      "agent_message_chunk": 217,
+      "rpcError": -33002
+    },
+    "loadReplay": {
+      "stdinBytes": 216,
+      "stdoutMaxBytes": 16777274,
+      "available_commands_update": 3295,
+      "user_message_chunk": 16777274,
+      "agent_message_chunk": 255,
+      "tool_call": 404,
+      "tool_call_update": 4719325,
+      "toolImageBytes": 3538941,
+      "imageToolResultFrameBytes": 4719325,
+      "usage_update": 188
+    }
+  }
+}

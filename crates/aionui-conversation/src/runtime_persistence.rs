@@ -39,6 +39,11 @@ impl RuntimePersistenceCoordinator {
         Self { runtime_state }
     }
 
+    pub(crate) fn message_time(&self, conversation_id: &str, consumed_input: bool) -> i64 {
+        self.runtime_state
+            .message_time(conversation_id, aionui_common::now_ms(), consumed_input)
+    }
+
     pub fn lifecycle_for(&self, conversation_id: &str) -> RuntimeLifecycleState {
         self.runtime_state.lifecycle_for(conversation_id)
     }

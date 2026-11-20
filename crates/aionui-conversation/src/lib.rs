@@ -2,6 +2,9 @@
 
 //! Conversation and message CRUD with streaming relay and event emission.
 mod acp_error_recovery;
+mod acp_extension;
+mod acp_extension_routes;
+pub use acp_extension_routes::{AcpExtensionAdmission, acp_extension_routes};
 mod agent_health_policy;
 mod background_stream;
 mod convert;

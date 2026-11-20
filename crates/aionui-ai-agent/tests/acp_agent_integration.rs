@@ -202,6 +202,7 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::WorkflowProgress(_) => "WorkflowProgress",
         AgentStreamEvent::AcpDialectSignal(_) => "AcpDialectSignal",
         AgentStreamEvent::MessageLifecycle(_) => "MessageLifecycle",
+        AgentStreamEvent::AcpConsumedUserInput { .. } => "AcpConsumedUserInput",
     }
 }
 

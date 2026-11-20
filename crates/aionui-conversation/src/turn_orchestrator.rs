@@ -300,6 +300,10 @@ impl ConversationTurnOrchestrator {
             // the same card counting up — so these totals span the attempts.
             .with_superseding_tip_totals(input.superseding_tips.clone());
 
+            let relay = match &agent {
+                AgentInstance::Acp(agent) => relay.with_acp_input_history(agent.relay_input_history()),
+                _ => relay,
+            };
             let rx = agent.subscribe();
             if let Some(mode) = input
                 .required_runtime_mode

@@ -694,11 +694,13 @@ mod tests {
         IAgentMetadataRepository, SqliteAgentMetadataRepository, UpsertAgentMetadataParams, init_database_memory,
     };
     use aionui_realtime::BroadcastEventBus;
+    #[cfg(unix)]
     use aionui_runtime::{ManagedResourcesMode, init as init_runtime, set_managed_resources_mode};
-    use std::sync::OnceLock;
+    #[cfg(unix)]
     use std::{
         mem,
         path::{Path, PathBuf},
+        sync::OnceLock,
     };
 
     const TEST_USER_ID: &str = "user-1";
@@ -742,11 +744,13 @@ mod tests {
         .to_string()
     }
 
+    #[cfg(unix)]
     fn path_test_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
+    #[cfg(unix)]
     fn is_npx_command_path(command: &str) -> bool {
         command == "npx" || command.ends_with("/npx") || command.ends_with("\\npx.cmd")
     }

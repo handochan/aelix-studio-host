@@ -435,7 +435,7 @@ impl AcpAgentManager {
         // earlier turn cannot override a later benign empty turn.
         self.process.clear_stderr().await;
 
-        let prompt_response = match self.protocol.prompt(request).await {
+        let prompt_response = match self.protocol.prompt(request, data.turn_id.as_deref()).await {
             Ok(response) => response,
             Err(error) => {
                 if consumed_prelude && prompt_was_rejected(&error, &mut probe_rx) {

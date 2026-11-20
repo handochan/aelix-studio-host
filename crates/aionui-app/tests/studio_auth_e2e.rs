@@ -18,6 +18,10 @@ struct StudioHost {
     runtime_tokens: std::sync::Arc<aionui_ai_agent::RuntimeTokenService>,
     _dir: Option<tempfile::TempDir>,
     users: std::sync::Arc<dyn aionui_db::IUserRepository>,
+    #[cfg(unix)]
+    conversations: aionui_conversation::ConversationService,
+    #[cfg(unix)]
+    tasks: std::sync::Arc<dyn aionui_ai_agent::IWorkerTaskManager>,
 }
 
 impl StudioHost {
@@ -73,6 +77,10 @@ impl StudioHost {
             runtime_tokens: services.runtime_token_service,
             _dir: None,
             users: services.user_repo,
+            #[cfg(unix)]
+            conversations: services.conversation_service,
+            #[cfg(unix)]
+            tasks: services.worker_task_manager,
         }
     }
 
@@ -644,3 +652,7 @@ async fn helper_rename_changes_only_the_name_of_its_own_conversation() {
     assert_eq!(current["data"]["name"], "Renamed");
     assert_eq!(current["data"]["extra"]["fixture_key"], "original");
 }
+
+#[cfg(unix)]
+#[path = "studio_auth_e2e/acp_relay.rs"]
+mod acp_relay;
