@@ -969,20 +969,24 @@ async fn run_sdk_background(
             // releases the shutdown oneshot.
             if let Some(rx) = shutdown_rx.take() {
                 let _ = rx.await;
+                handshake_relay.invalidate();
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::ShuttingDown;
             }
             Ok(())
         })
         .await;
 
-    if let Some(writer) = writer_task {
-        writer.abort();
-        let _ = writer.await;
-    }
     alive.store(false, Ordering::Release);
     relay.disconnected();
-
     let close_phase = *phase.lock().unwrap();
+    if let Some(writer) = writer_task {
+        super::acp_relay_writer::finish(
+            writer,
+            result.is_ok() && close_phase == AcpConnectionPhase::ShuttingDown,
+        )
+        .await;
+    }
+
     match result {
         Ok(_) => debug!(?close_phase, "ACP SDK connection closed normally"),
         Err(e) => warn!(?close_phase, error = %ErrorChain(&e), "ACP SDK connection closed with error"),

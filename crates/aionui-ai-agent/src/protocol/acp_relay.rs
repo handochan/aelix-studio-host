@@ -135,6 +135,7 @@ struct ActivePrompt {
     seen: HashSet<String>,
     request_id: RequestId,
     written: bool,
+    receiving_on_wire: bool,
 }
 
 /// Checks carried from authenticated admission to the first stdio write.
@@ -217,8 +218,19 @@ pub(super) struct RelayFrame {
     pub admission: RelayWriteAdmission,
 }
 
+pub(super) struct StandardFrame {
+    pub line: String,
+    pub prompt_id: Option<RequestId>,
+}
+
+impl StandardFrame {
+    fn plain(line: String) -> Self {
+        Self { line, prompt_id: None }
+    }
+}
+
 pub(super) enum OutgoingFrame {
-    Standard(String),
+    Standard(StandardFrame),
     Relay(RelayFrame),
     Drop,
 }
@@ -236,14 +248,25 @@ struct FrameHeader<'a> {
     id: Option<RequestId>,
     #[serde(default, borrow)]
     method: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    params: Option<&'a RawValue>,
 }
 
 impl FrameHeader<'_> {
-    fn is_relay_method(&self) -> bool {
-        self.method
-            .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
-            .is_some_and(|method| method.starts_with(METHOD_PREFIX))
+    fn method_name(&self) -> Option<String> {
+        self.method.and_then(|raw| serde_json::from_str(raw.get()).ok())
     }
+}
+
+#[derive(Deserialize)]
+struct UpdateHeader {
+    update: UpdateKind,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateKind {
+    session_update: String,
 }
 
 pub struct RelayCall {
@@ -375,15 +398,15 @@ impl RelayConnection {
 
     pub(super) fn outgoing(&self, line: String) -> std::io::Result<OutgoingFrame> {
         if !self.candidate {
-            return Ok(OutgoingFrame::Standard(line));
+            return Ok(OutgoingFrame::Standard(StandardFrame::plain(line)));
         }
         let Ok(header) = serde_json::from_str::<FrameHeader>(&line) else {
-            return Ok(OutgoingFrame::Standard(line));
+            return Ok(OutgoingFrame::Standard(StandardFrame::plain(line)));
         };
-        let (Some(id), Some(method)) = (header.id.as_ref(), header.method) else {
-            return Ok(OutgoingFrame::Standard(line));
+        let (Some(id), Some(method)) = (header.id.as_ref(), header.method_name()) else {
+            return Ok(OutgoingFrame::Standard(StandardFrame::plain(line)));
         };
-        if header.is_relay_method() {
+        if method.starts_with(METHOD_PREFIX) {
             let Some((params, generation, admission)) = self
                 .wire
                 .lock()
@@ -393,7 +416,6 @@ impl RelayConnection {
             else {
                 return Ok(OutgoingFrame::Drop);
             };
-            let method: String = serde_json::from_str(method.get()).map_err(std::io::Error::other)?;
             let line =
                 serde_json::to_string(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
                     .map_err(std::io::Error::other)?;
@@ -404,17 +426,31 @@ impl RelayConnection {
                 admission,
             }));
         }
-        if method.get() == "\"session/prompt\"" {
-            // Ordering barrier with the prompt callback registration.
-            let mut session = self.session.lock().unwrap();
-            if let Some(prompt) = session.prompt.as_mut()
-                && &prompt.request_id == id
-            {
-                prompt.written = true;
-            }
-        }
         self.standard_pending.lock().unwrap().insert(id.clone());
-        Ok(OutgoingFrame::Standard(line))
+        Ok(OutgoingFrame::Standard(StandardFrame {
+            line,
+            prompt_id: (method == "session/prompt").then(|| id.clone()),
+        }))
+    }
+
+    pub(super) fn write_prompt_delimiter(
+        &self,
+        id: &RequestId,
+        write: impl FnOnce() -> std::task::Poll<std::io::Result<usize>>,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        // The peer can parse the new prompt as soon as the newline reaches
+        // the pipe. Order that physical write with our stdout admission,
+        // including when the child responds on another thread immediately.
+        let mut session = self.session.lock().unwrap();
+        let result = write();
+        if matches!(result, std::task::Poll::Ready(Ok(1)))
+            && let Some(prompt) = session.prompt.as_mut()
+            && &prompt.request_id == id
+        {
+            prompt.written = true;
+            prompt.receiving_on_wire = true;
+        }
+        result
     }
 
     pub(super) fn first_write(
@@ -447,6 +483,13 @@ impl RelayConnection {
     }
 
     pub(crate) fn incoming(&self, line: String) -> Option<String> {
+        let input_on_wire = self
+            .session
+            .lock()
+            .unwrap()
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.receiving_on_wire);
         let frame_bytes = line.len();
         let Ok(header) = serde_json::from_str::<FrameHeader>(&line) else {
             // ACP stdio uses one JSON object per line. Never pass a batch or
@@ -456,7 +499,8 @@ impl RelayConnection {
             }
             return Some("{}".into());
         };
-        if header.is_relay_method() {
+        let method = header.method_name();
+        if method.as_deref().is_some_and(|name| name.starts_with(METHOD_PREFIX)) {
             // Request-only negotiation. Ignore notifications and give reverse
             // requests the SDK's method-not-found path with an empty body.
             return header.id.map(|id| {
@@ -464,6 +508,15 @@ impl RelayConnection {
             });
         }
         if header.method.is_some() {
+            if method.as_deref() == Some("session/update")
+                && header
+                    .params
+                    .and_then(|params| serde_json::from_str::<UpdateHeader>(params.get()).ok())
+                    .is_some_and(|params| params.update.session_update == "user_message_chunk")
+                && !input_on_wire
+            {
+                return None;
+            }
             return Some(line);
         }
         let Some(id) = header.id else {
@@ -477,7 +530,21 @@ impl RelayConnection {
                 // Only responses to standard requests actually written on this
                 // transport may reach SDK tracing. This also drops duplicates
                 // after the extension's correlation entry has been reclaimed.
-                None => return self.standard_pending.lock().unwrap().remove(&id).then_some(line),
+                None => {
+                    drop(wire);
+                    if !self.standard_pending.lock().unwrap().remove(&id) {
+                        return None;
+                    }
+                    let mut session = self.session.lock().unwrap();
+                    if let Some(prompt) = session.prompt.as_mut()
+                        && prompt.request_id == id
+                    {
+                        // Keep written for updates that already entered the
+                        // ordered SDK queue before this response.
+                        prompt.receiving_on_wire = false;
+                    }
+                    return Some(line);
+                }
             }
         };
         let reply = if frame_bytes <= EXT_FRAME_LIMIT {
@@ -511,6 +578,7 @@ impl RelayConnection {
                 seen: HashSet::new(),
                 request_id,
                 written: false,
+                receiving_on_wire: false,
             });
         }
         result

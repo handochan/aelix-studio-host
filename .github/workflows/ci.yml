@@ -114,7 +114,7 @@ jobs:
   windows-staging:
     name: Windows staging and leases
     runs-on: windows-2022
-    timeout-minutes: 25
+    timeout-minutes: 40
     defaults:
       run:
         shell: bash
@@ -145,6 +145,9 @@ jobs:
       - name: Partial-file response and nullable history
         run: |
           cargo test --locked -p aionui-extension --test zip_import_security review_regressions::http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill -- --exact --test-threads=1
+      - name: ACP child stdin backpressure and revocation
+        run: |
+          cargo test --locked -p aionui-ai-agent --lib acp_relay_windows_child_stdin_ -- --test-threads=1
 
   release-scripts:
     name: Release scripts
