@@ -331,7 +331,27 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         session_id: &str,
         change: AelixPreludeChange,
     ) -> Result<bool, DbError> {
-        use AelixPreludeChange::{Consume, Defer, Restore};
+        use AelixPreludeChange::{Consume, Defer, Rebind, Restore};
+
+        // Keep the persisted key compatible with earlier Host versions.
+        if let Rebind { previous_session_id } = &change {
+            let result = sqlx::query(
+                "UPDATE acp_session SET session_id = ?, \
+                 session_config = json_set(session_config, '$.aelix_pending_prelude', ?) \
+                 WHERE conversation_id = ? AND session_id = ? \
+                   AND json_extract(session_config, '$.aelix_pending_prelude') = ? \
+                   AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
+            )
+            .bind(session_id)
+            .bind(session_id)
+            .bind(conversation_id)
+            .bind(previous_session_id)
+            .bind(previous_session_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+            return Ok(result.rows_affected() != 0);
+        }
 
         let result = sqlx::query(
             "UPDATE acp_session SET session_id = COALESCE(session_id, ?), session_config = CASE \
@@ -498,6 +518,38 @@ mod tests {
 
         let fetched = repo.get_unscoped("conv-1").await.unwrap().unwrap();
         assert_eq!(fetched.conversation_id, "conv-1");
+    }
+
+    #[tokio::test]
+    async fn rebinding_deferred_prelude_requires_the_owned_previous_session_and_marker() {
+        let (repo, _db) = setup().await;
+        repo.create(&create_params("conv-1")).await.unwrap();
+
+        let rebind = |user, previous: &str| {
+            repo.update_aelix_prelude_for_user(
+                user,
+                "conv-1",
+                "resumed",
+                AelixPreludeChange::Rebind {
+                    previous_session_id: previous.to_owned(),
+                },
+            )
+        };
+        repo.update_session_id_for_user("user-1", "conv-1", "backend")
+            .await
+            .unwrap();
+        assert!(!rebind("user-1", "backend").await.unwrap());
+        assert!(
+            repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", AelixPreludeChange::Defer)
+                .await
+                .unwrap()
+        );
+        assert!(!rebind("user-2", "backend").await.unwrap());
+        assert!(!rebind("user-1", "stale").await.unwrap());
+        assert!(rebind("user-1", "backend").await.unwrap());
+        assert!(!rebind("user-1", "backend").await.unwrap());
+        let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
+        assert!(row.has_pending_aelix_prelude("resumed"));
     }
 
     #[tokio::test]

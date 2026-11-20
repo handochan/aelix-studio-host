@@ -47,10 +47,12 @@ for line in sys.stdin:
     if method == 'initialize':
         response['result'] = {
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
-            'agentCapabilities': {'loadSession': True}, 'authMethods': [],
+            'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
         }
     elif method == 'session/new':
-        response['result'] = {'sessionId': 'selector-session', 'configOptions': options()}
+        resumed = params.get('_meta', {}).get('claudeCode', {}).get('options', {}).get('resume')
+        session_id = 'replacement-session' if resumed == 'selector-session' else 'selector-session'
+        response['result'] = {'sessionId': session_id, 'configOptions': options()}
     elif method == 'session/load' and params['sessionId'] == 'selector-session':
         response['result'] = {'configOptions': options()}
         if load_surface == 'legacy':
@@ -65,7 +67,7 @@ for line in sys.stdin:
         entry += f' {key}={value}'
         selections[key] = value
         response['result'] = {'configOptions': options()}
-    elif method == 'session/prompt' and params['sessionId'] == 'selector-session':
+    elif method == 'session/prompt' and params['sessionId'] in ('selector-session', 'replacement-session'):
         text = params['prompt'][0]['text']
         entry += ' ' + json.dumps(text)
         body = text.splitlines()[-1]
@@ -123,6 +125,7 @@ async fn build_session(
     let mut metadata = registry.find_builtin_by_backend("gemini").await.unwrap();
     metadata.backend = None;
     metadata.handshake = Default::default();
+    metadata.behavior_policy.session_load_via_meta_field = load_surface == "meta";
     let params = assemble_acp_params(
         CONVERSATION.into(),
         USER.into(),
@@ -335,6 +338,84 @@ async fn prelude_pending(sync: &AcpSessionSyncService) -> bool {
         .unwrap()
         .unwrap()
         .has_pending_aelix_prelude(SESSION)
+}
+
+#[tokio::test]
+async fn first_slash_commands_reach_acp_verbatim_and_defer_rules_until_ordinary_text() {
+    for command in ["/extension install  fixture ", "/extension list", "/compact"] {
+        let (temp, registry, sync) = setup().await;
+        let agent = open_session(temp.path(), &registry, &sync, "aelix-acp", "wire.txt", "generic").await;
+
+        for input in [command, "/extension list", "Continue", "/compact", "Continue again"] {
+            prompt(&agent, input).await.unwrap();
+        }
+
+        assert_eq!(
+            prompt_trace(temp.path(), "wire.txt"),
+            [
+                command,
+                "/extension list",
+                "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nContinue",
+                "/compact",
+                "Continue again",
+            ]
+        );
+        assert!(!prelude_pending(&sync).await);
+        agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn first_ordinary_message_receives_rules_once() {
+    let (temp, registry, sync) = setup().await;
+    let agent = open_session(temp.path(), &registry, &sync, "aelix-acp", "wire.txt", "generic").await;
+
+    let first = "Example command:\n/extension list";
+    for input in [first, "/extension list", "Continue"] {
+        prompt(&agent, input).await.unwrap();
+    }
+
+    assert_eq!(
+        prompt_trace(temp.path(), "wire.txt"),
+        [
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nExample command:\n/extension list",
+            "/extension list",
+            "Continue",
+        ]
+    );
+    agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn other_acp_peers_keep_deferred_rules_across_resume_paths() {
+    for (surface, session_id) in [
+        ("generic", SESSION),
+        ("legacy-no-load", SESSION),
+        ("meta", "replacement-session"),
+    ] {
+        let (temp, registry, sync) = setup().await;
+        let fresh = open_session(temp.path(), &registry, &sync, "other-acp", "fresh.txt", surface).await;
+        prompt(&fresh, "/example").await.unwrap();
+        assert_eq!(prompt_trace(temp.path(), "fresh.txt"), ["/example"]);
+        assert!(prelude_pending(&sync).await);
+        fresh.kill_and_wait(None).await;
+
+        let resumed = open_session(temp.path(), &registry, &sync, "other-acp", "resume.txt", surface).await;
+        assert_eq!(
+            sync.load_session_id(USER, CONVERSATION).await.as_deref(),
+            Some(session_id)
+        );
+        prompt(&resumed, "Continue").await.unwrap();
+        prompt(&resumed, "Continue again").await.unwrap();
+        assert_eq!(
+            prompt_trace(temp.path(), "resume.txt"),
+            [
+                "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nContinue",
+                "Continue again",
+            ]
+        );
+        resumed.kill_and_wait(None).await;
+    }
 }
 
 #[tokio::test]

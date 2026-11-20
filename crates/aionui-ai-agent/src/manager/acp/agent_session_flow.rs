@@ -40,7 +40,7 @@ pub(super) enum PromptOutcome {
 }
 
 impl AcpAgentManager {
-    pub(super) async fn persist_aelix_prelude(&self, sid: &str, change: AelixPreludeChange) -> Result<(), AgentError> {
+    pub(super) async fn persist_acp_prelude(&self, sid: &str, change: AelixPreludeChange) -> Result<(), AgentError> {
         let Some(repo) = &self.session_repo else {
             return Ok(());
         };
@@ -48,13 +48,37 @@ impl AcpAgentManager {
             .update_aelix_prelude_for_user(&self.params.user_id, &self.params.conversation_id, sid, change)
             .await
             .map_err(|error| {
-                warn!(%error, conversation_id = %self.params.conversation_id, "Could not save Aelix prelude state");
-                AgentError::internal("Could not save the Aelix prelude state")
+                warn!(%error, conversation_id = %self.params.conversation_id, "Could not save ACP prelude state");
+                AgentError::internal("Could not save the ACP prelude state")
             })?;
         if !updated {
             return Err(AgentError::conflict("The Aelix session binding changed"));
         }
         Ok(())
+    }
+
+    async fn restore_deferred_prelude(&self, previous_sid: &str, sid: &str) -> Result<bool, AgentError> {
+        let Some(repo) = &self.session_repo else {
+            return Ok(false);
+        };
+        let pending = repo
+            .get_for_user(&self.params.user_id, &self.params.conversation_id)
+            .await
+            .map_err(|error| {
+                warn!(%error, conversation_id = %self.params.conversation_id, "Could not load ACP prelude state");
+                AgentError::internal("Could not load the ACP prelude state")
+            })?
+            .is_some_and(|row| row.has_pending_aelix_prelude(previous_sid));
+        if pending && sid != previous_sid {
+            self.persist_acp_prelude(
+                sid,
+                AelixPreludeChange::Rebind {
+                    previous_session_id: previous_sid.to_owned(),
+                },
+            )
+            .await?;
+        }
+        Ok(pending)
     }
 
     /// Establish a fresh ACP session (session/new) and apply desired
@@ -174,6 +198,7 @@ impl AcpAgentManager {
                 Err(e) => return Err(e.into()),
             };
             let new_sid = new_response.session_id.to_string();
+            let pending_prelude = self.restore_deferred_prelude(session_id, &new_sid).await?;
 
             {
                 let mut session = self.session.write().await;
@@ -189,7 +214,13 @@ impl AcpAgentManager {
                 if let Some(config_options) = new_response.config_options {
                     session.apply_advertised_config_options(config_options);
                 }
+                if new_sid != session_id {
+                    session.clear_session_id();
+                }
                 session.set_session_id(DomainSessionId::new(new_sid.clone()));
+                if pending_prelude {
+                    session.mark_deferred_aelix_prelude();
+                }
                 self.commit_session_changes(&mut session).await;
             }
             self.emit_snapshot_events().await;
@@ -229,17 +260,7 @@ impl AcpAgentManager {
                 .protocol
                 .initialize_response()
                 .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"));
-            let pending_prelude = if is_aelix && let Some(repo) = &self.session_repo {
-                repo.get_for_user(&self.params.user_id, &self.params.conversation_id)
-                    .await
-                    .map_err(|error| {
-                        warn!(%error, conversation_id = %self.params.conversation_id, "Could not load Aelix prelude state");
-                        AgentError::internal("Could not load the Aelix prelude state")
-                    })?
-                    .is_some_and(|row| row.has_pending_aelix_prelude(session_id))
-            } else {
-                false
-            };
+            let pending_prelude = self.restore_deferred_prelude(session_id, session_id).await?;
 
             {
                 let mut session = self.session.write().await;
@@ -274,9 +295,13 @@ impl AcpAgentManager {
         // Legacy path: backend advertised neither claude-meta-resume nor
         // session/load. Seed the aggregate with the stored id and let the
         // caller prompt — matches pre-refactor behaviour.
+        let pending_prelude = self.restore_deferred_prelude(session_id, session_id).await?;
         {
             let mut session = self.session.write().await;
             session.set_session_id(DomainSessionId::new(session_id.to_owned()));
+            if pending_prelude {
+                session.mark_deferred_aelix_prelude();
+            }
             self.commit_session_changes(&mut session).await;
         }
         self.emit_snapshot_events().await;
@@ -441,7 +466,7 @@ impl AcpAgentManager {
                 if consumed_prelude && prompt_was_rejected(&error, &mut probe_rx) {
                     let mut session = self.session.write().await;
                     if session.session_id() == Some(sid) {
-                        match self.persist_aelix_prelude(sid, AelixPreludeChange::Restore).await {
+                        match self.persist_acp_prelude(sid, AelixPreludeChange::Restore).await {
                             Ok(()) => session.mark_deferred_aelix_prelude(),
                             Err(failure) => warn!(%failure, conversation_id = %self.params.conversation_id,
                                 "Could not restore the deferred Aelix prelude after prompt rejection"),

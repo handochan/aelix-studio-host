@@ -65,12 +65,16 @@ impl SaveRuntimeStateParams<'_> {
     }
 }
 
-/// State changes for a deferred Aelix first-prompt prelude.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// State changes for a deferred ACP first-prompt prelude.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AelixPreludeChange {
     Defer,
     Consume,
     Restore,
+    /// An explicitly resumed conversation received a replacement session ID.
+    Rebind {
+        previous_session_id: String,
+    },
 }
 
 #[async_trait::async_trait]
@@ -111,7 +115,8 @@ pub trait IAcpSessionRepository: Send + Sync {
     /// Update the deferred first-prompt marker for the owning conversation and
     /// its matching backend session. Initial deferral can bind a fresh session
     /// and store the marker atomically before the session-assigned event.
-    /// Consumption and restoration require the bound ID.
+    /// Consumption and restoration require the bound ID. Rebinding requires
+    /// both the old binding and its matching marker.
     async fn update_aelix_prelude_for_user(
         &self,
         user_id: &str,
