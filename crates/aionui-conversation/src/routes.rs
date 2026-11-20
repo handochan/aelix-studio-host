@@ -4,6 +4,7 @@ use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 
 use aionui_api_types::{
@@ -32,6 +33,7 @@ impl From<ConversationError> for ApiError {
             }
             ConversationError::Archived { reason, .. } => ApiError::ConversationArchived(reason),
             ConversationError::BadRequest { reason } => ApiError::BadRequest(reason),
+            ConversationError::ReferenceResolution(error) => Self::from(*error),
             ConversationError::Busy { reason } if reason.starts_with("CROSS_ACCOUNT_REFERENCE:") => {
                 ApiError::coded(StatusCode::CONFLICT, "CROSS_ACCOUNT_REFERENCE", reason, None)
             }
@@ -339,13 +341,18 @@ async fn send_msg(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     body: Result<Json<SendMessageRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<ApiResponse<SendMessageResponse>>), ApiError> {
-    let Json(req) = body.map_err(ApiError::from)?;
+) -> Result<(StatusCode, Json<ApiResponse<SendMessageResponse>>), Response> {
+    let Json(req) = body.map_err(|error| ApiError::from(error).into_response())?;
     let response = state
         .service
         .send_message(&user.id, &id, req, &state.task_manager)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|error| match error {
+            ConversationError::ReferenceResolution(source) => {
+                ApiError::from(*source).into_response_with_code_only_log()
+            }
+            error => ApiError::from(error).into_response(),
+        })?;
     // B5: a mid-turn delivery already handed the message to the RUNNING turn —
     // that is a completed delivery (200), not a scheduled one (202).
     let status = if response.delivered_midturn {

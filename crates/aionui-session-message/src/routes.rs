@@ -22,6 +22,7 @@ use aionui_api_types::{
 use aionui_auth::CurrentUser;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 
@@ -151,7 +152,7 @@ async fn mentionable(
     State(state): State<SessionMessageRouterState>,
     Extension(user): Extension<CurrentUser>,
     Query(query): Query<SessionMentionableQuery>,
-) -> Result<Json<ApiResponse<SessionMentionableResponse>>, aionui_common::ApiError> {
+) -> Result<Json<ApiResponse<SessionMentionableResponse>>, Response> {
     // The picker is per-conversation; the current conversation arrives as a
     // query param rather than a path segment so the route stays flat.
     let current = query.current_conversation_id.clone().unwrap_or_default();
@@ -159,16 +160,17 @@ async fn mentionable(
     // is off, but these two routes are one service function behind two auth
     // channels, and letting their POLICY diverge means a direct call answers a
     // question the master switch was supposed to have closed.
+    let error_response = |error| to_api_error(error).into_response_with_code_only_log();
     state
         .service
         .guard_list_access(&user.id, &current)
         .await
-        .map_err(to_api_error)?;
+        .map_err(error_response)?;
     let data = state
         .targets
         .list(&user.id, &current, &query)
         .await
-        .map_err(to_api_error)?;
+        .map_err(error_response)?;
     Ok(Json(ApiResponse::ok(data)))
 }
 

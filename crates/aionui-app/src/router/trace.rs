@@ -90,6 +90,36 @@ fn query_keys(query: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aionui_common::ApiError;
+    use axum::body::{Body, to_bytes};
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn code_only_error_logging_preserves_the_response_message() {
+        let message = "local file path is not a readable file: /private/log-test/attachment.txt";
+        let logs = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(logs.reopen().unwrap())
+            .finish();
+        let _capture = tracing::subscriber::set_default(subscriber);
+        let app = with_access_log(Router::new().route(
+            "/",
+            get(move || async move { ApiError::BadRequest(message.into()).into_response_with_code_only_log() }),
+        ));
+
+        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"], message);
+        let output = std::fs::read_to_string(logs.path()).unwrap();
+        assert!(output.contains("error_code=\"BAD_REQUEST\""));
+        assert!(!output.contains("log-test"));
+        assert!(!output.contains("attachment.txt"));
+    }
 
     #[test]
     fn query_keys_omit_values() {

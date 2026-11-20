@@ -229,8 +229,7 @@ impl MentionableTargets {
                 }
                 Err(error) => {
                     warn!(
-                        project_id,
-                        error = %error,
+                        code = error.code(),
                         "mentionable list: project name lookup failed; row degrades to no project label"
                     );
                 }
