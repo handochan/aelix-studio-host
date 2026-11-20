@@ -508,14 +508,15 @@ impl RelayConnection {
             });
         }
         if header.method.is_some() {
-            if method.as_deref() == Some("session/update")
-                && header
-                    .params
-                    .and_then(|params| serde_json::from_str::<UpdateHeader>(params.get()).ok())
-                    .is_some_and(|params| params.update.session_update == "user_message_chunk")
-                && !input_on_wire
-            {
-                return None;
+            if method.as_deref() == Some("session/update") {
+                // The SDK first parses into a JSON object and collapses
+                // duplicate keys. Require an unambiguous update header before
+                // forwarding so both stages classify user input consistently.
+                let params = header.params?;
+                let UpdateHeader { update } = serde_json::from_str(params.get()).ok()?;
+                if update.session_update == "user_message_chunk" && !input_on_wire {
+                    return None;
+                }
             }
             return Some(line);
         }

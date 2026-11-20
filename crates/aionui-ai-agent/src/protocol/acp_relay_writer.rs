@@ -590,6 +590,8 @@ mod tests {
 
     #[tokio::test]
     async fn acp_relay_keeps_input_closed_while_the_prompt_delimiter_is_blocked() {
+        use agent_client_protocol::schema::v1::{SessionNotification, SessionUpdate};
+        use agent_client_protocol::{RawJsonRpcMessage, TransportFrame};
         use futures_util::SinkExt as _;
 
         let relay = opened_relay("_aelix/session/probe");
@@ -621,13 +623,48 @@ mod tests {
         }}})
         .to_string();
         assert!(relay.incoming(update.clone()).is_none());
+        let agent_update = update.replace("user_message_chunk", "agent_message_chunk");
+        assert_eq!(relay.incoming(agent_update.clone()), Some(agent_update));
+
+        let ambiguous_updates = [
+            update.replace(
+                r#""update":{"#,
+                r#""update":{"sessionUpdate":"agent_message_chunk"},"update":{"#,
+            ),
+            update.replace(
+                r#""sessionUpdate":"user_message_chunk""#,
+                r#""sessionUpdate":"agent_message_chunk","\u0073essionUpdate":"user_message_chunk""#,
+            ),
+        ];
+        for ambiguous in &ambiguous_updates {
+            // The SDK would collapse the duplicates and deliver a user-input
+            // notification if the host passed this frame through.
+            let frame = TransportFrame::parse_json(ambiguous);
+            assert!(matches!(
+                frame,
+                TransportFrame::Single(RawJsonRpcMessage::Notification(_))
+            ));
+            let wire: serde_json::Value = serde_json::from_str(&frame.to_json().unwrap()).unwrap();
+            let notification: SessionNotification = serde_json::from_value(wire["params"].clone()).unwrap();
+            assert!(matches!(notification.update, SessionUpdate::UserMessageChunk(_)));
+            assert!(relay.incoming(ambiguous.clone()).is_none());
+        }
+        assert_eq!(relay.input_history().received("turn"), 0);
+
         let mut received = vec![0; prompt.len() + 1];
         tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut received))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(received, format!("{prompt}\n").as_bytes());
-        assert_eq!(relay.incoming(update.clone()), Some(update));
+        for ambiguous in ambiguous_updates {
+            assert!(relay.incoming(ambiguous).is_none());
+        }
+        assert_eq!(relay.incoming(update.clone()).as_deref(), Some(update.as_str()));
+        let wire: serde_json::Value = serde_json::from_str(&update).unwrap();
+        let notification = serde_json::from_value(wire["params"].clone()).unwrap();
+        assert!(relay.consumed_input(&notification).is_some());
+        assert_eq!(relay.input_history().received("turn"), 1);
 
         drop(sink);
         finish(driver, true).await;
