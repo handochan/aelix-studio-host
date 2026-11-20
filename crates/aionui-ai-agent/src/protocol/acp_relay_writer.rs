@@ -555,7 +555,7 @@ mod tests {
             })
             .to_string()
         };
-        let late = update("old input", "older").replace("session/update", r"session/update");
+        let late = update("old input", "older").replace("session/update", r"session\/update");
         assert!(relay.incoming(late).is_none());
         assert_eq!(relay.input_history().received("next-turn"), 0);
 
