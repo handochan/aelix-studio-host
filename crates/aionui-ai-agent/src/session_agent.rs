@@ -2972,8 +2972,10 @@ fn spawn_event_pump(
                 // async `initialize` response — the same late-catalog timing that
                 // strands the model/mode picker — and the frontend's mount-time REST
                 // read (`fetchAcpSlashCommands`) returns empty before it lands. The
-                // legacy ACP and direct CLI paths both push live catalogs so
-                // the menu fills once discovery completes.
+                // legacy ACP path recovers via a live `AvailableCommands` push
+                // (translate.rs `AvailableCommandsUpdate` arm); this is its direct-CLI
+                // analogue, so the `/` menu fills once discovery completes instead of
+                // staying empty until a manual refetch.
                 if !slash_commands.is_empty() {
                     let commands = slash_commands
                         .iter()
@@ -2986,9 +2988,9 @@ fn spawn_event_pump(
                         .collect();
                     let _ = runtime
                         .tx
-                        .send(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData::new(
+                        .send(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData {
                             commands,
-                        )));
+                        }));
                 }
                 continue;
             }

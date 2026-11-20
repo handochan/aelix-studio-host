@@ -521,37 +521,24 @@ fn slash_command_items(commands: &[AvailableCommand]) -> Vec<SlashCommandItem> {
     commands.iter().map(slash_command_item).collect()
 }
 
-fn slash_command_name(input: &str, is_aelix: bool) -> Option<&str> {
-    let text = input.strip_prefix('/')?;
-    if text.is_empty() || text.starts_with('/') {
-        return None;
-    }
-    if !is_aelix {
-        return text
-            .split(|c: char| c.is_whitespace())
-            .next()
-            .filter(|name| !name.is_empty());
+fn has_slash_command_shape(input: &str) -> bool {
+    let Some(text) = input.strip_prefix('/') else {
+        return false;
+    };
+    // Aelix ACP @32082b6, src/aelix_acp/runtime/commands.py:
+    // split_command separates arguments at an ASCII space and rejects
+    // whitespace in the name. compact_instructions also accepts a newline
+    // or other whitespace after "compact".
+    let parser_whitespace = |c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}');
+    if let Some(arguments) = text.strip_prefix("compact")
+        && arguments.chars().next().is_none_or(parser_whitespace)
+    {
+        return true;
     }
 
-    // Aelix ACP @32082b6, src/aelix_acp/runtime/commands.py:
-    // compact_instructions accepts whitespace, while split_command only
-    // splits on ASCII space. Command names come from the ACP catalog.
-    let is_parser_whitespace = |c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}');
-    if let Some(arguments) = text.strip_prefix("compact")
-        && arguments.chars().next().is_none_or(is_parser_whitespace)
-    {
-        return Some("compact");
-    }
-    let name = text.split(' ').next()?;
-    if name.is_empty() || name.chars().any(is_parser_whitespace) {
-        return None;
-    }
-    // ALIASES in the same parser are not included in Session.commands().
-    Some(match name {
-        "rename" => "name",
-        "exit" => "quit",
-        _ => name,
-    })
+    let name = text.split_once(' ').map_or(text, |(name, _)| name);
+    // A second slash belongs to an ordinary path, not the command prefix.
+    !name.is_empty() && !name.contains('/') && !name.chars().any(parser_whitespace)
 }
 
 /// Manages a single ACP Agent instance.
@@ -1274,12 +1261,12 @@ impl AcpAgentManager {
         }
     }
 
-    /// Return slash commands for the active ACP session.
+    /// Return available slash commands from the session aggregate.
     pub(crate) async fn load_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AgentError> {
         let session = self.session.read().await;
         let items = session
-            .session_id()
-            .and_then(|sid| self.protocol.with_advertised_commands(sid, slash_command_items))
+            .available_commands()
+            .map(slash_command_items)
             .unwrap_or_default();
         Ok(items)
     }
@@ -1340,7 +1327,6 @@ impl AcpAgentManager {
             (s.session_id().map(ToOwned::to_owned), s.is_opened())
         };
 
-        let catalog_setup = (!opened).then(|| self.protocol.prepare_command_catalog());
         let sid = match (session_id, opened) {
             // Unbound + fork spec: the forked conversation's backend session
             // has not materialized yet → session/fork against the parent sid
@@ -1354,10 +1340,6 @@ impl AcpAgentManager {
             (Some(sid), true) => sid,
         };
 
-        if catalog_setup.is_some() {
-            self.enforce_team_permission_mode().await?;
-        }
-
         {
             let mut s = self.session.write().await;
             let sid = mark_session_opened_after_protocol_ready(
@@ -1368,9 +1350,6 @@ impl AcpAgentManager {
                 self.backend(),
             )?;
             self.commit_session_changes(&mut s).await;
-            if let Some(catalog_setup) = catalog_setup {
-                catalog_setup.finish(&sid);
-            }
             Ok(sid)
         }
     }
@@ -1385,31 +1364,11 @@ impl AcpAgentManager {
         let sid = self.ensure_session_opened().await.map_err(AcpSendFailure::from)?;
         self.runtime.reset_for_new_turn(ConversationStatus::Running);
         let raw_user_input = data.content.clone();
-        use crate::agent_task::IAgentTask as _;
-        let is_aelix = raw_user_input.starts_with('/')
-            && self
-                .protocol
-                .initialize_response()
-                .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"));
-        let matched_command = slash_command_name(&raw_user_input, is_aelix)
-            .filter(|name| {
-                // The adapter dispatches non-compact commands only for text-only
-                // prompts (aelix-acp@32082b6, src/aelix_acp/session.py).
-                !is_aelix
-                    || *name == "compact"
-                    || data.files.is_empty()
-                    || crate::media::partition_media(&raw_user_input, &data.files, self.prompt_media_caps())
-                        .media
-                        .is_empty()
-            })
-            .and_then(|name| self.protocol.advertised_command(&sid, name))
-            .map(|command| slash_command_item(&command));
-
         let (content, consumed_prelude) = {
             let mut session = self.session.write().await;
             let deferred = session.has_deferred_aelix_prelude();
             let pending = session.has_pending_session_new_prelude();
-            if matched_command.is_some() && pending {
+            if pending && has_slash_command_shape(&raw_user_input) {
                 // Keep the command at the start of the ACP text and save the
                 // rules for the first ordinary prompt in this session.
                 if !deferred {
@@ -1427,9 +1386,9 @@ impl AcpAgentManager {
                     runtime: &self.runtime,
                 };
                 let mut transformed = self.pipeline.pre_send(&mut ctx, raw_user_input).await;
-                if pending && is_aelix && transformed.starts_with('/') && !transformed.starts_with("//") {
-                    // A first ordinary prompt with no rules still needs a text
-                    // boundary so Aelix does not reject its leading slash.
+                if pending && transformed.starts_with('/') && !transformed.starts_with("//") {
+                    // Keep an ordinary leading-slash input out of the command
+                    // prefix even when there was no prelude text to add.
                     transformed.insert(0, '\n');
                 }
                 if deferred && let Err(error) = self.persist_acp_prelude(&sid, AelixPreludeChange::Consume).await {
@@ -1447,8 +1406,7 @@ impl AcpAgentManager {
             content,
             ..data.clone()
         };
-        self.prompt_existing_session(&data, Some(&sid), matched_command.as_ref(), consumed_prelude)
-            .await
+        self.prompt_existing_session(&data, Some(&sid), consumed_prelude).await
     }
 
     fn dump_acp_final_input(&self, session_id: &str, data: &SendMessageData, final_content: &str) {
@@ -1517,8 +1475,8 @@ impl AcpAgentManager {
         self.team_permission_mode.is_some()
     }
 
-    /// Enforce the Team selection before completing session setup.
-    async fn enforce_team_permission_mode(&self) -> Result<(), AgentError> {
+    /// Enforce the Team selection before the factory makes the task available.
+    pub(crate) async fn enforce_team_permission_mode(&self) -> Result<(), AgentError> {
         let Some(mode) = self.team_permission_mode else {
             return Ok(());
         };
@@ -2361,6 +2319,7 @@ mod tests {
 
     #[test]
     fn session_command_loading_preserves_empty_turn_meta() {
+        let mut session = AcpSession::new(None, None, Default::default());
         let mut command = AvailableCommand::new("review", "Review the current diff");
         command.meta = Some(
             serde_json::from_value(json!({
@@ -2372,7 +2331,9 @@ mod tests {
             }))
             .unwrap(),
         );
-        let items = super::slash_command_items(&[command]);
+        session.apply_advertised_commands(vec![command]);
+
+        let items = super::slash_command_items(session.available_commands().expect("commands advertised"));
 
         assert_eq!(items.len(), 1);
         let item = &items[0];
@@ -2390,24 +2351,33 @@ mod tests {
     }
 
     #[test]
-    fn matches_leading_slash_token_against_advertised_commands() {
-        let mut command = AvailableCommand::new("ctx-flush", "Flush context");
-        command.meta = Some(
-            serde_json::from_value(json!({
-                "completion_behavior": "neutral_tip_on_empty",
-            }))
-            .unwrap(),
-        );
-
-        assert_eq!(super::slash_command_name("/ctx-flush now", false), Some("ctx-flush"));
-        let matched = super::slash_command_item(&command);
-
-        assert_eq!(matched.command, "ctx-flush");
-        assert_eq!(
-            matched.completion_behavior,
-            Some(aionui_api_types::SlashCommandCompletionBehavior::NeutralTipOnEmpty)
-        );
-        assert_eq!(matched.empty_turn_tip_code.as_deref(), None);
+    fn slash_command_shape_matches_parser_boundaries_and_excludes_paths() {
+        for input in [
+            "/extension list",
+            "/rename Example",
+            "/exit",
+            "/skill:fixture",
+            "/한글",
+            "/extension list\nmore text",
+            "/compact\nKeep decisions",
+            "/compact\tKeep decisions",
+        ] {
+            assert!(super::has_slash_command_shape(input), "{input:?}");
+        }
+        for input in [
+            "/Users/fixture/Documents",
+            "/compact/archive",
+            "//host/Documents",
+            " /extension list",
+            "\n/extension list",
+            "/extension\nlist",
+            "/extension\tlist",
+            "/na\u{1c}me",
+            "/",
+            "/ example",
+        ] {
+            assert!(!super::has_slash_command_shape(input), "{input:?}");
+        }
     }
 
     #[test]

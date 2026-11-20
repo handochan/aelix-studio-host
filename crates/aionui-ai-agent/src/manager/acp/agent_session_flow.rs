@@ -3,7 +3,8 @@ use crate::manager::acp::AcpAgentManager;
 use crate::manager::acp::mode_normalize::agent_metadata_uses_meta_resume;
 use crate::protocol::error::AcpError;
 use crate::protocol::events::{
-    AgentStreamEvent, ErrorEventData, SessionAssignedEventData, StartEventData, TipType, TipsEventData,
+    AgentStreamEvent, AvailableCommandsEventData, ErrorEventData, SessionAssignedEventData, StartEventData, TipType,
+    TipsEventData,
 };
 use crate::protocol::send_error::AgentSendError;
 use crate::shared_kernel::SessionId as DomainSessionId;
@@ -193,7 +194,6 @@ impl AcpAgentManager {
         previous_binding: Option<&str>,
         err: &AcpError,
     ) -> Result<String, AgentError> {
-        self.protocol.discard_command_attempt(stale_sid);
         if self
             .params
             .config
@@ -362,7 +362,6 @@ impl AcpAgentManager {
         // Legacy path: backend advertised neither claude-meta-resume nor
         // session/load. Seed the aggregate with the stored id and let the
         // caller prompt — matches pre-refactor behaviour.
-        self.protocol.adopt_command_session(session_id);
         let pending_prelude = self.restore_deferred_prelude(session_id, session_id).await?;
         {
             let mut session = self.session.write().await;
@@ -491,7 +490,6 @@ impl AcpAgentManager {
         &self,
         data: &SendMessageData,
         session_id: Option<&str>,
-        matched_command: Option<&SlashCommandItem>,
         consumed_prelude: bool,
     ) -> Result<PromptOutcome, AcpSendFailure> {
         let sid = session_id
@@ -602,7 +600,7 @@ impl AcpAgentManager {
             sid,
             prompt_response.stop_reason,
             empty_turn,
-            matched_command,
+            None,
             auth_hint,
             observations.dialect_signal,
         ))
@@ -656,6 +654,12 @@ impl AcpAgentManager {
             // handshake blobs and downstream consumers see a uniform
             // structure regardless of origin.
             self.runtime.emit(AgentStreamEvent::AcpConfigOption(v));
+        }
+        if let Some(cmds) = session.available_commands() {
+            self.runtime
+                .emit(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData {
+                    commands: cmds.to_vec(),
+                }));
         }
     }
 

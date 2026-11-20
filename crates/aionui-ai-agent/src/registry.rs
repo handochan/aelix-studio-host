@@ -75,25 +75,12 @@ enum InlineProbeOutcome {
     PendingRecheck,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct CommandCatalogOwner {
-    pub(crate) conversation_id: String,
-    pub(crate) instance: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct CommandCatalogChange {
-    pub(crate) owner: CommandCatalogOwner,
-    pub(crate) invalidated: bool,
-}
-
 /// One unit of work submitted to the catalog sync consumer task.
 #[derive(Debug)]
 pub(crate) struct CatalogSyncMessage {
     pub(crate) user_id: String,
     pub(crate) agent_metadata_id: String,
     pub(crate) handshake: AgentHandshake,
-    pub(crate) command_catalog: Option<CommandCatalogChange>,
 }
 
 /// A `CatalogSender` wired to a plain receiver, so catalog-publishing logic can
@@ -153,47 +140,17 @@ impl AgentRegistry {
     /// `AppServices`.
     fn spawn_catalog_consumer(self: Arc<Self>, mut rx: mpsc::Receiver<CatalogSyncMessage>) {
         tokio::spawn(async move {
-            // A failed conversation can clear its previous catalog (or a
-            // legacy snapshot with no owner) without erasing a catalog
-            // confirmed by a different runtime.
-            let mut command_owners = HashMap::<String, String>::new();
-            let mut latest_instances = HashMap::<String, u64>::new();
             while let Some(msg) = rx.recv().await {
-                if let Some(change) = &msg.command_catalog {
-                    // Remember the conversation's generation even when another
-                    // conversation owns the agent-wide metadata snapshot.
-                    let latest = latest_instances
-                        .entry(change.owner.conversation_id.clone())
-                        .or_default();
-                    if change.owner.instance < *latest {
-                        continue;
-                    }
-                    *latest = change.owner.instance;
-                    if change.invalidated
-                        && command_owners
-                            .get(&msg.agent_metadata_id)
-                            .is_some_and(|owner| owner != &change.owner.conversation_id)
-                    {
-                        continue;
-                    }
-                }
-                match self
+                if let Err(err) = self
                     .apply_handshake_inner(&msg.user_id, &msg.agent_metadata_id, &msg.handshake)
                     .await
                 {
-                    Ok(()) => {
-                        if let Some(change) = msg.command_catalog {
-                            command_owners.insert(msg.agent_metadata_id, change.owner.conversation_id);
-                        } else if msg.handshake.available_commands.is_some() {
-                            command_owners.remove(&msg.agent_metadata_id);
-                        }
-                    }
-                    Err(err) => warn!(
+                    warn!(
                         user_id = %msg.user_id,
                         agent_metadata_id = %msg.agent_metadata_id,
                         error = %err,
                         "Catalog sync: apply_handshake failed"
-                    ),
+                    );
                 }
             }
             debug!("Catalog sync consumer task exiting — all senders dropped");
@@ -1530,25 +1487,6 @@ pub struct CatalogSender {
 }
 
 impl CatalogSender {
-    /// Keep updates and invalidations from the same runtime in stream order.
-    pub(crate) async fn send_commands(
-        &self,
-        user_id: String,
-        agent_metadata_id: String,
-        handshake: AgentHandshake,
-        command_catalog: CommandCatalogChange,
-    ) {
-        let _ = self
-            .tx
-            .send(CatalogSyncMessage {
-                user_id,
-                agent_metadata_id,
-                handshake,
-                command_catalog: Some(command_catalog),
-            })
-            .await;
-    }
-
     /// Submit a partial handshake update. Returns without error when the
     /// channel is closed (only happens at shutdown) or full — callers do
     /// not need to care because the consumer is best-effort.
@@ -1557,7 +1495,6 @@ impl CatalogSender {
             user_id,
             agent_metadata_id,
             handshake,
-            command_catalog: None,
         };
         if let Err(err) = self.tx.try_send(msg) {
             use mpsc::error::TrySendError;

@@ -27,14 +27,13 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AGENT_METHOD_NAMES, AuthenticateResponse, AvailableCommand, ClientCapabilities, ClientNotification,
-    ClientSessionCapabilities, CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse,
-    ForkSessionResponse, Implementation, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
-    LoadSessionResponse, PromptResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome,
-    SessionConfigOptionsCapabilities, SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionResponse,
-    SetSessionModeResponse, TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    AGENT_METHOD_NAMES, AuthenticateResponse, ClientCapabilities, ClientNotification, ClientSessionCapabilities,
+    CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse, ForkSessionResponse, Implementation,
+    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionResponse, PromptResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigOptionsCapabilities,
+    SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse, TerminalExitStatus,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Lines, Responder, UntypedMessage, on_receive_notification, on_receive_request,
@@ -46,8 +45,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
-
-use super::acp_command_catalog::{CatalogSetup, CommandCatalog};
 
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
@@ -152,14 +149,12 @@ pub struct AcpProtocol {
     alive: Arc<AtomicBool>,
     /// Cached initialize response from the ACP handshake.
     initialize_response: Arc<RwLock<Option<InitializeResponse>>>,
-    /// The command catalog from the ordered SDK callback, scoped to its session.
-    command_catalog: Arc<CommandCatalog>,
     /// Set to `true` for the duration of a `session/load` request so that
     /// the SDK notification handler skips broadcasting the CLI's historical
     /// `session/update` replay to the UI event channel. The flag does NOT
     /// affect `notification_tx` — internal session aggregate updates keep
-    /// flowing to the event tracker. Command advertisements have their own
-    /// session-scoped routing before either notification channel.
+    /// flowing so metadata like `available_commands_update` still reaches
+    /// `event_tracker`.
     ///
     /// Owned by the outer struct; an `Arc` clone is captured by the SDK
     /// background task's `on_receive_notification` closure.
@@ -197,7 +192,6 @@ impl AcpProtocol {
         let alive = Arc::new(AtomicBool::new(true));
         let relay = Arc::new(RelayConnection::new(relay_candidate));
         let replay_suppression = Arc::new(AtomicBool::new(false));
-        let command_catalog = Arc::new(CommandCatalog::new(event_tx.clone()));
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
         log_acp_initialize_start(init_budget);
@@ -225,7 +219,6 @@ impl AcpProtocol {
             shutdown_rx,
             Arc::clone(&alive),
             Arc::clone(&replay_suppression),
-            Arc::clone(&command_catalog),
             Arc::clone(&terminal_registry),
             Arc::clone(&relay),
             stdin_closed.clone().drop_guard(),
@@ -266,7 +259,6 @@ impl AcpProtocol {
             stdin_closed,
             alive,
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
-            command_catalog,
             replay_suppression,
             terminal_registry,
             relay,
@@ -275,35 +267,6 @@ impl AcpProtocol {
 
     pub fn initialize_response(&self) -> Option<InitializeResponse> {
         self.initialize_response.read().unwrap().clone()
-    }
-
-    pub(crate) fn with_advertised_commands<T>(
-        &self,
-        session_id: &str,
-        read: impl FnOnce(&[AvailableCommand]) -> T,
-    ) -> Option<T> {
-        self.command_catalog.with_commands(session_id, read)
-    }
-
-    pub(crate) fn advertised_command(&self, session_id: &str, name: &str) -> Option<AvailableCommand> {
-        self.with_advertised_commands(session_id, |commands| {
-            commands.iter().find(|command| command.name == name).cloned()
-        })
-        .flatten()
-    }
-
-    pub(crate) fn prepare_command_catalog(&self) -> CatalogSetup<'_> {
-        self.command_catalog.setup()
-    }
-
-    pub(crate) fn discard_command_attempt(&self, session_id: &str) {
-        self.command_catalog.discard(Some(session_id));
-    }
-
-    pub(crate) fn adopt_command_session(&self, session_id: &str) {
-        let id = SessionId::new(session_id);
-        let generation = self.command_catalog.begin_attempt(Some(id.clone()));
-        self.command_catalog.identify(generation, id);
     }
 
     fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
@@ -339,13 +302,11 @@ impl AcpProtocol {
         &self,
         mut req: NewSessionRequest,
     ) -> Result<(NewSessionResponse, Option<serde_json::Value>), AcpError> {
-        let generation = self.command_catalog.begin_attempt(None);
         let nonce = self.relay.prepare_open(&mut req.meta);
         let (response, models) = self
             .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
             .await?;
         let response: NewSessionResponse = response;
-        self.command_catalog.identify(generation, response.session_id.clone());
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok((response, models))
@@ -374,22 +335,18 @@ impl AcpProtocol {
         let _guard = ReplaySuppressionGuard::new(&self.replay_suppression);
         let nonce = self.relay.prepare_open(&mut req.meta);
         let sid = req.session_id.clone();
-        let generation = self.command_catalog.begin_attempt(Some(sid.clone()));
         let (response, models) = self
             .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
             .await?;
         let response: LoadSessionResponse = response;
-        self.command_catalog.identify(generation, sid.clone());
         self.relay.opened(sid, nonce, response.meta.as_ref());
         Ok((response, models))
     }
 
     /// Fork an existing ACP session into a new session.
     pub async fn fork_session(&self, mut req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
-        let generation = self.command_catalog.begin_attempt(None);
         let nonce = self.relay.prepare_open(&mut req.meta);
         let response = self.send_request(req, AGENT_METHOD_NAMES.session_fork).await?;
-        self.command_catalog.identify(generation, response.session_id.clone());
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok(response)
@@ -397,11 +354,7 @@ impl AcpProtocol {
 
     /// Resume an existing ACP session.
     pub async fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, AcpError> {
-        let session_id = req.session_id.clone();
-        let generation = self.command_catalog.begin_attempt(Some(session_id.clone()));
-        let response = self.send_request(req, AGENT_METHOD_NAMES.session_resume).await?;
-        self.command_catalog.identify(generation, session_id);
-        Ok(response)
+        self.send_request(req, AGENT_METHOD_NAMES.session_resume).await
     }
 
     /// Close an ACP session.
@@ -796,7 +749,6 @@ async fn run_sdk_background(
     shutdown_rx: oneshot::Receiver<()>,
     alive: Arc<AtomicBool>,
     replay_suppression: Arc<AtomicBool>,
-    command_catalog: Arc<CommandCatalog>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
     relay: Arc<RelayConnection>,
     mark_stdin_closed: DropGuard,
@@ -915,13 +867,7 @@ async fn run_sdk_background(
                 let notification_tx = notification_tx.clone();
                 let replay_suppression = Arc::clone(&replay_suppression);
                 let relay = relay.clone();
-                let command_catalog = Arc::clone(&command_catalog);
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
-                    if let SessionUpdate::AvailableCommandsUpdate(update) = &notification.update {
-                        command_catalog.advertise(&notification.session_id, &update.available_commands);
-                        return Ok(());
-                    }
-
                     // Fan out the raw SDK notification to the manager's apply-loop
                     // FIRST, so session state is consistent by the time the UI
                     // event hits the broadcast channel. Swallow send errors — if
@@ -933,7 +879,8 @@ async fn run_sdk_background(
                     // session/update notifications back to us. The frontend
                     // already renders history from the local DB, so broadcasting
                     // the replay would produce duplicate UI blocks. Keep feeding
-                    // notification_tx for session metadata, but skip the UI broadcast.
+                    // notification_tx (event_tracker still needs metadata like
+                    // available_commands_update), but skip the UI broadcast.
                     if !replay_suppression.load(Ordering::Acquire) {
                         if matches!(
                             notification.update,
