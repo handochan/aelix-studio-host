@@ -481,6 +481,151 @@
       }
     }
   },
+  "stage1QueueReceipt": {
+    "nativePin": "cad65ce9bbc8da4bfa02c444d20e07301ee057f4",
+    "duringPrompt": {
+      "admittedWriteRpcIds": [
+        11,
+        12
+      ],
+      "orderedAcpFrames": [
+        {
+          "jsonrpc": "2.0",
+          "id": 100,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "두 파일을 검토해 주세요."
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "agent_message_chunk",
+              "messageId": "a-81",
+              "content": {
+                "type": "text",
+                "text": "두 파일을 비교했습니다."
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "session/update",
+          "params": {
+            "sessionId": "s-42",
+            "update": {
+              "sessionUpdate": "agent_message_chunk",
+              "messageId": "a-82",
+              "content": {
+                "type": "text",
+                "text": "요청한 표입니다."
+              }
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": 100,
+          "result": {
+            "stopReason": "end_turn"
+          }
+        }
+      ],
+      "originalPromptUserRows": 1,
+      "additionalUserRows": 0,
+      "newTurnClaimsFromRelay": 0
+    },
+    "afterLastDrain": {
+      "queuedWriteRpcId": 17,
+      "endedPrompt": {
+        "request": {
+          "jsonrpc": "2.0",
+          "id": 101,
+          "method": "session/prompt",
+          "params": {
+            "sessionId": "s-42",
+            "prompt": [
+              {
+                "type": "text",
+                "text": "첫 작업을 시작해 주세요."
+              }
+            ]
+          }
+        },
+        "response": {
+          "jsonrpc": "2.0",
+          "id": 101,
+          "result": {
+            "stopReason": "end_turn"
+          }
+        }
+      },
+      "stateAfterEnd": {
+        "active": false,
+        "turnId": null
+      },
+      "rendererOnTurnEnd": {
+        "scope": "session",
+        "notice": "큐에 접수됨 · 소비가 확인되지 않은 입력은 다음 프롬프트에서 처리될 수 있음",
+        "attributesConsumptionToRequestId": false
+      },
+      "autoPromptRequests": 0,
+      "onExplicitNewSend": {
+        "route": "POST /api/conversations/c-17/messages",
+        "orderedAcpFrames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "session/prompt",
+            "params": {
+              "sessionId": "s-42",
+              "prompt": [
+                {
+                  "type": "text",
+                  "text": "새 작업을 시작해 주세요."
+                }
+              ]
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+              "sessionId": "s-42",
+              "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "messageId": "a-91",
+                "content": {
+                  "type": "text",
+                  "text": "새 작업에 반영했습니다."
+                }
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+              "stopReason": "end_turn"
+            }
+          }
+        ],
+        "originalNewPromptUserRows": 1,
+        "additionalUserRows": 0
+      }
+    }
+  },
+  "stage2RequiresNativeObservation": "https://github.com/handochan/aelix-ai/issues/865",
   "consumedWithinPrompt": {
     "bindingId": "b-21",
     "hostTurn": "host-turn-8",
