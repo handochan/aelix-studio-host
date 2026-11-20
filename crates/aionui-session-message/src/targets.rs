@@ -51,7 +51,7 @@ fn parse_cursor(cursor: Option<&str>) -> u32 {
     };
     raw.parse().unwrap_or_else(|_| {
         warn!(
-            cursor = raw,
+            code = "invalid_cursor",
             "mentionable list: unparsable cursor, restarting from the first page"
         );
         0

@@ -10,6 +10,61 @@ use tower::ServiceExt;
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
 
 #[tokio::test]
+async fn malformed_mentionable_cursor_returns_the_first_page_without_logging_its_value() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let create_conversation = async |name| {
+        let response = app
+            .clone()
+            .oneshot(json_with_token(
+                "POST",
+                "/api/conversations",
+                json!({ "type": "acp", "name": name, "extra": {} }),
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        body_json(response).await["data"]["id"].as_str().unwrap().to_owned()
+    };
+    let current = create_conversation("Current conversation").await;
+    let target = create_conversation("Mentionable target").await;
+    let uri = format!("/api/session-messages/mentionable?current_conversation_id={current}&limit=1");
+    let first_page = app.clone().oneshot(get_with_token(&uri, &token)).await.unwrap();
+    assert_eq!(first_page.status(), StatusCode::OK);
+    let first_page = body_json(first_page).await;
+    assert_eq!(first_page["data"]["items"][0]["id"], target);
+
+    let logs = tempfile::NamedTempFile::new().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(logs.reopen().unwrap())
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+
+    let cursor = "/private-cursor-directory/cursor-canary.txt";
+    let response = app
+        .oneshot(get_with_token(&format!("{uri}&cursor={cursor}"), &token))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await, first_page);
+
+    let output = std::fs::read_to_string(logs.path()).unwrap();
+    assert!(!output.contains("private-cursor-directory"), "{output}");
+    assert!(!output.contains("cursor-canary.txt"), "{output}");
+    assert!(
+        output.lines().any(|line| {
+            line.contains("WARN")
+                && line.contains("mentionable list: unparsable cursor")
+                && line.contains("code=\"invalid_cursor\"")
+        }),
+        "{output}"
+    );
+}
+
+#[tokio::test]
 async fn reference_failures_keep_their_http_errors_without_logging_reference_data() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
