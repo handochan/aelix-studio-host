@@ -285,18 +285,23 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
     ) -> Result<bool, DbError> {
         let now = now_ms();
         let result = sqlx::query(
-            "UPDATE acp_session SET session_id = ?, last_active_at = ?, \
-             session_config = CASE WHEN NULLIF(?, '') IS NOT NULL AND EXISTS (SELECT 1 FROM conversations c \
+            "UPDATE acp_session SET session_id = ?1, last_active_at = ?2, \
+             session_config = CASE WHEN json_valid(session_config) THEN \
+                 CASE WHEN NULLIF(?1, '') IS NOT NULL AND EXISTS (SELECT 1 FROM conversations c \
                  WHERE c.id = acp_session.conversation_id \
                  AND json_type(CASE WHEN json_valid(c.extra) THEN c.extra ELSE '{}' END, \
-                               '$.fork.expected_native_head') IS 'text') AND json_valid(session_config) \
-                 THEN json_set(session_config, '$.fork_published', 1) ELSE session_config END \
-             WHERE conversation_id = ? \
-               AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
+                               '$.fork.expected_native_head') IS 'text') \
+                 THEN json_set(CASE WHEN session_id IS ?1 \
+                     OR json_extract(session_config, '$.aelix_pending_prelude') IS NOT ?1 THEN session_config \
+                     ELSE json_remove(session_config, '$.aelix_pending_prelude') END, '$.fork_published', 1) \
+                 WHEN session_id IS NOT ?1 AND json_extract(session_config, '$.aelix_pending_prelude') IS ?1 \
+                   THEN json_remove(session_config, '$.aelix_pending_prelude') \
+                 ELSE session_config END ELSE session_config END \
+             WHERE conversation_id = ?3 \
+               AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?4)",
         )
         .bind(session_id)
         .bind(now)
-        .bind(session_id)
         .bind(conversation_id)
         .bind(user_id)
         .execute(&self.pool)
@@ -308,11 +313,13 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         let now = now_ms();
         let result = sqlx::query(
             "UPDATE acp_session SET session_id = NULL, last_active_at = ?, \
-             session_config = CASE WHEN NULLIF(session_id, '') IS NOT NULL AND EXISTS (SELECT 1 FROM conversations c \
+             session_config = CASE WHEN json_valid(session_config) THEN json_remove( \
+                 CASE WHEN NULLIF(session_id, '') IS NOT NULL AND EXISTS (SELECT 1 FROM conversations c \
                  WHERE c.id = acp_session.conversation_id \
                  AND json_type(CASE WHEN json_valid(c.extra) THEN c.extra ELSE '{}' END, \
-                               '$.fork.expected_native_head') IS 'text') AND json_valid(session_config) \
-                 THEN json_set(session_config, '$.fork_published', 1) ELSE session_config END \
+                               '$.fork.expected_native_head') IS 'text') \
+                 THEN json_set(session_config, '$.fork_published', 1) ELSE session_config END, \
+                 '$.aelix_pending_prelude') ELSE session_config END \
              WHERE conversation_id = ? \
                AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
         )
@@ -331,58 +338,55 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         session_id: &str,
         change: AelixPreludeChange,
     ) -> Result<bool, DbError> {
-        use AelixPreludeChange::{Consume, Defer, Rebind, ReplaceBinding, Restore};
+        use AelixPreludeChange::{Consume, Rebind, ReplaceBinding, Restore};
 
         // Keep the persisted key compatible with earlier Host versions.
-        if let Rebind { previous_session_id } | ReplaceBinding { previous_session_id } = &change {
-            let carry_prelude = matches!(change, Rebind { .. });
-            let result = sqlx::query(
-                "UPDATE acp_session SET session_id = ?, session_config = CASE \
-                   WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
-                   WHEN (CASE WHEN json_valid(session_config) \
-                     THEN json_extract(session_config, '$.aelix_pending_prelude') END) = ? \
-                     THEN json_remove(session_config, '$.aelix_pending_prelude') \
-                   ELSE session_config END \
-                 WHERE conversation_id = ? AND session_id = ? \
-                   AND (NOT ? OR (CASE WHEN json_valid(session_config) \
-                     THEN json_extract(session_config, '$.aelix_pending_prelude') END) = ?) \
-                   AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
-            )
-            .bind(session_id)
-            .bind(carry_prelude)
-            .bind(session_id)
-            .bind(session_id)
-            .bind(conversation_id)
-            .bind(previous_session_id)
-            .bind(carry_prelude)
-            .bind(previous_session_id)
-            .bind(user_id)
-            .execute(&self.pool)
-            .await?;
-            return Ok(result.rows_affected() != 0);
-        }
-
+        let (previous_session_id, carry_prelude, check_marker) = match &change {
+            Rebind {
+                previous_session_id,
+                carry_prelude,
+            } => (Some(previous_session_id.as_str()), *carry_prelude, true),
+            ReplaceBinding { previous_session_id } => (previous_session_id.as_deref(), false, false),
+            _ => {
+                let result = sqlx::query(
+                    "UPDATE acp_session SET session_config = CASE \
+                     WHEN ? THEN json_remove(session_config, '$.aelix_pending_prelude') \
+                     ELSE json_set(session_config, '$.aelix_pending_prelude', ?) END \
+                     WHERE conversation_id = ? AND session_id = ? \
+                       AND (NOT ? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
+                       AND (NOT ? OR json_type(session_config, '$.aelix_pending_prelude') IS NULL) \
+                       AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
+                )
+                .bind(change == Consume)
+                .bind(session_id)
+                .bind(conversation_id)
+                .bind(session_id)
+                .bind(change == Consume)
+                .bind(session_id)
+                .bind(change == Restore)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?;
+                return Ok(result.rows_affected() != 0);
+            }
+        };
         let result = sqlx::query(
-            "UPDATE acp_session SET session_id = COALESCE(session_id, ?), session_config = CASE \
-             WHEN ? THEN json_set(session_config, '$.aelix_pending_prelude', ?) \
-             ELSE json_remove(session_config, '$.aelix_pending_prelude') END \
-             WHERE conversation_id = ? AND (session_id = ? OR (? AND session_id IS NULL \
-               AND json_extract(session_config, '$.aelix_pending_prelude') IS NOT ?)) \
-               AND (NOT ? OR json_extract(session_config, '$.aelix_pending_prelude') = ?) \
-               AND (NOT ? OR json_type(session_config, '$.aelix_pending_prelude') IS NULL) \
-               AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?)",
+            "UPDATE acp_session SET session_id = ?1, last_active_at = ?2, session_config = CASE \
+               WHEN ?3 THEN json_set(session_config, '$.aelix_pending_prelude', ?1) \
+               WHEN json_valid(session_config) THEN json_remove(session_config, '$.aelix_pending_prelude') \
+               ELSE session_config END \
+             WHERE conversation_id = ?4 AND session_id IS ?5 \
+               AND (NOT ?7 OR (json_extract(CASE WHEN json_valid(session_config) THEN session_config ELSE '{}' END, \
+                                           '$.aelix_pending_prelude') IS ?5) = ?3) \
+               AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = acp_session.conversation_id AND c.user_id = ?6)",
         )
         .bind(session_id)
-        .bind(change != Consume)
-        .bind(session_id)
+        .bind(now_ms())
+        .bind(carry_prelude)
         .bind(conversation_id)
-        .bind(session_id)
-        .bind(change == Defer)
-        .bind(session_id)
-        .bind(change == Consume)
-        .bind(session_id)
-        .bind(change == Restore)
+        .bind(previous_session_id)
         .bind(user_id)
+        .bind(check_marker)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() != 0)
@@ -535,29 +539,31 @@ mod tests {
         let (repo, _db) = setup().await;
         repo.create(&create_params("conv-1")).await.unwrap();
 
-        let rebind = |user, previous: &str| {
+        let rebind = |user, previous: &str, carry_prelude| {
             repo.update_aelix_prelude_for_user(
                 user,
                 "conv-1",
                 "resumed",
                 AelixPreludeChange::Rebind {
                     previous_session_id: previous.to_owned(),
+                    carry_prelude,
                 },
             )
         };
         repo.update_session_id_for_user("user-1", "conv-1", "backend")
             .await
             .unwrap();
-        assert!(!rebind("user-1", "backend").await.unwrap());
+        assert!(!rebind("user-1", "backend", true).await.unwrap());
         assert!(
             repo.update_aelix_prelude_for_user("user-1", "conv-1", "backend", AelixPreludeChange::Defer)
                 .await
                 .unwrap()
         );
-        assert!(!rebind("user-2", "backend").await.unwrap());
-        assert!(!rebind("user-1", "stale").await.unwrap());
-        assert!(rebind("user-1", "backend").await.unwrap());
-        assert!(!rebind("user-1", "backend").await.unwrap());
+        assert!(!rebind("user-2", "backend", true).await.unwrap());
+        assert!(!rebind("user-1", "stale", true).await.unwrap());
+        assert!(!rebind("user-1", "backend", false).await.unwrap());
+        assert!(rebind("user-1", "backend", true).await.unwrap());
+        assert!(!rebind("user-1", "backend", true).await.unwrap());
         let row = repo.get_for_user("user-1", "conv-1").await.unwrap().unwrap();
         assert!(row.has_pending_aelix_prelude("resumed"));
     }
@@ -566,6 +572,11 @@ mod tests {
     async fn replacing_a_stale_binding_leaves_the_previous_marker_inactive() {
         let (repo, _db) = setup().await;
         repo.create(&create_params("conv-1")).await.unwrap();
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "stale")
+                .await
+                .unwrap()
+        );
         assert!(
             repo.update_aelix_prelude_for_user("user-1", "conv-1", "stale", AelixPreludeChange::Defer)
                 .await
@@ -577,7 +588,7 @@ mod tests {
                 "conv-1",
                 "fresh",
                 AelixPreludeChange::ReplaceBinding {
-                    previous_session_id: previous.to_owned(),
+                    previous_session_id: Some(previous.to_owned()),
                 },
             )
         };
@@ -595,7 +606,7 @@ mod tests {
                 "conv-1",
                 "stale",
                 AelixPreludeChange::ReplaceBinding {
-                    previous_session_id: "fresh".into()
+                    previous_session_id: Some("fresh".into())
                 },
             )
             .await
@@ -618,6 +629,11 @@ mod tests {
         .await
         .unwrap();
 
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "backend")
+                .await
+                .unwrap()
+        );
         assert!(
             !repo
                 .update_aelix_prelude_for_user("user-2", "conv-1", "backend", AelixPreludeChange::Defer)
@@ -700,6 +716,11 @@ mod tests {
         assert!(
             !repo
                 .update_aelix_prelude_for_user("user-1", "conv-1", "backend", Consume)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.update_session_id_for_user("user-1", "conv-1", "backend")
                 .await
                 .unwrap()
         );

@@ -14,8 +14,8 @@ use aionui_ai_agent::{AcpBuildExtra, AcpSessionSyncService, AcpSkillManager, Age
 use aionui_api_types::{AgentErrorCode, ConfigOptionConfirmation};
 use aionui_common::CommandSpec;
 use aionui_db::{
-    CreateAcpSessionParams, IAcpSessionRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository,
-    init_database_memory,
+    AelixPreludeChange, CreateAcpSessionParams, IAcpSessionRepository, SqliteAcpSessionRepository,
+    SqliteAgentMetadataRepository, init_database_memory,
 };
 
 const PEER: &str = r#"
@@ -49,6 +49,10 @@ for line in sys.stdin:
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
             'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
         }
+        if load_surface == 'fork-recovery':
+            response['result']['agentCapabilities']['sessionCapabilities'] = {'fork': {}}
+    elif method == 'session/fork':
+        response['result'] = {'sessionId': 'forked-session', 'configOptions': options()}
     elif method == 'session/new':
         resumed = params.get('_meta', {}).get('claudeCode', {}).get('options', {}).get('resume')
         session_id = 'replacement-session' if resumed == 'selector-session' else 'selector-session'
@@ -64,6 +68,9 @@ for line in sys.stdin:
             }
     elif method == 'session/load':
         response['error'] = {'code': -32002, 'message': 'Session not found'}
+    elif method == 'session/set_config_option' and params['sessionId'] == 'forked-session':
+        entry += ' forked-session'
+        response['error'] = {'code': -32001, 'message': 'Session not found'}
     elif method == 'session/set_config_option':
         key, value = params['configId'], params['value']
         entry += f' {key}={value}'
@@ -89,6 +96,12 @@ for line in sys.stdin:
             response['result'] = {'stopReason': 'end_turn'}
     else:
         response['error'] = {'code': -32601, 'message': f'Unexpected request: {method}'}
+    if load_surface != 'no-catalog' and method in ('session/new', 'session/load') and 'result' in response:
+        name_list = ['extension', 'compact', 'help', 'name', 'quit', 'example', 'skill:fixture']
+        session_id = response['result'].get('sessionId', params.get('sessionId'))
+        print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
+            'sessionId': session_id, 'update': {'sessionUpdate': 'available_commands_update',
+            'availableCommands': [{'name': name, 'description': name} for name in name_list]}}}), flush=True)
     with open(trace, 'a') as output:
         output.write(entry + '\n')
     print(json.dumps(response), flush=True)
@@ -150,7 +163,14 @@ async fn build_session(
         AcpBuildExtra {
             current_model_id: Some("fixture/one".into()),
             thought_level: Some("low".into()),
-            preset_context: Some("Fixture conversation rules".into()),
+            preset_context: (load_surface != "no-rules").then(|| "Fixture conversation rules".into()),
+            fork: (load_surface == "fork-recovery").then(|| aionui_api_types::ForkSpec {
+                parent_conversation_id: "parent".into(),
+                parent_message_id: "message".into(),
+                parent_session_id: "parent-session".into(),
+                last_turn_id: None,
+                expected_native_head: None,
+            }),
             ..Default::default()
         },
         vec![],
@@ -344,7 +364,14 @@ async fn prelude_pending(sync: &AcpSessionSyncService) -> bool {
 
 #[tokio::test]
 async fn first_slash_commands_reach_acp_verbatim_and_defer_rules_until_ordinary_text() {
-    for command in ["/extension install  fixture ", "/extension list", "/compact"] {
+    for command in [
+        "/extension install  fixture ",
+        "/extension list",
+        "/compact\nWith instructions",
+        "/skill:fixture",
+        "/rename Example",
+        "/exit",
+    ] {
         let (temp, registry, sync) = setup().await;
         let agent = open_session(temp.path(), &registry, &sync, "aelix-acp", "wire.txt", "generic").await;
 
@@ -509,7 +536,7 @@ async fn aelix_does_not_restore_a_deferred_prelude_after_activity_or_transport_l
 }
 
 #[tokio::test]
-async fn aelix_defers_and_sends_in_the_same_session_when_assignment_persistence_is_delayed() {
+async fn aelix_defers_and_sends_before_assignment_event_is_consumed() {
     let (temp, registry, sync) = setup().await;
     let (manager, domain_rx) =
         build_session(temp.path(), &registry, &sync, "aelix-acp", "delayed.txt", "generic").await;
@@ -517,7 +544,7 @@ async fn aelix_defers_and_sends_in_the_same_session_when_assignment_persistence_
     let instance = AgentInstance::Acp(Arc::new(manager));
 
     // Hold SessionAssigned in the receiver until both turns have finished.
-    assert_eq!(sync.load_session_id(USER, CONVERSATION).await, None);
+    assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
     prompt(&instance, "/compact").await.unwrap();
     assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
     assert!(prelude_pending(&sync).await);
@@ -536,10 +563,15 @@ async fn aelix_defers_and_sends_in_the_same_session_when_assignment_persistence_
 }
 
 #[tokio::test]
-async fn first_command_after_a_stale_session_defers_rules_before_assignment_is_persisted() {
+async fn first_command_after_a_stale_session_defers_rules_before_assignment_event_is_consumed() {
     for clear_binding in [false, true] {
         let (temp, registry, sync) = setup().await;
         let repo = sync.repo();
+        assert!(
+            repo.update_session_id_for_user(USER, CONVERSATION, "stale-session")
+                .await
+                .unwrap()
+        );
         assert!(
             repo.update_aelix_prelude_for_user(
                 USER,
@@ -559,11 +591,7 @@ async fn first_command_after_a_stale_session_defers_rules_before_assignment_is_p
         manager.warmup_session().await.unwrap();
         let agent = AgentInstance::Acp(Arc::new(manager));
 
-        let expected_binding = if clear_binding { None } else { Some(SESSION) };
-        assert_eq!(
-            sync.load_session_id(USER, CONVERSATION).await.as_deref(),
-            expected_binding
-        );
+        assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
         prompt(&agent, "/extension list").await.unwrap();
         assert!(prelude_pending(&sync).await);
         prompt(&agent, "Continue").await.unwrap();
@@ -599,7 +627,7 @@ async fn aelix_does_not_dispatch_or_auto_replay_when_the_prelude_binding_really_
     assert_eq!(error.stream_error().retryable, Some(false));
     assert_eq!(
         error.stream_error().detail.as_deref(),
-        Some("The Aelix session binding changed")
+        Some("The ACP session binding changed")
     );
     assert_eq!(prompt_trace(temp.path(), "rebound.txt"), ["/compact"]);
     assert_eq!(
@@ -608,4 +636,168 @@ async fn aelix_does_not_dispatch_or_auto_replay_when_the_prelude_binding_really_
     );
     assert!(!prelude_pending(&sync).await);
     instance.kill_and_wait(None).await;
+}
+
+async fn setup_with_cleared_binding() -> (tempfile::TempDir, Arc<AgentRegistry>, Arc<AcpSessionSyncService>) {
+    let (temp, registry, sync) = setup().await;
+    let repo = sync.repo();
+    assert!(
+        repo.update_session_id_for_user(USER, CONVERSATION, SESSION)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.update_aelix_prelude_for_user(USER, CONVERSATION, SESSION, AelixPreludeChange::Defer)
+            .await
+            .unwrap()
+    );
+    assert!(repo.clear_session_id_for_user(USER, CONVERSATION).await.unwrap());
+    (temp, registry, sync)
+}
+
+#[tokio::test]
+async fn reused_id_after_clear_accepts_first_command_before_event_consumer_attaches() {
+    let (temp, registry, sync) = setup_with_cleared_binding().await;
+    let (manager, _domain_rx) = build_session(temp.path(), &registry, &sync, "aelix-acp", "reuse.txt", "generic").await;
+    manager.warmup_session().await.unwrap();
+    let agent = AgentInstance::Acp(Arc::new(manager));
+
+    // The event stays queued, matching production warmup before attach.
+    prompt(&agent, "/extension list").await.unwrap();
+    assert_eq!(prompt_trace(temp.path(), "reuse.txt"), ["/extension list"]);
+    assert!(prelude_pending(&sync).await);
+    prompt(&agent, "Continue").await.unwrap();
+    assert_eq!(
+        prompt_trace(temp.path(), "reuse.txt")[1],
+        "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nContinue"
+    );
+    assert!(!prelude_pending(&sync).await);
+    agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn reused_id_after_clear_does_not_restore_old_rules_after_first_plain_prompt() {
+    let (temp, registry, sync) = setup_with_cleared_binding().await;
+    let fresh = open_session(temp.path(), &registry, &sync, "aelix-acp", "fresh.txt", "generic").await;
+    assert_selections(&fresh, &sync, "fixture/one", "low", Some("fixture/one")).await;
+    assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
+    prompt(&fresh, "First").await.unwrap();
+    assert_eq!(
+        prompt_trace(temp.path(), "fresh.txt"),
+        ["[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nFirst"]
+    );
+    fresh.kill_and_wait(None).await;
+
+    let resumed = open_session(temp.path(), &registry, &sync, "aelix-acp", "resumed.txt", "generic").await;
+    prompt(&resumed, "Second").await.unwrap();
+    assert_eq!(prompt_trace(temp.path(), "resumed.txt"), ["Second"]);
+    resumed.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn unbound_generic_fork_recovers_before_event_consumer_attaches() {
+    let (temp, registry, sync) = setup().await;
+    let (manager, _domain_rx) =
+        build_session(temp.path(), &registry, &sync, "other-acp", "fork.txt", "fork-recovery").await;
+    let result = manager.warmup_session().await;
+    let trace = std::fs::read_to_string(temp.path().join("fork.txt")).unwrap();
+    assert!(
+        trace.contains("session/fork\nsession/set_config_option forked-session\nsession/new\n"),
+        "{trace}"
+    );
+    assert!(result.is_ok(), "{result:?}; {trace}");
+    assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
+
+    let agent = AgentInstance::Acp(Arc::new(manager));
+    prompt(&agent, "/example").await.unwrap();
+    assert_eq!(prompt_trace(temp.path(), "fork.txt"), ["/example"]);
+    agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn non_commands_receive_the_first_prompt_rules() {
+    for text in [
+        "/Users/fixture/Documents",
+        "//host/Documents",
+        "/extension\nlist",
+        "/extension\tlist",
+        " /extension list",
+        "\n/extension list",
+        "https://example.test",
+        "/",
+    ] {
+        let (temp, registry, sync) = setup().await;
+        let agent = open_session(temp.path(), &registry, &sync, "aelix-acp", "plain.txt", "generic").await;
+        prompt(&agent, text).await.unwrap();
+        assert_eq!(
+            prompt_trace(temp.path(), "plain.txt"),
+            [format!(
+                "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n{text}"
+            )]
+        );
+        assert!(!prelude_pending(&sync).await);
+        agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn first_absolute_path_is_ordinary_text_without_a_configured_prelude() {
+    let (temp, registry, sync) = setup().await;
+    let agent = open_session(temp.path(), &registry, &sync, "aelix-acp", "no-rules.txt", "no-rules").await;
+
+    prompt(&agent, "/Users/fixture/Documents").await.unwrap();
+
+    assert_eq!(
+        prompt_trace(temp.path(), "no-rules.txt"),
+        ["\n/Users/fixture/Documents"]
+    );
+    assert!(!prelude_pending(&sync).await);
+    agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn unadvertised_slash_input_receives_first_prompt_rules_for_other_acp_peers() {
+    let (temp, registry, sync) = setup().await;
+    let agent = open_session(
+        temp.path(),
+        &registry,
+        &sync,
+        "other-acp",
+        "no-catalog.txt",
+        "no-catalog",
+    )
+    .await;
+
+    prompt(&agent, "/example").await.unwrap();
+
+    assert_eq!(
+        prompt_trace(temp.path(), "no-catalog.txt"),
+        ["[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n/example"]
+    );
+    assert!(!prelude_pending(&sync).await);
+    agent.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn legacy_conversation_without_session_row_binds_before_its_first_command() {
+    let (temp, registry, sync) = setup().await;
+    let repo = sync.repo();
+    assert!(repo.delete_for_user(USER, CONVERSATION).await.unwrap());
+    let (manager, _domain_rx) =
+        build_session(temp.path(), &registry, &sync, "aelix-acp", "legacy-row.txt", "generic").await;
+    manager.warmup_session().await.unwrap();
+    let agent = AgentInstance::Acp(Arc::new(manager));
+
+    let row = repo.get_for_user(USER, CONVERSATION).await.unwrap().unwrap();
+    assert_eq!(row.session_id.as_deref(), Some(SESSION));
+    assert_eq!(row.agent_source, "builtin");
+    assert_eq!(
+        row.agent_id,
+        registry.find_builtin_by_backend("gemini").await.unwrap().id
+    );
+
+    prompt(&agent, "/extension list").await.unwrap();
+    assert!(prelude_pending(&sync).await);
+    assert_eq!(prompt_trace(temp.path(), "legacy-row.txt"), ["/extension list"]);
+    agent.kill_and_wait(None).await;
 }

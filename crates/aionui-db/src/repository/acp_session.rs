@@ -72,12 +72,14 @@ pub enum AelixPreludeChange {
     Consume,
     Restore,
     /// An explicitly resumed conversation received a replacement session ID.
+    /// Compare the marker state observed while loading the existing binding.
     Rebind {
         previous_session_id: String,
+        carry_prelude: bool,
     },
-    /// Replace a known binding without transferring the old prelude.
+    /// Bind a fresh session and discard any marker left by the old binding.
     ReplaceBinding {
-        previous_session_id: String,
+        previous_session_id: Option<String>,
     },
 }
 
@@ -117,11 +119,10 @@ pub trait IAcpSessionRepository: Send + Sync {
     async fn clear_session_id_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError>;
 
     /// Update the deferred first-prompt marker for the owning conversation and
-    /// its matching backend session. Initial deferral can bind a fresh session
-    /// and store the marker atomically before the session-assigned event.
-    /// Consumption and restoration require the bound ID. Rebinding requires
-    /// both the old binding and its matching marker. Replacement requires
-    /// the old binding and does not transfer its prelude.
+    /// its matching backend session. Deferral, consumption, and restoration
+    /// require a committed binding. A fresh assignment compares the prior ID
+    /// (or NULL) and clears the old marker in the same write. Resume can
+    /// transfer a marker only from its matching previously bound ID.
     async fn update_aelix_prelude_for_user(
         &self,
         user_id: &str,

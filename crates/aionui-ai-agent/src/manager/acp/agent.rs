@@ -521,20 +521,37 @@ fn slash_command_items(commands: &[AvailableCommand]) -> Vec<SlashCommandItem> {
     commands.iter().map(slash_command_item).collect()
 }
 
-fn leading_slash_token(raw_user_input: &str) -> Option<&str> {
-    raw_user_input
-        .split_whitespace()
-        .next()?
-        .strip_prefix('/')
-        .filter(|token| !token.is_empty())
-}
+fn slash_command_name(input: &str, is_aelix: bool) -> Option<&str> {
+    let text = input.strip_prefix('/')?;
+    if text.is_empty() || text.starts_with('/') {
+        return None;
+    }
+    if !is_aelix {
+        return text
+            .split(|c: char| c.is_whitespace())
+            .next()
+            .filter(|name| !name.is_empty());
+    }
 
-fn matched_slash_command(raw_user_input: &str, commands: &[AvailableCommand]) -> Option<SlashCommandItem> {
-    let token = leading_slash_token(raw_user_input)?;
-    commands
-        .iter()
-        .find(|command| command.name == token)
-        .map(slash_command_item)
+    // Aelix ACP @32082b6, src/aelix_acp/runtime/commands.py:
+    // compact_instructions accepts whitespace, while split_command only
+    // splits on ASCII space. Command names come from the ACP catalog.
+    let is_parser_whitespace = |c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}');
+    if let Some(arguments) = text.strip_prefix("compact")
+        && arguments.chars().next().is_none_or(is_parser_whitespace)
+    {
+        return Some("compact");
+    }
+    let name = text.split(' ').next()?;
+    if name.is_empty() || name.chars().any(is_parser_whitespace) {
+        return None;
+    }
+    // ALIASES in the same parser are not included in Session.commands().
+    Some(match name {
+        "rename" => "name",
+        "exit" => "quit",
+        _ => name,
+    })
 }
 
 /// Manages a single ACP Agent instance.
@@ -1360,17 +1377,31 @@ impl AcpAgentManager {
         let sid = self.ensure_session_opened().await.map_err(AcpSendFailure::from)?;
         self.runtime.reset_for_new_turn(ConversationStatus::Running);
         let raw_user_input = data.content.clone();
-        let matched_command = {
-            let session = self.session.read().await;
-            session
-                .available_commands()
-                .and_then(|commands| matched_slash_command(&raw_user_input, commands))
-        };
+        use crate::agent_task::IAgentTask as _;
+        let is_aelix = raw_user_input.starts_with('/')
+            && self
+                .protocol
+                .initialize_response()
+                .is_some_and(|response| response.agent_info.is_some_and(|info| info.name == "aelix-acp"));
+        let matched_command = slash_command_name(&raw_user_input, is_aelix)
+            .filter(|name| {
+                // The adapter dispatches non-compact commands only for text-only
+                // prompts (aelix-acp@32082b6, src/aelix_acp/session.py).
+                !is_aelix
+                    || *name == "compact"
+                    || data.files.is_empty()
+                    || crate::media::partition_media(&raw_user_input, &data.files, self.prompt_media_caps())
+                        .media
+                        .is_empty()
+            })
+            .and_then(|name| self.protocol.advertised_command(&sid, name))
+            .map(|command| slash_command_item(&command));
 
         let (content, consumed_prelude) = {
             let mut session = self.session.write().await;
             let deferred = session.has_deferred_aelix_prelude();
-            if raw_user_input.starts_with('/') && session.has_pending_session_new_prelude() {
+            let pending = session.has_pending_session_new_prelude();
+            if matched_command.is_some() && pending {
                 // Keep the command at the start of the ACP text and save the
                 // rules for the first ordinary prompt in this session.
                 if !deferred {
@@ -1387,7 +1418,12 @@ impl AcpAgentManager {
                     skill_manager: &self.skill_manager,
                     runtime: &self.runtime,
                 };
-                let transformed = self.pipeline.pre_send(&mut ctx, raw_user_input).await;
+                let mut transformed = self.pipeline.pre_send(&mut ctx, raw_user_input).await;
+                if pending && is_aelix && transformed.starts_with('/') && !transformed.starts_with("//") {
+                    // A first ordinary prompt with no rules still needs a text
+                    // boundary so Aelix does not reject its leading slash.
+                    transformed.insert(0, '\n');
+                }
                 if deferred && let Err(error) = self.persist_acp_prelude(&sid, AelixPreludeChange::Consume).await {
                     session.mark_deferred_aelix_prelude();
                     return Err(AcpSendFailure::PreludePersistence(error));
@@ -2358,7 +2394,8 @@ mod tests {
             .unwrap(),
         );
 
-        let matched = super::matched_slash_command("/ctx-flush now", &[command]).expect("command should match");
+        assert_eq!(super::slash_command_name("/ctx-flush now", false), Some("ctx-flush"));
+        let matched = super::slash_command_item(&command);
 
         assert_eq!(matched.command, "ctx-flush");
         assert_eq!(

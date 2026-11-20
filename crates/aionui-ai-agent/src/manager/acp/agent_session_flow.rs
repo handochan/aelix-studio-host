@@ -13,8 +13,8 @@ use agent_client_protocol::schema::v1::{
     AudioContent, AuthMethod, ContentBlock, ForkSessionRequest, ImageContent, LoadSessionRequest, PromptRequest,
     PromptResponse, SessionId, StopReason, Usage, UsageUpdate,
 };
-use aionui_api_types::{AELIX_EXPECTED_FORK_HEAD, FORK_HEAD_CHANGED, SlashCommandItem};
-use aionui_db::AelixPreludeChange;
+use aionui_api_types::{AELIX_EXPECTED_FORK_HEAD, AgentSource, FORK_HEAD_CHANGED, SlashCommandItem};
+use aionui_db::{AelixPreludeChange, CreateAcpSessionParams, DbError};
 use serde_json::Value;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -52,7 +52,7 @@ impl AcpAgentManager {
                 AgentError::internal("Could not save the ACP prelude state")
             })?;
         if !updated {
-            return Err(AgentError::conflict("The Aelix session binding changed"));
+            return Err(AgentError::conflict("The ACP session binding changed"));
         }
         Ok(())
     }
@@ -70,15 +70,71 @@ impl AcpAgentManager {
             })?
             .is_some_and(|row| row.has_pending_aelix_prelude(previous_sid));
         if sid != previous_sid {
-            let previous_session_id = previous_sid.to_owned();
-            let change = if pending {
-                AelixPreludeChange::Rebind { previous_session_id }
-            } else {
-                AelixPreludeChange::ReplaceBinding { previous_session_id }
-            };
-            self.persist_acp_prelude(sid, change).await?;
+            self.persist_acp_prelude(
+                sid,
+                AelixPreludeChange::Rebind {
+                    previous_session_id: previous_sid.to_owned(),
+                    carry_prelude: pending,
+                },
+            )
+            .await?;
         }
         Ok(pending)
+    }
+
+    async fn bind_fresh_session(&self, sid: &str, previous_sid: Option<&str>) -> Result<(), AgentError> {
+        if previous_sid.is_none() {
+            self.ensure_acp_session_row().await?;
+        }
+        self.persist_acp_prelude(
+            sid,
+            AelixPreludeChange::ReplaceBinding {
+                previous_session_id: previous_sid.map(str::to_owned),
+            },
+        )
+        .await
+    }
+
+    async fn ensure_acp_session_row(&self) -> Result<(), AgentError> {
+        let Some(repo) = &self.session_repo else {
+            return Ok(());
+        };
+        let user_id = &self.params.user_id;
+        let conversation_id = &self.params.conversation_id;
+        let storage_error = |error: DbError| {
+            warn!(%error, %conversation_id, "Could not prepare ACP session storage");
+            AgentError::internal("Could not prepare ACP session storage")
+        };
+        if repo
+            .get_for_user(user_id, conversation_id)
+            .await
+            .map_err(storage_error)?
+            .is_none()
+        {
+            // Legacy conversations that had never opened an ACP session may
+            // not have a row. Use the resolved catalog identity for backfill.
+            let agent_source = match self.params.metadata.agent_source {
+                AgentSource::Internal => "internal",
+                AgentSource::Builtin => "builtin",
+                AgentSource::Extension => "extension",
+                AgentSource::Custom => "custom",
+            };
+            match repo
+                .create(&CreateAcpSessionParams {
+                    user_id,
+                    conversation_id,
+                    agent_source,
+                    agent_id: &self.params.metadata.id,
+                })
+                .await
+            {
+                Ok(_) | Err(DbError::Conflict(_)) => {}
+                Err(error) => return Err(storage_error(error)),
+            }
+        }
+        // The binding write still requires ownership and the expected ID if
+        // another caller created the row after the read.
+        Ok(())
     }
 
     /// Establish a fresh ACP session (session/new) and apply desired
@@ -95,16 +151,6 @@ impl AcpAgentManager {
         let (session_response, legacy_models) = self.protocol.new_session(req).await?;
 
         let sid = session_response.session_id.to_string();
-        if let Some(stale_session_id) = stale_session_id {
-            // SessionAssigned may still be queued when the first prompt begins.
-            self.persist_acp_prelude(
-                &sid,
-                AelixPreludeChange::ReplaceBinding {
-                    previous_session_id: stale_session_id.to_owned(),
-                },
-            )
-            .await?;
-        }
 
         {
             let mut session = self.session.write().await;
@@ -128,17 +174,13 @@ impl AcpAgentManager {
         }
         self.emit_snapshot_events().await;
 
-        // Notify session_sync consumer so the new id hits the DB and
-        // future rebuilds can take the resume path.
+        self.reconcile_session(&sid).await?;
+        self.bind_fresh_session(&sid, stale_session_id).await?;
+
         self.runtime
             .emit(AgentStreamEvent::SessionAssigned(SessionAssignedEventData {
                 session_id: sid.clone(),
             }));
-
-        // Best-effort reconcile on a freshly-opened session. SessionNotFound
-        // here would be pathological (we just created the session) but is
-        // still surfaced for consistency.
-        self.reconcile_session(&sid).await?;
         Ok(sid)
     }
 
@@ -146,7 +188,12 @@ impl AcpAgentManager {
     /// Used as the rescue path when resume helpers see `SessionNotFound`.
     /// Emits a `warn!` so ops can still see the original failure that
     /// triggered the rebuild.
-    async fn rebuild_after_session_not_found(&self, stale_sid: &str, err: &AcpError) -> Result<String, AgentError> {
+    async fn rebuild_after_session_not_found(
+        &self,
+        stale_sid: &str,
+        previous_binding: Option<&str>,
+        err: &AcpError,
+    ) -> Result<String, AgentError> {
         if self
             .params
             .config
@@ -161,20 +208,21 @@ impl AcpAgentManager {
         warn!(
             conversation_id = %self.params.conversation_id,
             stale_session_id = %stale_sid,
-            recovery_action = "clear_persisted_session_id_and_session_new",
+            recovery_action = "replace_stale_session_binding",
             error = %err,
-            "open_session_resume: stale session id rejected by CLI; clearing persisted session id and rebuilding via session/new"
+            "open_session_resume: session id rejected by CLI; rebuilding via session/new"
         );
         {
             let mut session = self.session.write().await;
             session.clear_session_id();
             self.commit_session_changes(&mut session).await;
         }
-        self.open_fresh_session(Some(stale_sid)).await
+        self.open_fresh_session(previous_binding).await
     }
 
     async fn rebuild_after_acp_session_not_found(&self, stale_sid: &str, err: AcpError) -> Result<String, AgentError> {
-        self.rebuild_after_session_not_found(stale_sid, &err).await
+        self.rebuild_after_session_not_found(stale_sid, Some(stale_sid), &err)
+            .await
     }
 
     /// Resume an existing ACP session and apply desired mode/model/config.
@@ -182,7 +230,7 @@ impl AcpAgentManager {
     ///
     /// - Claude-meta-resume backends: `session/new` with
     ///   `_meta.claudeCode.options.resume`. The CLI may assign a new session id,
-    ///   which we persist via `SessionAssigned`.
+    ///   which we persist before publishing the stream event.
     /// - `session/load`-capable backends (e.g. Codex, OpenCode): `session/load`,
     ///   keep id.
     /// - Backends that support neither: seed the aggregate and hope the CLI
@@ -248,7 +296,9 @@ impl AcpAgentManager {
 
             return match self.reconcile_session(&new_sid).await {
                 Ok(()) => Ok(new_sid),
-                Err(e) if is_acp_session_not_found(&e) => self.rebuild_after_session_not_found(&new_sid, &e).await,
+                Err(e) if is_acp_session_not_found(&e) => {
+                    self.rebuild_after_session_not_found(&new_sid, Some(&new_sid), &e).await
+                }
                 Err(e) => Err(e.into()),
             };
         }
@@ -301,7 +351,10 @@ impl AcpAgentManager {
 
             return match self.reconcile_session(session_id).await {
                 Ok(()) => Ok(session_id.to_owned()),
-                Err(e) if is_acp_session_not_found(&e) => self.rebuild_after_session_not_found(session_id, &e).await,
+                Err(e) if is_acp_session_not_found(&e) => {
+                    self.rebuild_after_session_not_found(session_id, Some(session_id), &e)
+                        .await
+                }
                 Err(e) => Err(e.into()),
             };
         }
@@ -321,14 +374,17 @@ impl AcpAgentManager {
         self.emit_snapshot_events().await;
         match self.reconcile_session(session_id).await {
             Ok(()) => Ok(session_id.to_owned()),
-            Err(e) if is_acp_session_not_found(&e) => self.rebuild_after_session_not_found(session_id, &e).await,
+            Err(e) if is_acp_session_not_found(&e) => {
+                self.rebuild_after_session_not_found(session_id, Some(session_id), &e)
+                    .await
+            }
             Err(e) => Err(e.into()),
         }
     }
 
     /// Materialize a forked conversation's backend session: `session/fork`
     /// against the PARENT sid, absorbing the response exactly like
-    /// `session/load` and persisting the NEW sid via `SessionAssigned`.
+    /// `session/load` before publishing the new session ID.
     ///
     /// Deliberately different failure contract from resume: an initial fork
     /// NEVER falls back to `session/new` — the user asked for the parent's
@@ -411,19 +467,20 @@ impl AcpAgentManager {
         }
         self.emit_snapshot_events().await;
 
-        // Persist the NEW sid (acp_session.session_id): from here on every
-        // rebuild takes the plain resume path and the fork spec degrades to
-        // lineage display data.
-        self.runtime
-            .emit(AgentStreamEvent::SessionAssigned(SessionAssignedEventData {
-                session_id: new_sid.clone(),
-            }));
-
         match self.reconcile_session(&new_sid).await {
-            Ok(()) => Ok(new_sid),
-            // Post-fork reconcile hiccups keep the normal resume-era semantics
-            // (the fork itself succeeded and is persisted).
-            Err(e) if is_acp_session_not_found(&e) => self.rebuild_after_session_not_found(&new_sid, &e).await,
+            Ok(()) => {
+                // The guarded fork's API publishes after the full warmup succeeds.
+                if fork.expected_native_head.is_none() {
+                    self.bind_fresh_session(&new_sid, None).await?;
+                }
+                self.runtime
+                    .emit(AgentStreamEvent::SessionAssigned(SessionAssignedEventData {
+                        session_id: new_sid.clone(),
+                    }));
+                Ok(new_sid)
+            }
+            // The failed fork has no persistent binding to replace.
+            Err(e) if is_acp_session_not_found(&e) => self.rebuild_after_session_not_found(&new_sid, None, &e).await,
             Err(e) => Err(e.into()),
         }
     }
@@ -1251,7 +1308,7 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, AcpSessionEvent::SessionAssigned { .. })),
-            "warmup must emit SessionAssigned for the persistence consumer"
+            "warmup must emit SessionAssigned for domain observers"
         );
         assert!(
             events.iter().any(|e| matches!(e, AcpSessionEvent::SessionOpened)),

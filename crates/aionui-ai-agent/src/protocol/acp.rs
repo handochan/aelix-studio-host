@@ -27,13 +27,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AGENT_METHOD_NAMES, AuthenticateResponse, ClientCapabilities, ClientNotification, ClientSessionCapabilities,
-    CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse, ForkSessionResponse, Implementation,
-    InitializeRequest, KillTerminalRequest, KillTerminalResponse, LoadSessionResponse, PromptResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigOptionsCapabilities,
-    SessionNotification, SetSessionConfigOptionResponse, SetSessionModeResponse, TerminalExitStatus,
-    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    AGENT_METHOD_NAMES, AuthenticateResponse, AvailableCommand, ClientCapabilities, ClientNotification,
+    ClientSessionCapabilities, CloseSessionResponse, CreateTerminalRequest, CreateTerminalResponse,
+    ForkSessionResponse, Implementation, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
+    LoadSessionResponse, PromptResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome,
+    SessionConfigOptionsCapabilities, SessionNotification, SessionUpdate, SetSessionConfigOptionResponse,
+    SetSessionModeResponse, TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Lines, Responder, UntypedMessage, on_receive_notification, on_receive_request,
@@ -131,6 +132,8 @@ pub enum PermissionDecision {
     Cancelled,
 }
 
+type CommandCatalog = RwLock<Option<(String, Vec<AvailableCommand>)>>;
+
 /// ACP protocol handle: wraps the SDK connection and provides typed operations.
 ///
 /// All request methods are thin wrappers over `connection.send_request(...)
@@ -149,6 +152,8 @@ pub struct AcpProtocol {
     alive: Arc<AtomicBool>,
     /// Cached initialize response from the ACP handshake.
     initialize_response: Arc<RwLock<Option<InitializeResponse>>>,
+    /// The command catalog from the ordered SDK callback, scoped to its session.
+    command_catalog: Arc<CommandCatalog>,
     /// Set to `true` for the duration of a `session/load` request so that
     /// the SDK notification handler skips broadcasting the CLI's historical
     /// `session/update` replay to the UI event channel. The flag does NOT
@@ -192,6 +197,7 @@ impl AcpProtocol {
         let alive = Arc::new(AtomicBool::new(true));
         let relay = Arc::new(RelayConnection::new(relay_candidate));
         let replay_suppression = Arc::new(AtomicBool::new(false));
+        let command_catalog = Arc::new(CommandCatalog::default());
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
         log_acp_initialize_start(init_budget);
@@ -219,6 +225,7 @@ impl AcpProtocol {
             shutdown_rx,
             Arc::clone(&alive),
             Arc::clone(&replay_suppression),
+            Arc::clone(&command_catalog),
             Arc::clone(&terminal_registry),
             Arc::clone(&relay),
             stdin_closed.clone().drop_guard(),
@@ -259,6 +266,7 @@ impl AcpProtocol {
             stdin_closed,
             alive,
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
+            command_catalog,
             replay_suppression,
             terminal_registry,
             relay,
@@ -267,6 +275,15 @@ impl AcpProtocol {
 
     pub fn initialize_response(&self) -> Option<InitializeResponse> {
         self.initialize_response.read().unwrap().clone()
+    }
+
+    pub(crate) fn advertised_command(&self, session_id: &str, name: &str) -> Option<AvailableCommand> {
+        let catalog = self.command_catalog.read().unwrap();
+        let (id, commands) = catalog.as_ref()?;
+        (id == session_id)
+            .then(|| commands.iter().find(|command| command.name == name))
+            .flatten()
+            .cloned()
     }
 
     fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
@@ -749,6 +766,7 @@ async fn run_sdk_background(
     shutdown_rx: oneshot::Receiver<()>,
     alive: Arc<AtomicBool>,
     replay_suppression: Arc<AtomicBool>,
+    command_catalog: Arc<CommandCatalog>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
     relay: Arc<RelayConnection>,
     mark_stdin_closed: DropGuard,
@@ -867,7 +885,16 @@ async fn run_sdk_background(
                 let notification_tx = notification_tx.clone();
                 let replay_suppression = Arc::clone(&replay_suppression);
                 let relay = relay.clone();
+                let command_catalog = Arc::clone(&command_catalog);
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
+                    // An adapter can advertise its commands before replying to
+                    // session/new or session/load. Capture the catalog before
+                    // handing the notification to the asynchronous UI tracker.
+                    if let SessionUpdate::AvailableCommandsUpdate(update) = &notification.update {
+                        *command_catalog.write().unwrap() =
+                            Some((notification.session_id.to_string(), update.available_commands.clone()));
+                    }
+
                     // Fan out the raw SDK notification to the manager's apply-loop
                     // FIRST, so session state is consistent by the time the UI
                     // event hits the broadcast channel. Swallow send errors — if
