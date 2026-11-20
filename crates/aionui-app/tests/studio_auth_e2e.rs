@@ -433,6 +433,137 @@ async fn diagnose_health_and_overview_work_with_a_conversation_helper_token() {
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn studio_release_rejects_foreign_origin_and_valid_conversation_helper() {
+    use serde_json::{Value, json};
+
+    let host = StudioHost::start().await;
+    let dir = host._dir.as_ref().unwrap().path();
+    let adapter = dir.join("release_agent.py");
+    std::fs::write(
+        &adapter,
+        r#"import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req:
+        continue
+    result = {
+        'initialize': {'protocolVersion':1, 'agentInfo':{'name':'aelix-acp','version':'test'},
+                       'agentCapabilities':{'sessionCapabilities':{'close':{}}}},
+        'session/new': {'sessionId':'fixture-session'},
+    }.get(req.get('method'), {})
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}), flush=True)
+"#,
+    )
+    .unwrap();
+    let registered = host
+        .client
+        .post(format!("{}/api/agents/custom", host.url))
+        .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+        .json(&json!({"name":"Release agent","command":"python3","args":[adapter],"env":[],"icon":"A"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::OK);
+    let catalog: Value = host
+        .client
+        .get(format!("{}/api/assistants", host.url))
+        .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let assistant = catalog["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "Release agent")
+        .unwrap();
+    let created = host
+        .client
+        .post(format!("{}/api/conversations", host.url))
+        .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+        .json(&json!({"name":"Release admission","assistant":{"id":assistant["id"]},
+                      "extra":{"workspace":dir,"custom_workspace":true}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let body: Value = created.json().await.unwrap();
+    let id = body["data"]["id"].as_str().unwrap();
+    let route = format!("{}/api/conversations/{id}", host.url);
+    let cookie = host.login().await;
+    let token = host
+        .runtime_tokens
+        .issue(
+            "system_default_user",
+            id,
+            TEAM_RUNTIME_TOKEN_SESSION_GENERATION,
+            [RuntimeTokenScope::ConversationHelper],
+        )
+        .token;
+    let browser_post = |path: &str, origin: &str| {
+        host.client
+            .post(format!("{route}/{path}"))
+            .header(header::ORIGIN, origin)
+            .header(header::COOKIE, &cookie)
+    };
+    let view = json!({"view_id":"fixture-view"});
+    let ready = browser_post("runtime/ensure?view_id=fixture-view", &host.url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), StatusCode::OK);
+
+    let helper = |request: reqwest::RequestBuilder| {
+        request
+            .header("x-aionui-runtime-token", &token)
+            .header("x-aionui-user-id", "system_default_user")
+            .header("x-aionui-conversation-id", id)
+    };
+    let permitted_read = helper(host.client.get(&route)).send().await.unwrap();
+    assert_eq!(permitted_read.status(), StatusCode::OK);
+
+    for attempted in [
+        browser_post("runtime/release", "https://foreign.invalid"),
+        helper(host.client.post(format!("{route}/runtime/release"))),
+    ] {
+        let denied = attempted.json(&view).send().await.unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let err: Value = denied.json().await.unwrap();
+        assert_eq!(err["code"], "SOURCE_FORBIDDEN");
+    }
+
+    let renewal = browser_post("active-lease", &host.url)
+        .json(&view)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renewal.status(), StatusCode::OK);
+    let preserved: Value = host
+        .client
+        .get(&route)
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preserved["data"]["runtime"]["has_task"], true);
+    let allowed = browser_post("runtime/release", &host.url)
+        .json(&view)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let reply: Value = allowed.json().await.unwrap();
+    assert_eq!(reply["data"]["outcome"], "released");
+}
+
 #[tokio::test]
 async fn helper_rename_changes_only_the_name_of_its_own_conversation() {
     use tokio::io::AsyncWriteExt;
