@@ -53,6 +53,19 @@ pub(super) async fn build(
     ctx: FactoryContext,
 ) -> Result<AgentInstance, AgentError> {
     let mut overrides = build_context.config;
+    let team_managed_permissions = build_context.belongs_to_team;
+    let team_permission_repo = if team_managed_permissions {
+        // Bootstrap can await MCP initialization. Load the committed permission
+        // at use time, after bootstrap, so a selection during that wait wins.
+        overrides.session_mode = Some("default".to_owned());
+        Some(
+            deps.conversation_repo
+                .clone()
+                .ok_or_else(|| AgentError::internal("Aionrs Team permission storage is unavailable"))?,
+        )
+    } else {
+        None
+    };
     let resolved_skills = overrides.skills.clone();
 
     // Merge preset assistant rules into system_prompt (used as custom_prompt
@@ -198,6 +211,7 @@ pub(super) async fn build(
         compat_overrides,
         session_directory,
         session_mode: overrides.session_mode,
+        team_managed_permissions,
         skills: resolved_skills,
         extra_mcp_servers,
         bedrock_config,
@@ -237,7 +251,10 @@ pub(super) async fn build(
         }
     }
 
-    let agent = AionrsAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session).await?;
+    let mut agent = AionrsAgentManager::new(ctx.conversation_id, ctx.workspace, config, resume_session).await?;
+    if let Some(repository) = team_permission_repo {
+        agent = agent.with_team_permission_store(ctx.user_id, repository);
+    }
     Ok(AgentInstance::Aionrs(Arc::new(agent)))
 }
 

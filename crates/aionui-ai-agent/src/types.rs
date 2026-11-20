@@ -155,6 +155,8 @@ pub struct AionrsResolvedConfig {
     pub session_directory: PathBuf,
     /// Session mode (default, auto_edit, yolo).
     pub session_mode: Option<String>,
+    /// Whether the Team owns the live permission policy.
+    pub team_managed_permissions: bool,
     /// Resolved skill names from the conversation snapshot.
     pub skills: Vec<String>,
     /// Extra MCP servers to inject (team coordination or guide).

@@ -10,7 +10,7 @@ use aion_agent::engine::AgentEngine;
 use aion_agent::output::OutputSink;
 use aion_agent::session::Session;
 use aion_config::compat::ProviderCompat;
-use aion_config::config::{CliArgs, Config, McpServerConfig, ProviderType};
+use aion_config::config::{CliArgs, Config, McpServerConfig, ProviderType, ToolsConfig};
 use aion_mcp::manager::McpManager;
 use aion_protocol::commands::{ApprovalScope, SessionMode};
 use aion_protocol::{ToolApprovalManager, ToolApprovalResult};
@@ -21,6 +21,7 @@ use aionui_api_types::{
 use aionui_common::{
     AgentKillReason, AgentType, Confirmation, ConversationStatus, ErrorChain, TimestampMs, generate_short_id, now_ms,
 };
+use aionui_db::IConversationRepository;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast};
 use tokio::time::timeout;
@@ -117,6 +118,7 @@ pub struct AionrsAgentManager {
     #[allow(dead_code)] // intentional: lifetime-extension only; see Drop impl
     mcp_managers: Vec<Arc<McpManager>>,
     approval_manager: Arc<ToolApprovalManager>,
+    team_permission: Option<TeamPermissionStore>,
     confirmations: Arc<RwLock<Vec<Confirmation>>>,
     final_input_dump: Option<AionrsFinalInputDumpContext>,
     /// Signalled by `cancel()` to abort an in-flight `engine.run()` via
@@ -124,6 +126,12 @@ pub struct AionrsAgentManager {
     cancel_notify: Arc<Notify>,
     /// Signalled after an in-flight turn emits its terminal event.
     turn_finished_notify: Arc<Notify>,
+}
+
+struct TeamPermissionStore {
+    user_id: String,
+    repository: Arc<dyn IConversationRepository>,
+    mode_update: Mutex<()>,
 }
 
 impl Drop for AionrsAgentManager {
@@ -188,13 +196,19 @@ impl AionrsAgentManager {
             max_tool_call_failure_turns: config_extra.max_tool_call_failure_turns,
             system_prompt: config_extra.system_prompt.clone(),
             profile: None,
-            auto_approve: config_extra.session_mode.as_deref() == Some("yolo"),
+            auto_approve: !config_extra.team_managed_permissions
+                && config_extra.session_mode.as_deref() == Some("yolo"),
             thinking: None,
             thinking_budget: None,
             project_dir: Some(PathBuf::from(&workspace)),
         };
 
         let mut config = resolve_aionui_config(&cli_args)?;
+        if config_extra.team_managed_permissions {
+            // The live approval manager must be able to revoke Yolo without rebuilding the engine.
+            config.tools.auto_approve = false;
+            config.tools.allow_list = ToolsConfig::default().allow_list;
+        }
 
         // Backend-specific overrides
         config.bedrock = config_extra.bedrock_config;
@@ -280,11 +294,25 @@ impl AionrsAgentManager {
             slash_commands,
             mcp_managers: result.mcp_managers,
             approval_manager,
+            team_permission: None,
             confirmations,
             final_input_dump,
             cancel_notify: Arc::new(Notify::new()),
             turn_finished_notify: Arc::new(Notify::new()),
         })
+    }
+
+    pub(crate) fn with_team_permission_store(
+        mut self,
+        user_id: String,
+        repository: Arc<dyn IConversationRepository>,
+    ) -> Self {
+        self.team_permission = Some(TeamPermissionStore {
+            user_id,
+            repository,
+            mode_update: Mutex::new(()),
+        });
+        self
     }
 
     fn request_stop(&self, reason: Option<AgentKillReason>, operation: &'static str) -> bool {
@@ -383,6 +411,9 @@ impl IAgentTask for AionrsAgentManager {
     }
 
     async fn send_message(&self, data: SendMessageData) -> Result<(), AgentSendError> {
+        self.refresh_team_permission_mode()
+            .await
+            .map_err(AgentSendError::from_agent_error)?;
         let started_at = now_ms();
         info!(
             conversation_id = %self.runtime.conversation_id(),
@@ -567,6 +598,7 @@ impl AionrsAgentManager {
     }
 
     pub async fn mode(&self) -> Result<AgentModeResponse, AgentError> {
+        self.refresh_team_permission_mode().await?;
         Ok(AgentModeResponse {
             mode: self.approval_manager.current_mode(),
             initialized: true,
@@ -574,6 +606,16 @@ impl AionrsAgentManager {
     }
 
     pub async fn set_mode(&self, mode: &str) -> Result<(), AgentError> {
+        if self.has_team_permission_policy() {
+            return Err(AgentError::bad_request(
+                "Team permission mode must be selected through the Team API",
+            ));
+        }
+        self.apply_mode(mode);
+        Ok(())
+    }
+
+    fn apply_mode(&self, mode: &str) {
         let prev = self.approval_manager.current_mode();
         self.approval_manager.set_mode(parse_session_mode(mode));
         info!(
@@ -582,36 +624,71 @@ impl AionrsAgentManager {
             to = mode,
             "Aionrs session mode switched"
         );
-        Ok(())
     }
 
     pub async fn config_options(&self) -> Result<GetConfigOptionsResponse, AgentError> {
+        self.refresh_team_permission_mode().await?;
         Ok(GetConfigOptionsResponse {
             config_options: vec![aionrs_mode_config_option(self.approval_manager.current_mode())],
         })
     }
 
+    pub fn has_team_permission_policy(&self) -> bool {
+        self.team_permission.is_some()
+    }
+
+    /// Serialize the read and live application with slot selections. A Team-wide
+    /// write commits before looking up the live instance. If the task is still
+    /// being constructed, its first turn will read the committed choice here.
+    pub async fn refresh_team_permission_mode(&self) -> Result<(), AgentError> {
+        let Some(store) = &self.team_permission else {
+            return Ok(());
+        };
+        let _guard = store.mode_update.lock().await;
+        let mode = store
+            .repository
+            .aionrs_team_permission_mode(&store.user_id, self.runtime.conversation_id())
+            .await
+            .map_err(|error| AgentError::internal(format!("Failed to load Aionrs Team permission: {error}")))?;
+        let mode = mode.as_deref().unwrap_or("default");
+        if mode != self.approval_manager.current_mode() {
+            self.apply_mode(mode);
+        }
+        Ok(())
+    }
+
+    pub async fn set_team_config_option(
+        &self,
+        option_id: &str,
+        value: &str,
+    ) -> Result<SetConfigOptionResponse, AgentError> {
+        let mode = validate_mode_option(option_id, value)?;
+        let store = self
+            .team_permission
+            .as_ref()
+            .ok_or_else(|| AgentError::bad_request("Aionrs runtime is not managed by a Team"))?;
+        let _guard = store.mode_update.lock().await;
+        store
+            .repository
+            .set_aionrs_team_permission_mode(&store.user_id, self.runtime.conversation_id(), mode)
+            .await
+            .map_err(|error| AgentError::internal(format!("Failed to save Aionrs Team permission: {error}")))?;
+        self.apply_mode(mode);
+        Ok(self.observed_mode())
+    }
+
     pub async fn set_config_option(&self, option_id: &str, value: &str) -> Result<SetConfigOptionResponse, AgentError> {
-        let option_id = option_id.trim();
-        let value = value.trim();
-
-        if option_id != AIONRS_MODE_OPTION_ID {
-            return Err(AgentError::bad_request(format!(
-                "Config option '{option_id}' is not available"
-            )));
-        }
-        if !is_aionrs_session_mode(value) {
-            return Err(AgentError::bad_request(format!(
-                "Value '{value}' is not selectable for config option '{option_id}'"
-            )));
-        }
-
+        let value = validate_mode_option(option_id, value)?;
         self.set_mode(value).await?;
-        Ok(SetConfigOptionResponse {
+        Ok(self.observed_mode())
+    }
+
+    fn observed_mode(&self) -> SetConfigOptionResponse {
+        SetConfigOptionResponse {
             backend_accepted: None,
             confirmation: ConfigOptionConfirmation::Observed,
-            config_options: Some(self.config_options().await?.config_options),
-        })
+            config_options: Some(vec![aionrs_mode_config_option(self.approval_manager.current_mode())]),
+        }
     }
 
     pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AgentError> {
@@ -621,8 +698,20 @@ impl AionrsAgentManager {
 
 const AIONRS_MODE_OPTION_ID: &str = "mode";
 
-fn is_aionrs_session_mode(s: &str) -> bool {
-    matches!(s, "default" | "auto_edit" | "yolo")
+fn validate_mode_option<'a>(option_id: &str, value: &'a str) -> Result<&'a str, AgentError> {
+    let option_id = option_id.trim();
+    let value = value.trim();
+    if option_id != AIONRS_MODE_OPTION_ID {
+        return Err(AgentError::bad_request(format!(
+            "Config option '{option_id}' is not available"
+        )));
+    }
+    if !matches!(value, "default" | "auto_edit" | "yolo") {
+        return Err(AgentError::bad_request(format!(
+            "Value '{value}' is not selectable for config option '{option_id}'"
+        )));
+    }
+    Ok(value)
 }
 
 fn aionrs_mode_config_option(current_value: String) -> AcpConfigOptionDto {

@@ -202,7 +202,13 @@ impl ConversationService {
                 reason: "Team permission mode must be selected through the Team API".into(),
             });
         }
-        let response = match agent.set_config_option(option_id, &req.value).await {
+        let result = match &agent {
+            AgentInstance::Aionrs(manager) if from_team && manager.has_team_permission_policy() => {
+                manager.set_team_config_option(option_id, &req.value).await
+            }
+            _ => agent.set_config_option(option_id, &req.value).await,
+        };
+        let response = match result {
             Ok(response) => response,
             Err(err @ AgentError::Acp(AcpError::NotConnected)) => {
                 warn!(
