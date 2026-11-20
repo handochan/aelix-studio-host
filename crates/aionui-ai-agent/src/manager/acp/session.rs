@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, AuthMethod, AvailableCommand, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionModeState, UsageUpdate,
+    AgentCapabilities, AuthMethod, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionModeState, UsageUpdate,
 };
 
 use super::agent_event_tracker::AcpSessionEvent;
@@ -43,7 +43,6 @@ struct Advertised {
     context_usage: Option<UsageUpdate>,
     agent_capabilities: Option<AgentCapabilities>,
     auth_methods: Option<Vec<AuthMethod>>,
-    available_commands: Option<Vec<AvailableCommand>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -558,10 +557,6 @@ impl AcpSession {
         self.advertised.auth_methods.as_deref()
     }
 
-    pub fn available_commands(&self) -> Option<&[AvailableCommand]> {
-        self.advertised.available_commands.as_deref()
-    }
-
     pub fn current_mode_id(&self) -> Option<String> {
         self.advertised.modes.as_ref().map(|m| m.current_mode_id.to_string())
     }
@@ -941,10 +936,6 @@ impl AcpSession {
 
     pub fn apply_advertised_auth_methods(&mut self, methods: Vec<AuthMethod>) {
         self.advertised.auth_methods = Some(methods);
-    }
-
-    pub fn apply_advertised_commands(&mut self, commands: Vec<AvailableCommand>) {
-        self.advertised.available_commands = Some(commands);
     }
 
     /// Record the CLI's latest context usage. Diff-driven: emits

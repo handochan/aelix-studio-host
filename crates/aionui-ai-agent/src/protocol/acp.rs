@@ -32,7 +32,7 @@ use agent_client_protocol::schema::v1::{
     ForkSessionResponse, Implementation, InitializeRequest, KillTerminalRequest, KillTerminalResponse,
     LoadSessionResponse, PromptResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionResponse, SelectedPermissionOutcome,
-    SessionConfigOptionsCapabilities, SessionNotification, SessionUpdate, SetSessionConfigOptionResponse,
+    SessionConfigOptionsCapabilities, SessionId, SessionNotification, SessionUpdate, SetSessionConfigOptionResponse,
     SetSessionModeResponse, TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse,
     WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
@@ -46,6 +46,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
+
+use super::acp_command_catalog::CommandCatalog;
 
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
@@ -132,8 +134,6 @@ pub enum PermissionDecision {
     Cancelled,
 }
 
-type CommandCatalog = RwLock<Option<(String, Vec<AvailableCommand>)>>;
-
 /// ACP protocol handle: wraps the SDK connection and provides typed operations.
 ///
 /// All request methods are thin wrappers over `connection.send_request(...)
@@ -158,8 +158,8 @@ pub struct AcpProtocol {
     /// the SDK notification handler skips broadcasting the CLI's historical
     /// `session/update` replay to the UI event channel. The flag does NOT
     /// affect `notification_tx` — internal session aggregate updates keep
-    /// flowing so metadata like `available_commands_update` still reaches
-    /// `event_tracker`.
+    /// flowing to the event tracker. Command advertisements have their own
+    /// session-scoped routing before either notification channel.
     ///
     /// Owned by the outer struct; an `Arc` clone is captured by the SDK
     /// background task's `on_receive_notification` closure.
@@ -197,7 +197,7 @@ impl AcpProtocol {
         let alive = Arc::new(AtomicBool::new(true));
         let relay = Arc::new(RelayConnection::new(relay_candidate));
         let replay_suppression = Arc::new(AtomicBool::new(false));
-        let command_catalog = Arc::new(CommandCatalog::default());
+        let command_catalog = Arc::new(CommandCatalog::new(event_tx.clone()));
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
         log_acp_initialize_start(init_budget);
@@ -277,13 +277,23 @@ impl AcpProtocol {
         self.initialize_response.read().unwrap().clone()
     }
 
+    pub(crate) fn with_advertised_commands<T>(
+        &self,
+        session_id: &str,
+        read: impl FnOnce(&[AvailableCommand]) -> T,
+    ) -> Option<T> {
+        self.command_catalog.with_commands(session_id, read)
+    }
+
     pub(crate) fn advertised_command(&self, session_id: &str, name: &str) -> Option<AvailableCommand> {
-        let catalog = self.command_catalog.read().unwrap();
-        let (id, commands) = catalog.as_ref()?;
-        (id == session_id)
-            .then(|| commands.iter().find(|command| command.name == name))
-            .flatten()
-            .cloned()
+        self.with_advertised_commands(session_id, |commands| {
+            commands.iter().find(|command| command.name == name).cloned()
+        })
+        .flatten()
+    }
+
+    pub(crate) fn adopt_command_session(&self, session_id: &str) {
+        self.command_catalog.activate(SessionId::new(session_id));
     }
 
     fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
@@ -319,11 +329,13 @@ impl AcpProtocol {
         &self,
         mut req: NewSessionRequest,
     ) -> Result<(NewSessionResponse, Option<serde_json::Value>), AcpError> {
+        let catalog_open = self.command_catalog.begin_open();
         let nonce = self.relay.prepare_open(&mut req.meta);
         let (response, models) = self
             .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
             .await?;
         let response: NewSessionResponse = response;
+        catalog_open.finish(response.session_id.clone());
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok((response, models))
@@ -350,20 +362,24 @@ impl AcpProtocol {
         mut req: LoadSessionRequest,
     ) -> Result<(LoadSessionResponse, Option<serde_json::Value>), AcpError> {
         let _guard = ReplaySuppressionGuard::new(&self.replay_suppression);
+        let catalog_open = self.command_catalog.begin_open();
         let nonce = self.relay.prepare_open(&mut req.meta);
         let sid = req.session_id.clone();
         let (response, models) = self
             .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
             .await?;
         let response: LoadSessionResponse = response;
+        catalog_open.finish(sid.clone());
         self.relay.opened(sid, nonce, response.meta.as_ref());
         Ok((response, models))
     }
 
     /// Fork an existing ACP session into a new session.
     pub async fn fork_session(&self, mut req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
+        let catalog_open = self.command_catalog.begin_open();
         let nonce = self.relay.prepare_open(&mut req.meta);
         let response = self.send_request(req, AGENT_METHOD_NAMES.session_fork).await?;
+        catalog_open.finish(response.session_id.clone());
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok(response)
@@ -371,7 +387,11 @@ impl AcpProtocol {
 
     /// Resume an existing ACP session.
     pub async fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, AcpError> {
-        self.send_request(req, AGENT_METHOD_NAMES.session_resume).await
+        let catalog_open = self.command_catalog.begin_open();
+        let session_id = req.session_id.clone();
+        let response = self.send_request(req, AGENT_METHOD_NAMES.session_resume).await?;
+        catalog_open.finish(session_id);
+        Ok(response)
     }
 
     /// Close an ACP session.
@@ -887,12 +907,9 @@ async fn run_sdk_background(
                 let relay = relay.clone();
                 let command_catalog = Arc::clone(&command_catalog);
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
-                    // An adapter can advertise its commands before replying to
-                    // session/new or session/load. Capture the catalog before
-                    // handing the notification to the asynchronous UI tracker.
                     if let SessionUpdate::AvailableCommandsUpdate(update) = &notification.update {
-                        *command_catalog.write().unwrap() =
-                            Some((notification.session_id.to_string(), update.available_commands.clone()));
+                        command_catalog.advertise(&notification.session_id, &update.available_commands);
+                        return Ok(());
                     }
 
                     // Fan out the raw SDK notification to the manager's apply-loop
@@ -906,8 +923,7 @@ async fn run_sdk_background(
                     // session/update notifications back to us. The frontend
                     // already renders history from the local DB, so broadcasting
                     // the replay would produce duplicate UI blocks. Keep feeding
-                    // notification_tx (event_tracker still needs metadata like
-                    // available_commands_update), but skip the UI broadcast.
+                    // notification_tx for session metadata, but skip the UI broadcast.
                     if !replay_suppression.load(Ordering::Acquire) {
                         if matches!(
                             notification.update,

@@ -3,8 +3,7 @@ use crate::manager::acp::AcpAgentManager;
 use crate::manager::acp::mode_normalize::agent_metadata_uses_meta_resume;
 use crate::protocol::error::AcpError;
 use crate::protocol::events::{
-    AgentStreamEvent, AvailableCommandsEventData, ErrorEventData, SessionAssignedEventData, StartEventData, TipType,
-    TipsEventData,
+    AgentStreamEvent, ErrorEventData, SessionAssignedEventData, StartEventData, TipType, TipsEventData,
 };
 use crate::protocol::send_error::AgentSendError;
 use crate::shared_kernel::SessionId as DomainSessionId;
@@ -362,6 +361,7 @@ impl AcpAgentManager {
         // Legacy path: backend advertised neither claude-meta-resume nor
         // session/load. Seed the aggregate with the stored id and let the
         // caller prompt — matches pre-refactor behaviour.
+        self.protocol.adopt_command_session(session_id);
         let pending_prelude = self.restore_deferred_prelude(session_id, session_id).await?;
         {
             let mut session = self.session.write().await;
@@ -655,12 +655,6 @@ impl AcpAgentManager {
             // handshake blobs and downstream consumers see a uniform
             // structure regardless of origin.
             self.runtime.emit(AgentStreamEvent::AcpConfigOption(v));
-        }
-        if let Some(cmds) = session.available_commands() {
-            self.runtime
-                .emit(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData {
-                    commands: cmds.to_vec(),
-                }));
         }
     }
 

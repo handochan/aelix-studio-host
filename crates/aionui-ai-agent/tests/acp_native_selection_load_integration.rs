@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use aionui_ai_agent::factory::acp_assembler::{WorkspaceInfo, assemble_acp_params};
 use aionui_ai_agent::manager::acp::{AcpAgentManager, AcpSessionEvent};
+use aionui_ai_agent::protocol::events::AgentStreamEvent;
 use aionui_ai_agent::registry::AgentRegistry;
 use aionui_ai_agent::types::SendMessageData;
 use aionui_ai_agent::{AcpBuildExtra, AcpSessionSyncService, AcpSkillManager, AgentInstance, AgentSendError};
@@ -24,6 +25,13 @@ import sys
 
 agent_name, trace, load_surface = sys.argv[1:]
 selections = {'model': 'fixture/two', 'thinking_level': 'high'}
+phase = None
+catalog = ['extension', 'compact', 'help', 'name', 'quit', 'example', 'skill:fixture']
+
+def advertise(session_id, names):
+    print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
+        'sessionId': session_id, 'update': {'sessionUpdate': 'available_commands_update',
+        'availableCommands': [{'name': name, 'description': name} for name in names]}}}), flush=True)
 
 def options():
     return [
@@ -49,15 +57,17 @@ for line in sys.stdin:
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
             'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
         }
-        if load_surface == 'fork-recovery':
+        if load_surface in ('fork-recovery', 'foreign-catalog', 'foreign-catalog-active'):
             response['result']['agentCapabilities']['sessionCapabilities'] = {'fork': {}}
     elif method == 'session/fork':
         response['result'] = {'sessionId': 'forked-session', 'configOptions': options()}
     elif method == 'session/new':
+        phase = 'new'
         resumed = params.get('_meta', {}).get('claudeCode', {}).get('options', {}).get('resume')
         session_id = 'replacement-session' if resumed == 'selector-session' else 'selector-session'
         response['result'] = {'sessionId': session_id, 'configOptions': options()}
     elif method == 'session/load' and params['sessionId'] == 'selector-session':
+        phase = 'load'
         response['result'] = {'configOptions': options()}
         if load_surface == 'legacy':
             model, *remaining = response['result']['configOptions']
@@ -71,7 +81,12 @@ for line in sys.stdin:
     elif method == 'session/set_config_option' and params['sessionId'] == 'forked-session':
         entry += ' forked-session'
         response['error'] = {'code': -32001, 'message': 'Session not found'}
+    elif method == 'session/set_config_option' and load_surface == 'same-id-catalog' and phase == 'load':
+        entry += ' stale'
+        response['error'] = {'code': -32001, 'message': 'Session not found'}
     elif method == 'session/set_config_option':
+        if load_surface == 'foreign-catalog-active':
+            advertise('forked-session', ['old-only'])
         key, value = params['configId'], params['value']
         entry += f' {key}={value}'
         selections[key] = value
@@ -96,12 +111,15 @@ for line in sys.stdin:
             response['result'] = {'stopReason': 'end_turn'}
     else:
         response['error'] = {'code': -32601, 'message': f'Unexpected request: {method}'}
-    if load_surface != 'no-catalog' and method in ('session/new', 'session/load') and 'result' in response:
-        name_list = ['extension', 'compact', 'help', 'name', 'quit', 'example', 'skill:fixture']
-        session_id = response['result'].get('sessionId', params.get('sessionId'))
-        print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
-            'sessionId': session_id, 'update': {'sessionUpdate': 'available_commands_update',
-            'availableCommands': [{'name': name, 'description': name} for name in name_list]}}}), flush=True)
+    if method in ('session/new', 'session/load') and 'result' in response:
+        if load_surface not in ('no-catalog', 'late-catalog') and not (
+                load_surface == 'same-id-catalog' and phase == 'new'):
+            advertise(response['result'].get('sessionId', params.get('sessionId')),
+                      [] if load_surface == 'empty-catalog' else catalog)
+        if load_surface == 'foreign-catalog' and method == 'session/new':
+            advertise('forked-session', ['old-only'])
+    elif method == 'session/prompt' and load_surface == 'late-catalog':
+        advertise(params['sessionId'], catalog)
     with open(trace, 'a') as output:
         output.write(entry + '\n')
     print(json.dumps(response), flush=True)
@@ -164,7 +182,11 @@ async fn build_session(
             current_model_id: Some("fixture/one".into()),
             thought_level: Some("low".into()),
             preset_context: (load_surface != "no-rules").then(|| "Fixture conversation rules".into()),
-            fork: (load_surface == "fork-recovery").then(|| aionui_api_types::ForkSpec {
+            fork: matches!(
+                load_surface,
+                "fork-recovery" | "foreign-catalog" | "foreign-catalog-active"
+            )
+            .then(|| aionui_api_types::ForkSpec {
                 parent_conversation_id: "parent".into(),
                 parent_message_id: "message".into(),
                 parent_session_id: "parent-session".into(),
@@ -757,23 +779,97 @@ async fn first_absolute_path_is_ordinary_text_without_a_configured_prelude() {
 
 #[tokio::test]
 async fn unadvertised_slash_input_receives_first_prompt_rules_for_other_acp_peers() {
+    for surface in ["no-catalog", "empty-catalog", "late-catalog"] {
+        let (temp, registry, sync) = setup().await;
+        let agent = open_session(temp.path(), &registry, &sync, "other-acp", "catalog.txt", surface).await;
+
+        assert!(agent.get_slash_commands().await.unwrap().is_empty(), "{surface}");
+        prompt(&agent, "/example").await.unwrap();
+
+        assert_eq!(
+            prompt_trace(temp.path(), "catalog.txt"),
+            ["[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n/example"],
+            "{surface}",
+        );
+        let commands = agent.get_slash_commands().await.unwrap();
+        if surface == "late-catalog" {
+            assert!(commands.iter().any(|item| item.command == "example"));
+        } else {
+            assert!(commands.is_empty(), "{surface}");
+        }
+        assert!(!prelude_pending(&sync).await);
+        agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn recovered_fork_ignores_foreign_advertisements_before_and_after_the_open_response() {
+    for surface in ["foreign-catalog", "foreign-catalog-active"] {
+        let (temp, registry, sync) = setup().await;
+        let (manager, _domain_rx) =
+            build_session(temp.path(), &registry, &sync, "other-acp", "foreign.txt", surface).await;
+        let manager = Arc::new(manager);
+        let agent = AgentInstance::Acp(Arc::clone(&manager));
+        let mut events = agent.subscribe();
+        manager.warmup_session().await.unwrap();
+        let trace = std::fs::read_to_string(temp.path().join("foreign.txt")).unwrap();
+        assert!(
+            trace.contains("session/fork\nsession/set_config_option forked-session\nsession/new\n"),
+            "{trace}"
+        );
+        if surface == "foreign-catalog-active" {
+            assert!(trace.contains("session/new\nsession/set_config_option "), "{trace}");
+        }
+
+        prompt(&agent, "/example").await.unwrap();
+        assert_eq!(prompt_trace(temp.path(), "foreign.txt"), ["/example"], "{surface}");
+        assert!(prelude_pending(&sync).await);
+        let commands = agent.get_slash_commands().await.unwrap();
+        assert!(commands.iter().any(|item| item.command == "example"));
+        assert!(!commands.iter().any(|item| item.command == "old-only"));
+
+        let mut published = false;
+        while let Ok(event) = events.try_recv() {
+            if let AgentStreamEvent::AvailableCommands(update) = event {
+                assert!(!update.commands.iter().any(|command| command.name == "old-only"));
+                published |= update.commands.iter().any(|command| command.name == "example");
+            }
+        }
+        assert!(published, "{surface}");
+        agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn reopened_session_with_reused_id_waits_for_a_new_command_catalog() {
     let (temp, registry, sync) = setup().await;
+    assert!(
+        sync.repo()
+            .update_session_id_for_user(USER, CONVERSATION, SESSION)
+            .await
+            .unwrap()
+    );
     let agent = open_session(
         temp.path(),
         &registry,
         &sync,
         "other-acp",
-        "no-catalog.txt",
-        "no-catalog",
+        "same-id.txt",
+        "same-id-catalog",
     )
     .await;
+    let trace = std::fs::read_to_string(temp.path().join("same-id.txt")).unwrap();
+    assert!(
+        trace.contains("session/load\nsession/set_config_option stale\nsession/new\n"),
+        "{trace}"
+    );
 
     prompt(&agent, "/example").await.unwrap();
-
     assert_eq!(
-        prompt_trace(temp.path(), "no-catalog.txt"),
+        prompt_trace(temp.path(), "same-id.txt"),
         ["[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\n/example"]
     );
+    assert!(agent.get_slash_commands().await.unwrap().is_empty());
     assert!(!prelude_pending(&sync).await);
     agent.kill_and_wait(None).await;
 }

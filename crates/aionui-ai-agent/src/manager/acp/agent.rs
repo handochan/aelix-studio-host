@@ -1274,12 +1274,12 @@ impl AcpAgentManager {
         }
     }
 
-    /// Return available slash commands from the session aggregate.
+    /// Return slash commands for the active ACP session.
     pub(crate) async fn load_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AgentError> {
         let session = self.session.read().await;
         let items = session
-            .available_commands()
-            .map(slash_command_items)
+            .session_id()
+            .and_then(|sid| self.protocol.with_advertised_commands(sid, slash_command_items))
             .unwrap_or_default();
         Ok(items)
     }
@@ -2353,7 +2353,6 @@ mod tests {
 
     #[test]
     fn session_command_loading_preserves_empty_turn_meta() {
-        let mut session = AcpSession::new(None, None, Default::default());
         let mut command = AvailableCommand::new("review", "Review the current diff");
         command.meta = Some(
             serde_json::from_value(json!({
@@ -2365,9 +2364,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        session.apply_advertised_commands(vec![command]);
-
-        let items = super::slash_command_items(session.available_commands().expect("commands advertised"));
+        let items = super::slash_command_items(&[command]);
 
         assert_eq!(items.len(), 1);
         let item = &items[0];

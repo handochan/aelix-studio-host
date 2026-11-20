@@ -1,4 +1,5 @@
 pub(crate) mod acp;
+mod acp_command_catalog;
 pub(crate) mod acp_dialect;
 pub(crate) mod acp_init_budget;
 pub mod acp_relay;
