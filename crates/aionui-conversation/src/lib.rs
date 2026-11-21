@@ -4,6 +4,7 @@
 mod acp_error_recovery;
 mod acp_extension;
 mod acp_extension_routes;
+mod byte_grant_snapshot;
 pub use acp_extension_routes::{AcpExtensionAdmission, acp_extension_routes};
 mod agent_health_policy;
 mod background_stream;

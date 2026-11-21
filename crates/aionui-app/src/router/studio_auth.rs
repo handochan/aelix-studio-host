@@ -100,7 +100,10 @@ async fn admit(
     let path = request.uri().path();
     let acp_relay = path
         .strip_prefix("/api/conversations/")
-        .and_then(|path| path.strip_suffix("/acp-extensions"))
+        .and_then(|path| {
+            path.strip_suffix("/acp-extensions")
+                .or_else(|| path.strip_suffix("/byte-grants"))
+        })
         .is_some_and(|id| !id.is_empty() && !id.contains('/'));
     if acp_relay
         && (request.headers().contains_key(RUNTIME_TOKEN_HEADER)

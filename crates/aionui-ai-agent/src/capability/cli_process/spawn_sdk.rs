@@ -39,6 +39,14 @@ impl CliAgentProcess {
                 std::process::Stdio::piped()
             });
 
+        if relay_candidate {
+            // The built-in adapter inherits this environment into native.
+            // Provider SDK debug can install handlers for request and HTTP wire data.
+            cmd.env_remove("ANTHROPIC_LOG")
+                .env_remove("OPENAI_LOG")
+                .env_remove("GEMINI_NEXT_GEN_API_LOG");
+        }
+
         #[cfg(windows)]
         let direct: Option<AgentStdin> = if relay_candidate {
             let (reader, writer) = super::direct_stdin::DirectStdin::pipe()

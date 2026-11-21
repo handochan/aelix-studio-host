@@ -280,6 +280,7 @@ async fn spawn_and_connect_acp_once(
         Some(std::path::PathBuf::from(&params.workspace.path)),
         crate::protocol::acp_init_budget::init_budget(&params.command_spec),
         relay_candidate,
+        params.team_permission_mode.is_none(),
     );
     tokio::pin!(connect_fut);
     let protocol = tokio::select! {
@@ -634,6 +635,16 @@ impl AcpAgentManager {
         &self,
     ) -> Result<aionui_api_types::AcpExtensionDiscovery, crate::protocol::acp_relay::RelayError> {
         self.protocol.relay_discovery()
+    }
+
+    pub fn byte_grants(
+        &self,
+        binding: &str,
+    ) -> Result<Arc<crate::protocol::byte_grants::ByteGrantBinding>, crate::protocol::acp_relay::RelayError> {
+        if self.params.team_permission_mode.is_some() {
+            return Err(crate::protocol::acp_relay::RelayError::Unavailable);
+        }
+        self.protocol.byte_grants(binding)
     }
 
     pub fn relay_dispatch(

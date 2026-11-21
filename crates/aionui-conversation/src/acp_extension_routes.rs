@@ -1,13 +1,17 @@
 #![allow(clippy::disallowed_types)]
 
 use aionui_ai_agent::protocol::acp_relay::{RelayError, valid_json_bounds, valid_method};
-use aionui_api_types::{AcpExtensionRequest, ApiResponse};
+use aionui_ai_agent::protocol::byte_grants::ByteGrantError;
+use aionui_api_types::{AcpExtensionRequest, ApiResponse, ByteGrantPrepare};
 use aionui_common::{ApiError, WsSessionGuard};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, FromRequest, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::get};
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 
 use crate::ConversationError;
 use crate::acp_extension::ExtensionError;
@@ -25,6 +29,7 @@ pub struct AcpExtensionAdmission {
 pub fn acp_extension_routes(state: ConversationRouterState) -> Router {
     Router::new()
         .route("/api/conversations/{id}/acp-extensions", get(discover).post(call))
+        .route("/api/conversations/{id}/byte-grants", post(prepare_bytes))
         .with_state(state)
 }
 
@@ -54,13 +59,73 @@ async fn call(
     State(state): State<ConversationRouterState>,
     Path(conversation): Path<String>,
     admission: Option<Extension<AcpExtensionAdmission>>,
-    mut request: Request,
+    request: Request,
 ) -> Result<Response, Response> {
     let Extension(access) = admission.ok_or_else(auth_required)?;
     state
         .service
         .charge_acp_extension(&access.owner)
         .map_err(extension_error)?;
+    let request: AcpExtensionRequest = bounded_json(request).await?;
+    if request.binding_id.is_empty() || request.binding_id.len() > 96 {
+        return Err(invalid_request());
+    }
+    if !valid_method(&request.method) {
+        return Err(extension_error(RelayError::MethodDenied.into()));
+    }
+    let data = state
+        .service
+        .call_acp_extension(
+            &access.owner,
+            &conversation,
+            request,
+            access
+                .browser_session
+                .as_ref()
+                .map(|(guard, generation)| (guard, *generation)),
+        )
+        .await
+        .map_err(extension_error)?;
+    Ok(Json(ApiResponse::ok(data)).into_response())
+}
+
+async fn prepare_bytes(
+    State(state): State<ConversationRouterState>,
+    Path(conversation): Path<String>,
+    admission: Option<Extension<AcpExtensionAdmission>>,
+    request: Request,
+) -> Response {
+    let result = async {
+        let Extension(access) = admission.ok_or_else(auth_required)?;
+        state
+            .service
+            .charge_acp_extension(&access.owner)
+            .map_err(extension_error)?;
+        let request: ByteGrantPrepare = bounded_json(request).await?;
+        let data = state
+            .service
+            .prepare_byte_grants(
+                &access.owner,
+                &conversation,
+                request,
+                access
+                    .browser_session
+                    .as_ref()
+                    .map(|(guard, generation)| (guard, *generation)),
+            )
+            .await
+            .map_err(extension_error)?;
+        Ok::<_, Response>(Json(ApiResponse::ok(data)).into_response())
+    }
+    .await;
+    let mut response = result.unwrap_or_else(|error| error);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn bounded_json<T: serde::de::DeserializeOwned>(mut request: Request) -> Result<T, Response> {
     let mut content_types = request.headers().get_all(header::CONTENT_TYPE).iter();
     let json = content_types
         .next()
@@ -93,27 +158,7 @@ async fn call(
     if !valid_json_bounds(&bytes) {
         return Err(invalid_request());
     }
-    let request: AcpExtensionRequest = serde_json::from_slice(&bytes).map_err(|_| invalid_request())?;
-    if request.binding_id.is_empty() || request.binding_id.len() > 96 {
-        return Err(invalid_request());
-    }
-    if !valid_method(&request.method) {
-        return Err(extension_error(RelayError::MethodDenied.into()));
-    }
-    let data = state
-        .service
-        .call_acp_extension(
-            &access.owner,
-            &conversation,
-            request,
-            access
-                .browser_session
-                .as_ref()
-                .map(|(guard, generation)| (guard, *generation)),
-        )
-        .await
-        .map_err(extension_error)?;
-    Ok(Json(ApiResponse::ok(data)).into_response())
+    serde_json::from_slice(&bytes).map_err(|_| invalid_request())
 }
 
 fn auth_required() -> Response {
@@ -135,6 +180,38 @@ fn coded(status: StatusCode, code: &'static str, message: &'static str) -> Respo
 fn extension_error(error: ExtensionError) -> Response {
     match error {
         ExtensionError::Authentication => auth_required(),
+        ExtensionError::InvalidByteGrant => coded(
+            StatusCode::BAD_REQUEST,
+            "BYTE_GRANT_INVALID",
+            "Invalid byte grant request",
+        ),
+        ExtensionError::ByteGrant(error) => match error {
+            ByteGrantError::Conflict => coded(
+                StatusCode::CONFLICT,
+                "BYTE_GRANT_CONFLICT",
+                "Preparation target changed",
+            ),
+            ByteGrantError::Limit => coded(
+                StatusCode::TOO_MANY_REQUESTS,
+                "BYTE_GRANT_LIMIT",
+                "Byte grant capacity reached",
+            ),
+            ByteGrantError::File => coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "BYTE_GRANT_FILE",
+                "Could not snapshot byte grant input",
+            ),
+            ByteGrantError::Expired => coded(
+                StatusCode::GATEWAY_TIMEOUT,
+                "BYTE_GRANT_TIMEOUT",
+                "Byte grant preparation timed out",
+            ),
+            ByteGrantError::Revoked => coded(
+                StatusCode::CONFLICT,
+                "BYTE_GRANT_REVOKED",
+                "Byte grant authorization changed",
+            ),
+        },
         ExtensionError::Conversation(ConversationError::NotFound { .. }) => coded(
             StatusCode::NOT_FOUND,
             "CONVERSATION_NOT_FOUND",

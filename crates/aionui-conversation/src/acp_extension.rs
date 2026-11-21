@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 use aionui_ai_agent::AgentInstance;
 use aionui_ai_agent::manager::acp::AcpAgentManager;
 use aionui_ai_agent::protocol::acp_relay::{DEADLINE, RelayCall, RelayError, RelayWriteAdmission};
-use aionui_api_types::{AcpExtensionDiscovery, AcpExtensionRequest, AcpExtensionResult};
+use aionui_ai_agent::protocol::byte_grants::{ByteGrantError, REF_LIMIT};
+use aionui_api_types::{
+    AcpExtensionDiscovery, AcpExtensionRequest, AcpExtensionResult, ByteGrantPrepare, ByteGrantPrepared,
+};
 use tokio::time::Instant;
 
 use crate::{ConversationError, ConversationService};
@@ -15,6 +18,8 @@ pub(crate) enum ExtensionError {
     Conversation(ConversationError),
     Relay(RelayError),
     Authentication,
+    InvalidByteGrant,
+    ByteGrant(ByteGrantError),
 }
 
 impl From<RelayError> for ExtensionError {
@@ -205,6 +210,80 @@ impl ConversationService {
                 self.with_extension_agent(owner, conversation, |agent| Ok(agent.relay_discovery()?))
             })
             .ok_or(RelayError::NoLiveTask)?
+    }
+
+    pub(crate) async fn prepare_byte_grants(
+        &self,
+        owner: &str,
+        conversation: &str,
+        request: ByteGrantPrepare,
+        browser_session: Option<(&aionui_common::WsSessionGuard, i64)>,
+    ) -> Result<ByteGrantPrepared, ExtensionError> {
+        if request.prepare_id.is_empty()
+            || request.prepare_id.len() > 96
+            || request.binding_id.is_empty()
+            || request.binding_id.len() > 96
+            || request.refs.is_empty()
+            || request.refs.len() > REF_LIMIT
+        {
+            return Err(ExtensionError::InvalidByteGrant);
+        }
+        self.ensure_owned_conversation(owner, conversation)
+            .await
+            .map_err(ExtensionError::Conversation)?;
+        if let Some((guard, _)) = browser_session
+            && !guard.recheck().await
+        {
+            return Err(ExtensionError::Authentication);
+        }
+        let project = self
+            .project_service
+            .read()
+            .ok()
+            .and_then(|service| service.clone())
+            .ok_or(RelayError::Unavailable)?;
+        let prepared = self
+            .runtime_state()
+            .with_relay_admission(conversation, || {
+                self.with_extension_agent(owner, conversation, |agent| {
+                    let binding = agent.byte_grants(&request.binding_id)?;
+                    let admission = self.relay_write_admission(
+                        owner,
+                        conversation,
+                        agent,
+                        browser_session,
+                        Instant::now() + DEADLINE,
+                    );
+                    let files = request.refs.clone();
+                    let source_owner = owner.to_owned();
+                    binding
+                        .prepare(
+                            &self.byte_grants,
+                            owner,
+                            request.prepare_id,
+                            &request.refs,
+                            browser_session.map(|(_, generation)| generation),
+                            admission,
+                            || crate::byte_grant_snapshot::snapshot_files(project, source_owner, files),
+                        )
+                        .map_err(ExtensionError::ByteGrant)
+                })
+            })
+            .ok_or(RelayError::StaleBinding)??;
+        let result = prepared.result().await.map_err(ExtensionError::ByteGrant)?;
+        if let Some((guard, _)) = browser_session
+            && !guard.recheck().await
+        {
+            return Err(ExtensionError::Authentication);
+        }
+        self.runtime_state()
+            .with_relay_admission(conversation, || {
+                self.with_extension_agent(owner, conversation, |agent| {
+                    agent.byte_grants(&request.binding_id).map_err(Into::into)
+                })
+            })
+            .ok_or(RelayError::StaleBinding)??;
+        Ok(result)
     }
 
     pub(crate) async fn call_acp_extension(

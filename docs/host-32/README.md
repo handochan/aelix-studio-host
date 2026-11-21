@@ -155,3 +155,5 @@ H1의 표준 사용자 업데이트 수신 경로를 사용한다. host는 U5-b 
 | A2 → Studio #7 | H1 요청 경로, A1 공통 중복 방지, native selection pin을 재사용한다. ACP에서 scope 투영·쓰기 제한·동의·기능 거절을 검증한 뒤 Studio가 비활성 세션 안내와 선택 UI를 연결한다. 표준 permission은 H2에 의존하지 않는다. |
 | A3 → Studio S3 | #612의 확정 wire와 H1 요청/H2 알림이 선행이다. ACP가 부모별 제어·cursor·병합·등록표를 검증하고 renderer는 독립 모듈로 자식 패널과 backoff를 연결한다. 그 전에는 children 메서드를 광고하지 않는다. #612가 beta.3에 빠지면 S3는 다음 릴리스 대상이다. |
 | 통합 | 각 기능에서 host/ACP/Studio SHA와 native wheel hash를 함께 남긴다. 승인된 D16 통합 시점에 host release와 Studio pin을 올리고 설치본에서 확인한다. |
+
+[Host #59 byte source v1 contract](byte-grants.md)

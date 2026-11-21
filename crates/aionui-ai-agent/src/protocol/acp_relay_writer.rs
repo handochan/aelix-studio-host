@@ -1,5 +1,5 @@
 //! Serialize complete pipe frames, with priority for standard ACP traffic
-//! while a relay frame has yet to write its first byte.
+//! while an extension frame has yet to write its first byte.
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,23 +11,30 @@ use futures_util::Sink;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use super::acp_relay::{OutgoingFrame, RelayConnection, RelayError, RelayFrame, StandardFrame, check_stdio_line};
+use super::acp_relay::{
+    OutgoingFrame, RelayConnection, RelayError, RelayFrame, ReverseRequest, StandardFrame, check_stdio_line,
+};
+
+use super::byte_grants::error_reply;
+
+const REVERSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) const STANDARD_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const PIPE_RETRY: Duration = Duration::from_millis(5);
 
-pub(super) fn sink(
+pub(super) fn sink_with_reverse(
     writer: impl AsyncWrite + Unpin + Send + 'static,
     relay: Arc<RelayConnection>,
     local: UnboundedSender<io::Result<String>>,
     alive: Arc<AtomicBool>,
+    reverse: mpsc::Receiver<ReverseRequest>,
 ) -> (impl Sink<String, Error = io::Error> + Send, tokio::task::JoinHandle<()>) {
     let (standard_tx, standard_rx) = mpsc::channel(8);
     // The application reserves a pending SDK slot before this queue.
     let (relay_tx, relay_rx) = mpsc::unbounded_channel();
     let wire = relay.clone();
     let driver = tokio::spawn(async move {
-        if let Err(error) = run(writer, &wire, &local, standard_rx, relay_rx).await {
+        if let Err(error) = run(writer, &wire, &local, standard_rx, relay_rx, reverse).await {
             alive.store(false, Ordering::Release);
             // Surface a broken stdin even if the child keeps stdout open.
             let _ = local.send(Err(error));
@@ -53,6 +60,7 @@ async fn run(
     local: &UnboundedSender<io::Result<String>>,
     mut standard: mpsc::Receiver<StandardFrame>,
     mut extensions: mpsc::UnboundedReceiver<RelayFrame>,
+    mut reverse: mpsc::Receiver<ReverseRequest>,
 ) -> io::Result<()> {
     loop {
         tokio::select! {
@@ -61,11 +69,105 @@ async fn run(
                 Some(line) => write_standard(&mut writer, relay, line).await?,
                 None => return Ok(()),
             },
+            Some(request) = reverse.recv() => {
+                write_reverse(&mut writer, relay, &mut standard, request).await?;
+            }
             Some(frame) = extensions.recv() => {
-                write_relay(&mut writer, relay, local, &mut standard, frame).await?;
+                write_relay(&mut writer, relay, local, &mut standard, &mut reverse, frame).await?;
             }
         }
     }
+}
+
+async fn write_reverse(
+    writer: &mut (impl AsyncWrite + Unpin),
+    relay: &RelayConnection,
+    standard: &mut mpsc::Receiver<StandardFrame>,
+    request: ReverseRequest,
+) -> io::Result<()> {
+    let deadline = tokio::time::Instant::now() + REVERSE_TIMEOUT;
+    let (code, message) = match request.params {
+        _ if !request.known_method || !relay.negotiated_byte_source() => (-32601, "Method not found"),
+        None => (-32602, "Invalid byte read"),
+        Some(params) => {
+            if let Some(binding) = relay.reverse_binding(&params)
+                && let Some(admission) = binding.authorization(&params.reference)
+            {
+                loop {
+                    let lock = tokio::select! {
+                        biased;
+                        line = standard.recv() => {
+                            let Some(line) = line else { return Ok(()) };
+                            write_standard(writer, relay, line).await?;
+                            continue;
+                        }
+                        _ = tokio::time::sleep_until(deadline) => Err(RelayError::DeadlineUnknown),
+                        result = admission.acquire() => result,
+                    };
+                    let Ok(lock) = lock else {
+                        if matches!(lock, Err(RelayError::StaleBinding | RelayError::AuthorizationRevoked)) {
+                            binding.revoke(&params.reference);
+                        }
+                        break;
+                    };
+                    if let Ok(line) = standard.try_recv() {
+                        drop(lock);
+                        write_standard(writer, relay, line).await?;
+                        continue;
+                    }
+                    let (admitted, attempted) = std::future::poll_fn(|cx| {
+                        let mut admitted = false;
+                        let mut result = None;
+                        admission.commit(&mut || {
+                            admitted = true;
+                            result = binding.try_reply(&params, &request.id, |line| {
+                                Pin::new(&mut *writer).poll_write(cx, line.as_bytes())
+                            });
+                        });
+                        Poll::Ready((admitted, result))
+                    })
+                    .await;
+                    drop(lock);
+                    if !admitted {
+                        binding.revoke(&params.reference);
+                    }
+                    match attempted {
+                        Some((reply, Poll::Ready(result))) => {
+                            let wrote = result?;
+                            if wrote == 0 {
+                                return Err(io::ErrorKind::WriteZero.into());
+                            }
+                            return finish_reverse(writer, &reply.as_bytes()[wrote..]).await;
+                        }
+                        None => break,
+                        Some((_, Poll::Pending)) => {
+                            tokio::select! {
+                                biased;
+                                line = standard.recv() => {
+                                    let Some(line) = line else { return Ok(()) };
+                                    write_standard(writer, relay, line).await?;
+                                }
+                                _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + PIPE_RETRY)) => {}
+                            }
+                        }
+                    }
+                }
+            }
+            (-33110, "Byte grant or read unavailable")
+        }
+    };
+    let mut reply = error_reply(&request.id, code, message);
+    reply.push('\n');
+    finish_reverse(writer, reply.as_bytes()).await
+}
+
+async fn finish_reverse(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> io::Result<()> {
+    tokio::time::timeout(REVERSE_TIMEOUT, async {
+        writer.write_all(bytes).await?;
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| io::Error::other("ACP reverse reply timed out"))?
 }
 
 pub(super) async fn finish(task: tokio::task::JoinHandle<()>, graceful: bool) {
@@ -109,6 +211,7 @@ async fn write_relay(
     relay: &RelayConnection,
     local: &UnboundedSender<io::Result<String>>,
     standard: &mut mpsc::Receiver<StandardFrame>,
+    reverse: &mut mpsc::Receiver<ReverseRequest>,
     frame: RelayFrame,
 ) -> io::Result<()> {
     let mut line = check_stdio_line(frame.line).map_err(io::Error::other)?;
@@ -124,6 +227,10 @@ async fn write_relay(
                 write_standard(writer, relay, line).await?;
                 continue;
             }
+            Some(request) = reverse.recv() => {
+                write_reverse(writer, relay, standard, request).await?;
+                continue;
+            }
             _ = tokio::time::sleep_until(deadline) => Err(RelayError::DeadlineUnknown),
             result = admission.acquire() => result,
         };
@@ -137,6 +244,11 @@ async fn write_relay(
         if let Ok(line) = standard.try_recv() {
             drop(lock);
             write_standard(writer, relay, line).await?;
+            continue;
+        }
+        if let Ok(request) = reverse.try_recv() {
+            drop(lock);
+            write_reverse(writer, relay, standard, request).await?;
             continue;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -180,6 +292,9 @@ async fn write_relay(
                         let Some(line) = line else { return Ok(()) };
                         write_standard(writer, relay, line).await?;
                     }
+                    Some(request) = reverse.recv() => {
+                        write_reverse(writer, relay, standard, request).await?;
+                    }
                     _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + PIPE_RETRY)) => {}
                 }
             }
@@ -213,6 +328,15 @@ mod tests {
     use serde_json::json;
     use tokio::io::AsyncReadExt;
 
+    fn sink(
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        relay: Arc<RelayConnection>,
+        local: UnboundedSender<io::Result<String>>,
+        alive: Arc<AtomicBool>,
+    ) -> (impl Sink<String, Error = io::Error> + Send, tokio::task::JoinHandle<()>) {
+        sink_with_reverse(writer, relay, local, alive, mpsc::channel(1).1)
+    }
+
     struct TestLock;
     impl aionui_db::AcpRelayWriteLock for TestLock {}
 
@@ -244,7 +368,7 @@ mod tests {
     }
 
     fn opened_relay(method: &str) -> Arc<RelayConnection> {
-        let relay = Arc::new(RelayConnection::new(true));
+        let relay = Arc::new(RelayConnection::new(true, true));
         let response: InitializeResponse = serde_json::from_value(json!({
             "protocolVersion":1,
             "agentInfo":{"name":"aelix-acp","version":"fixture"},
@@ -468,9 +592,16 @@ mod tests {
             let writing = tokio::spawn({
                 let relay = relay.clone();
                 async move {
-                    write_relay(&mut writer, &relay, &local, &mut standard, frame)
-                        .await
-                        .unwrap()
+                    write_relay(
+                        &mut writer,
+                        &relay,
+                        &local,
+                        &mut standard,
+                        &mut mpsc::channel(1).1,
+                        frame,
+                    )
+                    .await
+                    .unwrap()
                 }
             });
             parked.notified().await;

@@ -188,9 +188,10 @@ impl AcpProtocol {
         terminal_cwd: Option<std::path::PathBuf>,
         init_budget: InitBudget,
         relay_candidate: bool,
+        standalone: bool,
     ) -> Result<Self, AcpError> {
         let alive = Arc::new(AtomicBool::new(true));
-        let relay = Arc::new(RelayConnection::new(relay_candidate));
+        let relay = Arc::new(RelayConnection::new(relay_candidate, standalone));
         let replay_suppression = Arc::new(AtomicBool::new(false));
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
@@ -483,6 +484,13 @@ impl AcpProtocol {
             return Err(RelayError::NoLiveTask);
         }
         self.relay.discovery()
+    }
+
+    pub(crate) fn byte_grants(&self, binding: &str) -> Result<Arc<super::byte_grants::ByteGrantBinding>, RelayError> {
+        if !self.is_connected() {
+            return Err(RelayError::NoLiveTask);
+        }
+        self.relay.byte_grants(binding)
     }
 
     pub fn relay_dispatch(
@@ -778,6 +786,7 @@ async fn run_sdk_background(
     } else {
         (futures_util::future::Either::Right(stdout), None)
     };
+    let (reverse_tx, reverse_rx) = mpsc::channel(1);
     let incoming = raw_incoming
         .map(move |line| {
             if candidate {
@@ -801,9 +810,18 @@ async fn run_sdk_background(
         .filter_map(move |line: std::io::Result<String>| {
             let dialect_event_tx = dialect_event_tx.clone();
             let wire = wire_in.clone();
+            let reverse = reverse_tx.clone();
             async move {
                 let line = match line {
-                    Ok(line) if wire.candidate => Ok(wire.incoming(line)?),
+                    Ok(line) if wire.candidate => match wire.classify_incoming(line)? {
+                        acp_relay::IncomingFrame::Sdk(line) => Ok(line),
+                        acp_relay::IncomingFrame::Reverse(request) => {
+                            if reverse.try_send(request).is_err() {
+                                return Some(Err(std::io::Error::other("ACP reverse request queue full")));
+                            }
+                            return None;
+                        }
+                    },
                     other => other,
                 };
                 match line {
@@ -835,7 +853,8 @@ async fn run_sdk_background(
     });
     let mut writer_task = None;
     let outgoing: std::pin::Pin<Box<dyn Sink<String, Error = std::io::Error> + Send>> = if candidate {
-        let (sink, task) = super::acp_relay_writer::sink(stdin, relay.clone(), local_tx, alive.clone());
+        let (sink, task) =
+            super::acp_relay_writer::sink_with_reverse(stdin, relay.clone(), local_tx, alive.clone(), reverse_rx);
         writer_task = Some(task);
         Box::pin(sink)
     } else {
@@ -965,10 +984,14 @@ async fn run_sdk_background(
             let init_result = {
                 let mut req = build_initialize_request();
                 if handshake_relay.candidate {
-                    req.client_capabilities.meta = Some(serde_json::Map::from_iter([(
+                    let mut meta = serde_json::Map::from_iter([(
                         acp_relay::META_KEY.into(),
                         serde_json::json!({ "version": 1, "notifications": false }),
-                    )]));
+                    )]);
+                    if handshake_relay.offer_host_bytes {
+                        meta.insert(super::byte_grants::META_KEY.into(), serde_json::json!({ "version": 1 }));
+                    }
+                    req.client_capabilities.meta = Some(meta);
                 }
                 log_client_request("initialize", &json_str(&req));
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::Initializing;
