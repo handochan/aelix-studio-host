@@ -1,0 +1,65 @@
+{
+  "hostOffer": {"aelix/hostBytes": {"version": 1}},
+  "agentAcknowledgment": {"aelix/hostBytes": {"version": 1}},
+  "prepare": {
+    "method": "POST",
+    "path": "/api/conversations/conversation-example/byte-grants",
+    "body": {
+      "prepareId": "prepare-example",
+      "bindingId": "binding-example",
+      "refs": [{"kind": "upload", "path": "<managed-upload>"}]
+    }
+  },
+  "prepared": {
+    "success": true,
+    "data": {
+      "grants": [
+        {
+          "id": "8ec16a6b-d75c-41c1-94b5-ef19b2b9d4ec",
+          "byteLength": 3,
+          "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        }
+      ],
+      "expiresAtMs": 1800000060000,
+      "expiresInMs": 60000
+    }
+  },
+  "read": {
+    "jsonrpc": "2.0",
+    "id": "read-1",
+    "method": "_aelix/host/bytes/read",
+    "params": {
+      "sessionId": "session-example",
+      "bindingId": "binding-example",
+      "ref": "8ec16a6b-d75c-41c1-94b5-ef19b2b9d4ec",
+      "readerId": "reader-example",
+      "offset": 0,
+      "maxBytes": 147264
+    }
+  },
+  "chunk": {
+    "jsonrpc": "2.0",
+    "id": "read-1",
+    "result": {
+      "offset": 0,
+      "byteLength": 3,
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "eof": true,
+      "data": "YWJj"
+    }
+  },
+  "finish": {
+    "jsonrpc": "2.0",
+    "id": "read-2",
+    "method": "_aelix/host/bytes/read",
+    "params": {
+      "sessionId": "session-example",
+      "bindingId": "binding-example",
+      "ref": "8ec16a6b-d75c-41c1-94b5-ef19b2b9d4ec",
+      "readerId": "reader-example",
+      "offset": 3,
+      "finish": true
+    }
+  },
+  "finished": {"jsonrpc": "2.0", "id": "read-2", "result": {"released": true}}
+}

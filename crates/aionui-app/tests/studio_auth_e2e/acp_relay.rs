@@ -110,17 +110,24 @@ async fn acp_relay_unprotected_listener_has_no_route() {
         .await
         .unwrap();
     let router = aionui_app::create_router(&services).await.unwrap();
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/conversations/any/acp-extensions")
-                .header(PRIVATE_HEADER, FIXTURE_TOKEN)
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for (method, path) in [
+        ("GET", "/api/conversations/any/acp-extensions"),
+        ("POST", "/api/conversations/any/byte-grants"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[tokio::test]
@@ -353,6 +360,7 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     let binding = discovery["bindingId"].as_str().unwrap();
     assert_eq!(discovery["version"], 1);
     assert_eq!(discovery["notifications"], json!([]));
+    assert!(discovery.get("hostBytes").is_none());
     assert_eq!(discovery["requests"][0], "_aelix/session/probe/echo");
 
     let echo = "_aelix/session/probe/echo";
@@ -1151,3 +1159,6 @@ async fn acp_relay_turn_reports_input_loss_for_a_slow_database_and_for_an_insert
         }));
     }
 }
+
+#[path = "byte_grants.rs"]
+mod byte_grants;

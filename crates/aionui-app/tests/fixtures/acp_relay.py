@@ -1,5 +1,8 @@
 """Scripted ACP peer for the host transport contract tests."""
+import base64
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -14,6 +17,9 @@ active = 0
 elapsed_ms = 0
 output_lock = threading.Lock()
 pause_next = False
+byte_exchange = None
+host_bytes_enabled = counter.with_suffix(".host-bytes-enabled").exists()
+
 
 
 def encode(frame):
@@ -36,6 +42,67 @@ def update(kind, text, message_id=None, sid=session):
     send({"method": "session/update", "params": {"sessionId": sid, "update": payload}})
 
 
+def reverse_read(phase, **fields):
+    byte_exchange["phase"] = phase
+    payload = byte_exchange["payload"]
+    # A long ID forces the Host to size raw data against the full JSON frame.
+    request_id = ("byte-read-" + "x" * 1012) if phase == "first" else "byte-" + phase
+    send({"id": request_id, "method": "_aelix/host/bytes/read", "params": {
+        "sessionId": payload.get("sessionOverride", session),
+        "bindingId": payload.get("bindingOverride", binding),
+        "ref": payload["grant"], "readerId": "fixture-reader", **fields,
+    }})
+
+
+def continue_after_controls():
+    if byte_exchange and byte_exchange["phase"] == "controls" and byte_exchange.get("allowed") and byte_exchange.get("stopped"):
+        reverse_read("last", offset=len(byte_exchange["first"]), maxBytes=147264)
+
+
+def accept_byte_reply(line, frame):
+    exchange = byte_exchange
+    phase = exchange["phase"]
+    if phase == "denied":
+        result(exchange["id"], {"code": frame["error"]["code"]})
+    elif phase == "first":
+        size = len(line.rstrip("\n").encode())
+        assert 196605 <= size <= 196608
+        chunk = frame["result"]
+        assert chunk["offset"] == 0 and not chunk["eof"] and chunk["byteLength"] == exchange["payload"]["length"]
+        exchange["size"] = size
+        exchange["first"] = base64.b64decode(chunk["data"], validate=True)
+        assert len(exchange["first"]) < 147264
+        assert chunk["sha256"] == exchange["payload"]["sha256"]
+        print(exchange["payload"]["marker"], chunk["sha256"], exchange["payload"]["grant"],
+              "data:application/octet-stream;base64," + chunk["data"], file=sys.stderr, flush=True)
+        exchange["phase"] = "controls"
+        send({"id": "byte-permission", "method": "session/request_permission", "params": {
+            "sessionId": session, "toolCall": {"toolCallId": "byte-permission", "title": "Fixture permission"},
+            "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}],
+        }})
+    elif phase == "last":
+        chunk = frame["result"]
+        assert chunk["eof"] and chunk["offset"] == len(exchange["first"])
+        full = exchange["first"] + base64.b64decode(chunk["data"], validate=True)
+        assert len(full) == exchange["payload"]["length"]
+        assert hashlib.sha256(full).hexdigest() == exchange["payload"]["sha256"] == chunk["sha256"]
+        # Drop the application-level result and request the same last offset.
+        exchange["last"] = chunk
+        reverse_read("replay-last", offset=chunk["offset"], maxBytes=147264)
+    elif phase == "replay-last":
+        assert frame["result"] == exchange.pop("last")
+        reverse_read("finish", offset=exchange["payload"]["length"], finish=True)
+    elif phase == "finish":
+        assert frame["result"] == {"released": True}
+        reverse_read("replay-finish", offset=exchange["payload"]["length"], finish=True)
+    elif phase == "replay-finish":
+        assert frame["result"] == {"released": True}
+        result(exchange["id"], {"lineBytes": exchange["size"], "replayed": True, "released": True,
+                                "permission": exchange["allowed"], "stop": exchange["stopped"]})
+    else:
+        assert False, "Unexpected byte exchange phase"
+
+
 while True:
     first = ""
     if pause_next:
@@ -55,14 +122,24 @@ while True:
         counter.with_suffix(".initialize").write_text("relay" if relay else "standard")
         if relay is not None:
             assert relay == {"version": 1, "notifications": False}
+        capabilities = params["clientCapabilities"].get("_meta", {})
+        byte_meta = {}
+        byte_methods = []
+        if host_bytes_enabled and relay:
+            assert capabilities["aelix/hostBytes"] == {"version": 1}
+            byte_meta["aelix/hostBytes"] = {"version": 1}
+            byte_methods = ["_aelix/session/probe/bytes", "_aelix/session/probe/byte-denied",
+                            "_aelix/session/probe/byte-error", "_aelix/session/probe/byte-disconnect"]
+            counter.with_suffix(".provider-debug").write_text(str(
+                any(name in os.environ for name in ("ANTHROPIC_LOG", "OPENAI_LOG", "GEMINI_NEXT_GEN_API_LOG"))))
         result(rpc_id, {
             "protocolVersion": 1, "agentInfo": {"name": peer, "version": "fixture"},
-            "agentCapabilities": {"loadSession": True, "_meta": {"aelix/sessionRelay": {
+            "agentCapabilities": {"loadSession": True, "_meta": {**byte_meta, "aelix/sessionRelay": {
                 "version": 1, "requests": ["_aelix/session/probe/echo", "_aelix/session/probe/size",
                                            "_aelix/session/probe/finish", "_aelix/session/probe/write",
                                            "_aelix/session/requests/lookup", "_aelix/session/probe/hold",
                                            "_aelix/session/probe/clock", "_aelix/session/probe/pause",
-                                           "_aelix/session/probe/burst", "_aelix/session/probe/queued"],
+                                           "_aelix/session/probe/burst", "_aelix/session/probe/queued", *byte_methods],
                 "notifications": []}}},
         })
     elif method in ("session/new", "session/load", "session/fork"):
@@ -98,6 +175,16 @@ while True:
         if prompt is not None:
             result(prompt, {"stopReason": "cancelled"})
             prompt = None
+        if byte_exchange and byte_exchange["phase"] == "controls":
+            byte_exchange["stopped"] = True
+            continue_after_controls()
+    elif rpc_id == "byte-permission" and method is None:
+        assert frame["result"]["outcome"] == {"outcome": "selected", "optionId": "allow"}
+        byte_exchange["allowed"] = True
+        counter.with_suffix(".byte-permission-answered").touch()
+        continue_after_controls()
+    elif isinstance(rpc_id, str) and rpc_id.startswith("byte-") and method is None:
+        accept_byte_reply(line, frame)
     elif method and method.startswith("_"):
         assert set(params) == {"sessionId", "bindingId", "payload"}
         assert params["sessionId"] == session and params["bindingId"] == binding
@@ -165,6 +252,26 @@ while True:
         elif method.endswith("/clock"):
             elapsed_ms = body["elapsedMs"]
             result(rpc_id, None)
+        elif method.endswith(("/bytes", "/byte-denied")):
+            byte_exchange = {"id": rpc_id, "payload": body}
+            phase = "denied" if method.endswith("/byte-denied") else "first"
+            if body.get("holdForDatabase"):
+                counter.with_suffix(".reverse-paused").touch()
+
+                def after_database_lock():
+                    while not counter.with_suffix(".reverse-go").exists():
+                        time.sleep(0.01)
+                    reverse_read("denied", offset=0, maxBytes=147264)
+
+                threading.Thread(target=after_database_lock, daemon=True).start()
+            else:
+                reverse_read(phase, offset=0, maxBytes=147264)
+        elif method.endswith("/byte-error"):
+            print(json.dumps(body), file=sys.stderr, flush=True)
+            send({"id": rpc_id, "error": {"code": -32603, "message": body["marker"], "data": body}})
+        elif method.endswith("/byte-disconnect"):
+            print(json.dumps(body), file=sys.stderr, flush=True)
+            break
         elif method.endswith("/write"):
             print("relay-secret", file=sys.stderr, flush=True)
             key = body["requestId"]
