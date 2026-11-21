@@ -513,3 +513,49 @@ async fn byte_grant_resolves_project_upload_and_local_as_one_ordered_batch() {
     let id = root.rsplit('/').next().unwrap();
     host.tasks.kill_and_wait(id, None).await;
 }
+
+#[tokio::test]
+async fn byte_grant_rpc_refusals_preserve_safe_studio_recovery_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+    let host = StudioHost::start_with_db(dir, fixture(dir).await, true).await;
+    let sensitive = r#"private-h1-"/operator/private-extension.py""#;
+
+    for (mut input, expected) in [
+        (
+            json!({"kind":"restrictions_unenforceable","methods":[
+                "agents/use", sensitive, "tools/set_active", "permissions/set", "permissions/set"
+            ]}),
+            json!({"kind":"restrictions_unenforceable","methods":["agents/use","tools/set_active","permissions/set"]}),
+        ),
+        (
+            json!({"kind":"profile_unavailable","profile":sensitive}),
+            json!({"kind":"profile_unavailable","profile":"saved session profile"}),
+        ),
+        (
+            json!({"kind":"extension_owned_by_launch","source":sensitive}),
+            json!({"kind":"extension_owned_by_launch","source":"launch-managed extension"}),
+        ),
+    ] {
+        input["privateExtra"] = json!(sensitive);
+        std::fs::write(dir.join("relay-calls.recovery-fixture"), input.to_string()).unwrap();
+        let id = create(&host, dir, "fixture-aelix").await;
+        let rejection = read(
+            host.client
+                .post(format!("{}/api/conversations/{id}/runtime/ensure", host.url))
+                .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        assert_eq!(rejection["code"], "USER_AGENT_OPERATION_REFUSED");
+        assert_eq!(rejection["details"]["protocol_code"], -32004);
+        assert_eq!(rejection["details"]["data"], expected);
+        assert!(!rejection.to_string().contains("private-h1-"));
+        assert!(!rejection.to_string().contains("private-extension.py"));
+        host.tasks.kill_and_wait(&id, None).await;
+    }
+}

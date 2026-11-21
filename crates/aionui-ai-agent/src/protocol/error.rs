@@ -445,14 +445,20 @@ fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<
             let action = data.get("action").and_then(Value::as_str)?;
             matches!(action, "install" | "update" | "remove").then(|| json!({"kind":kind,"action":action}))
         }
-        (
-            -32004,
-            "client_action_required"
-            | "runtime_control_required"
-            | "profile_unavailable"
-            | "restrictions_unenforceable"
-            | "extension_owned_by_launch",
-        ) => Some(json!({"kind":kind})),
+        (-32004, "restrictions_unenforceable") => {
+            // The adapter checks this finite set before restoring a session.
+            let requested = data.get("methods").and_then(Value::as_array);
+            let methods: Vec<_> = ["agents/use", "tools/set_active", "permissions/set"]
+                .into_iter()
+                .filter(|method| requested.is_some_and(|items| items.iter().any(|item| item.as_str() == Some(*method))))
+                .collect();
+            Some(json!({"kind":kind,"methods":methods}))
+        }
+        // Studio uses a non-empty label to select each recovery message.
+        // Profile names and extension references (including basenames) are peer data.
+        (-32004, "profile_unavailable") => Some(json!({"kind":kind,"profile":"saved session profile"})),
+        (-32004, "extension_owned_by_launch") => Some(json!({"kind":kind,"source":"launch-managed extension"})),
+        (-32004, "client_action_required" | "runtime_control_required") => Some(json!({"kind":kind})),
         _ => None,
     }
 }
@@ -697,6 +703,27 @@ mod tests {
             safe_application_data(-32004, Some(&refusal)).unwrap(),
             serde_json::json!({"kind":"studio_extension_management_required","action":"install"})
         );
+    }
+
+    #[test]
+    fn byte_grant_restriction_recovery_emits_only_allowlisted_methods() {
+        use serde_json::json;
+
+        let input = json!({"kind":"restrictions_unenforceable","methods":[
+            "permissions/set", "private-file", "agents/use", {}, null, "tools/set_active",
+            "agents/use", "tools/set_active/private", " Tools/set_active "
+        ]});
+        assert_eq!(
+            safe_application_data(-32004, Some(&input)).unwrap(),
+            json!({"kind":"restrictions_unenforceable","methods":["agents/use","tools/set_active","permissions/set"]})
+        );
+        for methods in [json!("agents/use"), json!(["private-file", null, {}])] {
+            let input = json!({"kind":"restrictions_unenforceable","methods":methods});
+            assert_eq!(
+                safe_application_data(-32004, Some(&input)).unwrap(),
+                json!({"kind":"restrictions_unenforceable","methods":[]})
+            );
+        }
     }
 
     #[test]

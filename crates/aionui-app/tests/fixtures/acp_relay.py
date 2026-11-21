@@ -147,6 +147,11 @@ while True:
                 "notifications": []}}},
         })
     elif method in ("session/new", "session/load", "session/fork"):
+        refusal = counter.with_suffix(".recovery-fixture")
+        if host_bytes_enabled and refusal.exists():
+            send({"id": rpc_id, "error": {"code": -32004,
+                "message": escaped_marker, "data": json.loads(refusal.read_text(encoding="utf-8"))}})
+            continue
         meta = params.get("_meta", {}).get("aelix/sessionRelay")
         binding = meta["bindingId"] if meta else None
         update("user_message_chunk", "session replay", "load-replay")
