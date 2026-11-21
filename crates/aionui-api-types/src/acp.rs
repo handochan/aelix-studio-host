@@ -399,6 +399,32 @@ pub struct AcpExtensionDiscovery {
     pub binding_id: String,
     pub requests: Vec<String>,
     pub notifications: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_bytes: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ByteGrantPrepare {
+    pub prepare_id: String,
+    pub binding_id: String,
+    pub refs: Vec<crate::ChatFileRef>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ByteGrantDescriptor {
+    pub id: String,
+    pub byte_length: usize,
+    pub sha256: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ByteGrantPrepared {
+    pub grants: Vec<ByteGrantDescriptor>,
+    pub expires_at_ms: i64,
+    pub expires_in_ms: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

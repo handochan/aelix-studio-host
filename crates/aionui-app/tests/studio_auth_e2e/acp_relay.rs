@@ -110,17 +110,24 @@ async fn acp_relay_unprotected_listener_has_no_route() {
         .await
         .unwrap();
     let router = aionui_app::create_router(&services).await.unwrap();
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/conversations/any/acp-extensions")
-                .header(PRIVATE_HEADER, FIXTURE_TOKEN)
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for (method, path) in [
+        ("GET", "/api/conversations/any/acp-extensions"),
+        ("POST", "/api/conversations/any/byte-grants"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 #[tokio::test]
@@ -353,6 +360,7 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     let binding = discovery["bindingId"].as_str().unwrap();
     assert_eq!(discovery["version"], 1);
     assert_eq!(discovery["notifications"], json!([]));
+    assert!(discovery.get("hostBytes").is_none());
     assert_eq!(discovery["requests"][0], "_aelix/session/probe/echo");
 
     let echo = "_aelix/session/probe/echo";
@@ -832,7 +840,7 @@ struct QueuedRequest(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Write for QueuedRequest {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let line = String::from_utf8_lossy(buf);
-        if line.contains("outgoing_protocol_actor") && line.contains("probe/queued") {
+        if line.contains("ACP session extension queued") {
             self.0.store(true, std::sync::atomic::Ordering::Release);
         }
         Ok(buf.len())
@@ -973,6 +981,7 @@ async fn rejects_queued_request(revocation: QueuedRevocation) {
     )
     .await;
     wait_until(|| dir.path().join("relay-calls.pipe-blocked").exists()).await;
+    queued.0.store(false, std::sync::atomic::Ordering::Release);
     let request = invoke(&host, &root, &binding, "queued", json!({"value":"forbidden"}))
         .header(header::COOKIE, &cookies)
         .header(header::ORIGIN, &host.url)
@@ -1151,3 +1160,6 @@ async fn acp_relay_turn_reports_input_loss_for_a_slow_database_and_for_an_insert
         }));
     }
 }
+
+#[path = "byte_grants.rs"]
+mod byte_grants;

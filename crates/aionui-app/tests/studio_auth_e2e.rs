@@ -21,6 +21,8 @@ struct StudioHost {
     #[cfg(unix)]
     conversations: aionui_conversation::ConversationService,
     #[cfg(unix)]
+    projects: aionui_project::ProjectService,
+    #[cfg(unix)]
     tasks: std::sync::Arc<dyn aionui_ai_agent::IWorkerTaskManager>,
 }
 
@@ -79,6 +81,8 @@ impl StudioHost {
             users: services.user_repo,
             #[cfg(unix)]
             conversations: services.conversation_service,
+            #[cfg(unix)]
+            projects: services.project_service,
             #[cfg(unix)]
             tasks: services.worker_task_manager,
         }

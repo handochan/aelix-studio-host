@@ -336,7 +336,8 @@ pub struct ConversationService {
     agent_availability_feedback: Arc<RwLock<Option<Arc<dyn AgentAvailabilityFeedbackPort>>>>,
     /// Project-bind side branch (optional). `None` → binding is a no-op, so
     /// conversation create/read behaves exactly as before.
-    project_service: Arc<RwLock<Option<Arc<ProjectService>>>>,
+    pub(crate) project_service: Arc<RwLock<Option<Arc<ProjectService>>>>,
+    pub(crate) byte_grants: Arc<aionui_ai_agent::protocol::byte_grants::ByteGrantPool>,
     runtime_state: Arc<ConversationRuntimeStateService>,
     pub(crate) acp_extension_limits: Arc<crate::acp_extension::ExtensionLimits>,
     runtime_helper_bin: Option<String>,
@@ -422,6 +423,7 @@ impl ConversationService {
             assistant_dispatcher: Arc::new(RwLock::new(None)),
             agent_availability_feedback: Arc::new(RwLock::new(None)),
             project_service: Arc::new(RwLock::new(None)),
+            byte_grants: Arc::default(),
             runtime_state: Arc::new(ConversationRuntimeStateService::default()),
             acp_extension_limits: Arc::default(),
             runtime_helper_bin: None,

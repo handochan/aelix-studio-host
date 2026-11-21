@@ -239,6 +239,7 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
             cold_start: false,
         },
         false,
+        false,
     );
     let protocol = tokio::select! {
         biased;

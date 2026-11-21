@@ -14,6 +14,8 @@ use tokio::sync::{oneshot, watch};
 
 use crate::protocol::events::AgentStreamEvent;
 
+use super::byte_grants::{self, ByteGrantBinding, ReadRequest};
+
 pub const DEADLINE: Duration = Duration::from_secs(120);
 pub(crate) const META_KEY: &str = "aelix/sessionRelay";
 const METHOD_PREFIX: &str = "_aelix/session/";
@@ -98,7 +100,9 @@ pub enum RelayError {
 
 pub(crate) struct RelayConnection {
     pub(crate) candidate: bool,
+    pub(super) offer_host_bytes: bool,
     requests: OnceLock<Vec<String>>,
+    host_bytes: AtomicBool,
     session: Mutex<RelaySession>,
     wire: Mutex<HashMap<RequestId, WireRequest>>,
     standard_pending: Mutex<HashSet<RequestId>>,
@@ -110,6 +114,7 @@ struct RelaySession {
     open_generation: u64,
     binding: Option<(SessionId, String)>,
     binding_generation: watch::Sender<Option<RelayError>>,
+    byte_grants: Option<Arc<ByteGrantBinding>>,
     prompt: Option<ActivePrompt>,
 }
 
@@ -123,6 +128,9 @@ impl RelaySession {
         if self.binding.take().is_some() {
             self.binding_generation.send_replace(Some(reason));
             tracing::info!("ACP session extension binding closed");
+        }
+        if let Some(grants) = self.byte_grants.take() {
+            grants.close();
         }
         self.open_generation += 1;
         self.open = false;
@@ -211,6 +219,17 @@ impl AcpInputHistory {
     }
 }
 
+pub(super) enum IncomingFrame {
+    Sdk(String),
+    Reverse(ReverseRequest),
+}
+
+pub(super) struct ReverseRequest {
+    pub id: String,
+    pub params: Option<ReadRequest>,
+    pub known_method: bool,
+}
+
 pub(super) struct RelayFrame {
     pub id: RequestId,
     pub line: String,
@@ -276,16 +295,19 @@ pub struct RelayCall {
 }
 
 impl RelayConnection {
-    pub(crate) fn new(candidate: bool) -> Self {
+    pub(crate) fn new(candidate: bool, standalone: bool) -> Self {
         Self {
             candidate,
+            offer_host_bytes: candidate && standalone,
             requests: OnceLock::new(),
+            host_bytes: AtomicBool::new(false),
             session: Mutex::new(RelaySession {
                 open: false,
                 open_generation: 0,
                 binding: None,
                 binding_generation: watch::channel(None).0,
                 prompt: None,
+                byte_grants: None,
             }),
             wire: Mutex::new(HashMap::new()),
             standard_pending: Mutex::new(HashSet::new()),
@@ -298,6 +320,16 @@ impl RelayConnection {
             && let Some(requests) = advertisement(response)
         {
             let _ = self.requests.set(requests);
+            self.host_bytes.store(
+                self.offer_host_bytes
+                    && response
+                        .agent_capabilities
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get(byte_grants::META_KEY))
+                        .is_some_and(|offer| offer == &json!({"version": 1})),
+                Ordering::Release,
+            );
             tracing::info!("ACP session extension requests negotiated");
         }
     }
@@ -331,6 +363,9 @@ impl RelayConnection {
             if echo == Some(id.as_str()) {
                 session.binding_generation = watch::channel(None).0;
                 session.binding = Some((session_id, id));
+                if self.host_bytes.load(Ordering::Acquire) {
+                    session.byte_grants = Some(Arc::default());
+                }
                 tracing::info!("ACP session extension binding opened");
             } else {
                 tracing::warn!("ACP session extension binding echo did not match");
@@ -353,7 +388,62 @@ impl RelayConnection {
             binding_id: session.binding.as_ref().ok_or(RelayError::Unavailable)?.1.clone(),
             requests: requests.clone(),
             notifications: Vec::new(),
+            host_bytes: session.byte_grants.is_some(),
         })
+    }
+
+    pub(crate) fn byte_grants(&self, binding_id: &str) -> Result<Arc<ByteGrantBinding>, RelayError> {
+        let session = self.session.lock().unwrap();
+        let (_, current) = session.binding.as_ref().ok_or(RelayError::Unavailable)?;
+        if binding_id != current {
+            return Err(RelayError::StaleBinding);
+        }
+        session.byte_grants.clone().ok_or(RelayError::Unavailable)
+    }
+
+    fn reverse_request(line: &str, method: &str, id: RequestId) -> Option<ReverseRequest> {
+        let id = serde_json::to_string(&id).ok()?;
+        if id.len() > 64 * 1024 {
+            return None;
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Envelope<'a> {
+            jsonrpc: &'a str,
+            #[serde(rename = "id")]
+            _id: &'a RawValue,
+            #[serde(rename = "method")]
+            _method: &'a RawValue,
+            #[serde(borrow)]
+            params: &'a RawValue,
+        }
+        let known_method = method == byte_grants::METHOD;
+        let params = if known_method && id.len() <= byte_grants::MAX_ID_BYTES && line.len() <= 64 * 1024 {
+            serde_json::from_str::<Envelope>(line)
+                .ok()
+                .filter(|envelope| envelope.jsonrpc == "2.0")
+                .and_then(|envelope| ReadRequest::parse(envelope.params))
+        } else {
+            None
+        };
+        Some(ReverseRequest {
+            id,
+            params,
+            known_method,
+        })
+    }
+
+    pub(super) fn negotiated_byte_source(&self) -> bool {
+        self.host_bytes.load(Ordering::Acquire)
+    }
+
+    pub(super) fn reverse_binding(&self, request: &ReadRequest) -> Option<Arc<ByteGrantBinding>> {
+        let session = self.session.lock().unwrap();
+        let (session_id, binding_id) = session.binding.as_ref()?;
+        if session_id.0.as_ref() != request.session_id || *binding_id != request.binding_id {
+            return None;
+        }
+        session.byte_grants.clone()
     }
 
     pub(crate) fn dispatch(
@@ -482,7 +572,7 @@ impl RelayConnection {
         self.input_history.clone()
     }
 
-    pub(crate) fn incoming(&self, line: String) -> Option<String> {
+    pub(super) fn classify_incoming(&self, line: String) -> Option<IncomingFrame> {
         let input_on_wire = self
             .session
             .lock()
@@ -497,14 +587,21 @@ impl RelayConnection {
             if line.trim().is_empty() {
                 return None;
             }
-            return Some("{}".into());
+            return Some(IncomingFrame::Sdk("{}".into()));
         };
         let method = header.method_name();
+        if let Some(name) = method.as_deref()
+            && name.starts_with("_aelix/host/")
+        {
+            return Self::reverse_request(&line, name, header.id?).map(IncomingFrame::Reverse);
+        }
         if method.as_deref().is_some_and(|name| name.starts_with(METHOD_PREFIX)) {
             // Request-only negotiation. Ignore notifications and give reverse
             // requests the SDK's method-not-found path with an empty body.
             return header.id.map(|id| {
-                json!({"jsonrpc":"2.0","id":id,"method":"_aelix/session/unsupported","params":{}}).to_string()
+                IncomingFrame::Sdk(
+                    json!({"jsonrpc":"2.0","id":id,"method":"_aelix/session/unsupported","params":{}}).to_string(),
+                )
             });
         }
         if header.method.is_some() {
@@ -518,10 +615,10 @@ impl RelayConnection {
                     return None;
                 }
             }
-            return Some(line);
+            return Some(IncomingFrame::Sdk(line));
         }
         let Some(id) = header.id else {
-            return Some(line);
+            return Some(IncomingFrame::Sdk(line));
         };
         let request = {
             let mut wire = self.wire.lock().unwrap();
@@ -544,7 +641,7 @@ impl RelayConnection {
                         // ordered SDK queue before this response.
                         prompt.receiving_on_wire = false;
                     }
-                    return Some(line);
+                    return Some(IncomingFrame::Sdk(line));
                 }
             }
         };
@@ -556,7 +653,15 @@ impl RelayConnection {
         let _ = request.reply.send(reply);
         // Resolve the SDK's correlation slot without sending agent data into
         // its tracing, error mapping, or serde diagnostics.
-        Some(sdk_ack(&id))
+        Some(IncomingFrame::Sdk(sdk_ack(&id)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn incoming(&self, line: String) -> Option<String> {
+        match self.classify_incoming(line)? {
+            IncomingFrame::Sdk(line) => Some(line),
+            IncomingFrame::Reverse(_) => None,
+        }
     }
 
     pub(crate) fn discard_request(&self, id: &RequestId) {
@@ -703,6 +808,31 @@ pub fn valid_json_bounds(json: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_grant_capability_requires_a_built_in_standalone_offer() {
+        let response: InitializeResponse = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "aelix-acp", "version": "fixture"},
+            "agentCapabilities": {"_meta": {
+                "aelix/sessionRelay": {"version": 1, "requests": ["_aelix/session/probe"], "notifications": []},
+                "aelix/hostBytes": {"version": 1}
+            }}
+        }))
+        .unwrap();
+        for standalone in [true, false] {
+            let relay = RelayConnection::new(true, standalone);
+            relay.negotiate(&response);
+            let mut meta = None;
+            let attempt = relay.prepare_open(&mut meta);
+            relay.opened(SessionId::new("s"), attempt, meta.as_ref());
+            let discovery = relay.discovery().unwrap();
+            assert_eq!(discovery.requests, ["_aelix/session/probe"]);
+            assert_eq!(discovery.host_bytes, standalone);
+            assert_eq!(relay.byte_grants(&discovery.binding_id).is_ok(), standalone);
+        }
+    }
+
     use futures_util::StreamExt;
     use tokio_util::codec::FramedRead;
 

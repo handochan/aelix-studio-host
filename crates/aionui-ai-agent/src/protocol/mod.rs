@@ -3,6 +3,7 @@ pub(crate) mod acp_dialect;
 pub(crate) mod acp_init_budget;
 pub mod acp_relay;
 mod acp_relay_writer;
+pub mod byte_grants;
 
 pub(crate) mod custom_agent_probe;
 pub(crate) mod error;
