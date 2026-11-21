@@ -36,12 +36,18 @@ async fn byte_grant_prepare_joins_and_accounts_for_an_abandoned_preparation() {
     let pool = Arc::new(ByteGrantPool::default());
     let (send, copied) = tokio::sync::oneshot::channel();
     let first = binding
-        .prepare(&pool, "owner", "p".into(), &[local("a")], None, admission(), || async {
-            copied.await.map_err(|_| ByteGrantError::File)
-        })
+        .prepare(
+            &pool,
+            "owner",
+            "p".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |_| async { copied.await.map_err(|_| ByteGrantError::File) },
+        )
         .unwrap();
     drop(first);
-    let unexpected = || async { panic!("duplicate preparation started another copy") };
+    let unexpected = |_| async { panic!("duplicate preparation started another copy") };
     let joined = binding
         .prepare(&pool, "owner", "p".into(), &[local("a")], None, admission(), unexpected)
         .unwrap();
@@ -81,9 +87,15 @@ async fn byte_grant_prepare_joins_and_accounts_for_an_abandoned_preparation() {
     assert_eq!(pool.0.lock().unwrap().bytes, 0);
 
     let prepared = binding
-        .prepare(&pool, "owner", "p".into(), &[local("a")], None, admission(), || async {
-            Ok(vec![b"fixed".to_vec()])
-        })
+        .prepare(
+            &pool,
+            "owner",
+            "p".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |_| async { Ok(vec![b"fixed".to_vec()]) },
+        )
         .unwrap()
         .result()
         .await
@@ -114,7 +126,7 @@ async fn byte_grant_read_deadlines_and_finish_replay() {
             &[local("1"), local("2"), local("3")],
             None,
             admission(),
-            || async { Ok(vec![b"abcdef".to_vec(), b"unused".to_vec(), b"timeout".to_vec()]) },
+            |_| async { Ok(vec![b"abcdef".to_vec(), b"unused".to_vec(), b"timeout".to_vec()]) },
         )
         .unwrap()
         .result()
@@ -199,4 +211,131 @@ fn byte_grant_rejects_ambiguous_reverse_parameters() {
         assert!(ReadRequest::parse(&RawValue::from_string(input(action)).unwrap()).is_none());
     }
     assert!(ReadRequest::parse(&RawValue::from_string(input(r#""maxBytes":147264"#)).unwrap()).is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_grant_cancels_a_pending_stage_on_binding_close() {
+    let binding = Arc::new(ByteGrantBinding::default());
+    let pool = Arc::new(ByteGrantPool::default());
+    let (started, wait) = tokio::sync::oneshot::channel();
+    let pending = binding
+        .prepare(
+            &pool,
+            "owner",
+            "pending".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |cancel| async move {
+                started.send(()).unwrap();
+                cancel.cancelled().await;
+                Err(ByteGrantError::Revoked)
+            },
+        )
+        .unwrap();
+    wait.await.unwrap();
+    assert_eq!(pool.0.lock().unwrap().bytes, SNAPSHOT_LIMIT);
+    binding.close();
+    assert!(matches!(pending.result().await, Err(ByteGrantError::Revoked)));
+    tokio::task::yield_now().await;
+    let budget = pool.0.lock().unwrap();
+    assert_eq!(budget.bytes, 0);
+    assert_eq!(budget.records, 0);
+    assert!(budget.preparing.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_grant_timeout_retires_binding_slot_before_late_copy_returns() {
+    let binding = Arc::new(ByteGrantBinding::default());
+    let pool = Arc::new(ByteGrantPool::default());
+    let (finish, waiting) = tokio::sync::oneshot::channel();
+    let (cancelled, saw_cancel) = tokio::sync::oneshot::channel();
+    let pending = binding
+        .prepare(
+            &pool,
+            "owner",
+            "pending".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |cancel| async move {
+                cancel.cancelled().await;
+                cancelled.send(()).unwrap();
+                // Emulate the part of a filesystem syscall that cannot be aborted.
+                waiting.await.unwrap();
+                Ok(vec![b"late".to_vec()])
+            },
+        )
+        .unwrap();
+    assert!(matches!(pending.result().await, Err(ByteGrantError::Expired)));
+    saw_cancel.await.unwrap();
+    assert_eq!(pool.0.lock().unwrap().bytes, SNAPSHOT_LIMIT);
+
+    let published = binding
+        .prepare(
+            &pool,
+            "owner",
+            "pending".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |_| async { Ok(vec![b"replacement".to_vec()]) },
+        )
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(published.grants[0].byte_length, 11);
+    assert_eq!(pool.0.lock().unwrap().bytes, SNAPSHOT_LIMIT + 11);
+    finish.send(()).unwrap();
+    tokio::task::yield_now().await;
+    let replay = binding
+        .prepare(
+            &pool,
+            "owner",
+            "pending".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |_| async { panic!("late completion displaced the successful preparation") },
+        )
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(replay.grants[0].id, published.grants[0].id);
+    assert_eq!(pool.0.lock().unwrap().bytes, 11);
+    assert!(pool.0.lock().unwrap().preparing.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn byte_grant_abandoned_before_eof_reclaims_ram_without_finish() {
+    let binding = Arc::new(ByteGrantBinding::default());
+    let pool = Arc::new(ByteGrantPool::default());
+    let prepared = binding
+        .prepare(
+            &pool,
+            "owner",
+            "ready".into(),
+            &[local("a")],
+            None,
+            admission(),
+            |_| async { Ok(vec![b"abcdef".to_vec()]) },
+        )
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let id = &prepared.grants[0].id;
+    let pulled = reply(&binding, &request(id, "reader", 0, read_action(3))).unwrap();
+    assert_eq!(pulled["eof"], false);
+    // An abandoned pull (for example, after the peer observes Stop) cannot
+    // finish a partial snapshot. No subsequent pull or finish is required.
+    assert!(reply(&binding, &request(id, "reader", 3, ReadAction::Finish)).is_none());
+    tokio::time::advance(READ_TTL - Duration::from_millis(1)).await;
+    assert_eq!(pool.0.lock().unwrap().bytes, 6);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(pool.0.lock().unwrap().bytes, 0);
+    assert!(binding.authorization(id).is_none());
 }

@@ -158,7 +158,28 @@ async fn write_reverse(
     };
     let mut reply = error_reply(&request.id, code, message);
     reply.push('\n');
-    finish_reverse(writer, reply.as_bytes()).await
+    let deadline = tokio::time::Instant::now() + REVERSE_TIMEOUT;
+    // A rejection has the same frame ordering as a chunk. Once any byte
+    // reaches the pipe, the remaining bytes must finish before another frame.
+    let written = loop {
+        tokio::select! {
+            biased;
+            line = standard.recv() => {
+                let Some(line) = line else { return Ok(()) };
+                write_standard(writer, relay, line).await?;
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(io::Error::other("ACP reverse reply timed out"));
+            }
+            first = std::future::poll_fn(|cx| Pin::new(&mut *writer).poll_write(cx, reply.as_bytes())) => {
+                break first?;
+            }
+        }
+    };
+    if written == 0 {
+        return Err(io::ErrorKind::WriteZero.into());
+    }
+    finish_reverse(writer, &reply.as_bytes()[written..]).await
 }
 
 async fn finish_reverse(writer: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> io::Result<()> {
@@ -380,6 +401,63 @@ mod tests {
         let attempt = relay.prepare_open(&mut meta);
         relay.opened(SessionId::new("fixture"), attempt, meta.as_ref());
         relay
+    }
+
+    #[tokio::test]
+    async fn reverse_rejection_before_first_byte_yields_to_cancel_and_permission() {
+        use futures_util::SinkExt as _;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let relay = opened_relay("_aelix/session/probe");
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        writer.write_all(&[0; 1024]).await.unwrap();
+        let parked = Arc::new(tokio::sync::Notify::new());
+        let (requests, reverse) = mpsc::channel(1);
+        let (local, _completion) = mpsc::unbounded_channel();
+        let (sink, driver) = sink_with_reverse(
+            ParkedPipe {
+                pipe: writer,
+                parked: parked.clone(),
+            },
+            relay,
+            local,
+            Arc::new(AtomicBool::new(true)),
+            reverse,
+        );
+        let mut sink = Box::pin(sink);
+        requests
+            .send(ReverseRequest {
+                id: r#""rejected""#.into(),
+                params: None,
+                known_method: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), parked.notified())
+            .await
+            .unwrap();
+        let stop = json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"fixture"}});
+        let permission = json!({"jsonrpc":"2.0","id":"permission","result":{"outcome":{"outcome":"cancelled"}}});
+        for standard in [&stop, &permission] {
+            sink.send(standard.to_string()).await.unwrap();
+        }
+        let mut reader = BufReader::new(reader);
+        reader.read_exact(&mut [0; 1024]).await.unwrap();
+        let mut lines = reader.lines();
+        for expected in [
+            stop,
+            permission,
+            json!({"jsonrpc":"2.0","id":"rejected","error":{"code":-32601,"message":"Method not found"}}),
+        ] {
+            let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&line).unwrap(), expected);
+        }
+        drop(sink);
+        driver.await.unwrap();
     }
 
     #[tokio::test]

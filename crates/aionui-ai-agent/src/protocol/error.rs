@@ -321,6 +321,32 @@ impl AcpError {
     /// `SessionNotFound` to keep recovery paths uniform across agents.
     /// See ELECTRON-1HQ.
     /// `context` carries the session ID or method name for diagnostics.
+    /// Keep the SDK's classification while discarding free-form peer details
+    /// at the Host error boundary. HTTP, WS and diagnostics share this error.
+    pub(crate) fn without_remote_detail(mut self, method: &str) -> Self {
+        const DETAIL: &str = "ACP request failed";
+        match &mut self {
+            Self::SessionNotFound { session_id } => *session_id = method.to_owned(),
+            Self::ProtocolParseError { message }
+            | Self::InvalidRequest { message }
+            | Self::InvalidParams { message } => *message = DETAIL.into(),
+            Self::ResourceNotFound { resource, message } => {
+                *resource = None;
+                *message = DETAIL.into();
+            }
+            Self::ApplicationError { code, message, data } => {
+                *message = DETAIL.into();
+                *data = safe_application_data(*code, data.as_ref());
+            }
+            Self::AgentInternal { message, data, .. } | Self::OtherProtocolError { message, data, .. } => {
+                *message = DETAIL.into();
+                *data = None;
+            }
+            _ => {}
+        }
+        self
+    }
+
     pub fn from_sdk(err: SdkError, context: &str) -> Self {
         Self::from_sdk_for_agent(err, context, None)
     }
@@ -396,6 +422,38 @@ impl AcpError {
                 }
             }
         }
+    }
+}
+
+/// Retain the fixed discriminants consumed by Studio's lock and refusal UI.
+fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    use serde_json::{Value, json};
+
+    let data = data?;
+    let kind = data.get("kind").and_then(Value::as_str)?;
+    match (code, kind) {
+        (-33001, "session_locked") => {
+            let locked_by = data.get("lockedBy").and_then(Value::as_str)?;
+            if !matches!(locked_by, "native" | "acp") {
+                return None;
+            }
+            Some(json!({"kind":kind,"lockedBy":locked_by,"holder":null,"retryable":false}))
+        }
+        (-33002, "turn_failed_after_dispatch") => Some(json!({"kind":kind,"retryable":false})),
+        (-32000, "session_changing") => Some(json!({"kind":kind})),
+        (-32004, "studio_extension_management_required") => {
+            let action = data.get("action").and_then(Value::as_str)?;
+            matches!(action, "install" | "update" | "remove").then(|| json!({"kind":kind,"action":action}))
+        }
+        (
+            -32004,
+            "client_action_required"
+            | "runtime_control_required"
+            | "profile_unavailable"
+            | "restrictions_unenforceable"
+            | "extension_owned_by_launch",
+        ) => Some(json!({"kind":kind})),
+        _ => None,
     }
 }
 
@@ -610,6 +668,35 @@ mod tests {
         assert!(display.contains("session/setConfigOption"), "got {display}");
         // Display must stay a single, redacted line — no payload, no newline.
         assert!(!display.contains('\n'), "must be single line; got {display}");
+    }
+
+    #[test]
+    fn byte_grant_private_rpc_error_keeps_only_safe_structured_fields() {
+        let input = serde_json::json!({"kind":"session_locked","lockedBy":"native",
+            "holder":{"path":"private-file"}, "sessionId":"private-id"});
+        let error = AcpError::ApplicationError {
+            code: -33001,
+            message: "private message".into(),
+            data: Some(input),
+        }
+        .without_remote_detail("session/load");
+        let AcpError::ApplicationError { data, code, message } = error else {
+            panic!("lost protocol classification")
+        };
+        assert_eq!(code, -33001);
+        assert_eq!(message, "ACP request failed");
+        assert_eq!(
+            data.unwrap(),
+            serde_json::json!({"kind":"session_locked","lockedBy":"native","holder":null,"retryable":false})
+        );
+        let untrusted = serde_json::json!({"kind":"session_locked","lockedBy":"private-file"});
+        assert!(safe_application_data(-33001, Some(&untrusted)).is_none());
+        let refusal = serde_json::json!({"kind":"studio_extension_management_required",
+            "action":"install","source":"private-file"});
+        assert_eq!(
+            safe_application_data(-32004, Some(&refusal)).unwrap(),
+            serde_json::json!({"kind":"studio_extension_management_required","action":"install"})
+        );
     }
 
     #[test]

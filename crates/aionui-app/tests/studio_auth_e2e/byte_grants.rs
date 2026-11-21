@@ -31,6 +31,7 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();
     std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+    std::fs::write(dir.join("relay-calls.diagnostic-fixture"), "").unwrap();
     let database = fixture(dir).await;
     let pool = database.pool().clone();
     let host = StudioHost::start_with_db(dir, database, true).await;
@@ -41,6 +42,10 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
     let file = dir.join(file_name);
     let body_marker = "private-h1-body-文-\"-\\";
     let pixel_marker = b"private-h1-pixel-marker";
+    let standard_raw = "private-h1-standard-raw";
+    let standard_escaped = r#"private-h1-standard-"quoted"\끝"#;
+    let standard_base64 = base64::engine::general_purpose::STANDARD.encode(standard_raw);
+
     let mut pixels = vec![0x7b; 200_000];
     pixels[..pixel_marker.len()].copy_from_slice(pixel_marker);
     let sha = format!("{:x}", Sha256::digest(&pixels));
@@ -207,6 +212,9 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
     assert_eq!(denied["data"]["result"]["code"], -33110);
     transaction.rollback().await.unwrap();
 
+    let mut upgrade = host.upgrade();
+    upgrade.headers_mut().insert(header::COOKIE, browser.parse().unwrap());
+    let (mut websocket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
     let turn = read(
         host.client
             .post(format!("{root}/messages"))
@@ -222,6 +230,26 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
         .unwrap()
         .to_owned();
     wait_until(|| dir.join("relay-calls.prompt-started").exists()).await;
+    // Positive wire control: the standard update really traversed the SDK
+    // and reached the existing WS projection with its unmodified raw output.
+    let update = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = websocket.next().await.unwrap().unwrap();
+            if let Ok(text) = frame.to_text()
+                && text.contains(&standard_base64)
+            {
+                break serde_json::from_str::<Value>(text).unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        update
+            .to_string()
+            .contains(&serde_json::to_string(standard_escaped).unwrap())
+    );
+
     let send = call(
         "bytes",
         json!({"grant":grant,"length":pixels.len(),"sha256":sha,"marker":body_marker}),
@@ -287,6 +315,7 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
         assert_eq!(result[key], true);
     }
 
+    drop(websocket);
     let unsafe_error = call(
         "byte-error",
         json!({"marker":body_marker,"grant":grant,"sha256":sha,"path":file}),
@@ -336,21 +365,56 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
     )
     .await;
     assert_eq!(denied["data"]["result"]["code"], -33110);
+    let mut upgrade = host.upgrade();
+    upgrade
+        .headers_mut()
+        .insert(PRIVATE_HEADER, FIXTURE_TOKEN.parse().unwrap());
+    let (mut websocket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    let error_turn = read(
+        host.client
+            .post(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"content":"emit standard error"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let error_turn = error_turn["data"]["turn_id"].as_str().unwrap();
+    let public_error = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = websocket.next().await.unwrap().unwrap();
+            if let Ok(text) = frame.to_text()
+                && text.contains(error_turn)
+                && text.contains("USER_AGENT_TURN_FAILED_AFTER_DISPATCH")
+            {
+                break text.to_owned();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!public_error.contains("private-h1-standard"));
+
+    drop(websocket);
     host.tasks.kill_and_wait(&id, None).await;
 
-    let captured = trace.0.lock().unwrap();
-    let log = std::str::from_utf8(&captured).unwrap();
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("http response") && log.contains("/byte-grants"));
     assert!(
-        log.contains("Sending JSON-RPC message") && log.contains("Received JSON-RPC message"),
-        "positive control: the actual Rust SDK must log at TRACE"
+        !log.contains("Received JSON-RPC message"),
+        "protected SDK wire trace must be suppressed"
     );
-    assert!(log.contains("session/cancel") && log.contains("session/request_permission"));
     let encoded = base64::engine::general_purpose::STANDARD.encode(&pixels[..48]);
     for marker in [
         file.to_str().unwrap(),
         file_name,
         body_marker,
         "private-h1-",
+        standard_raw,
+        standard_escaped,
+        &standard_base64,
         std::str::from_utf8(pixel_marker).unwrap(),
         &encoded,
         &sha,

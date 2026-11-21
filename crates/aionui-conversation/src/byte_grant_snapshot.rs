@@ -8,28 +8,41 @@ use aionui_ai_agent::protocol::byte_grants::{ByteGrantError, SNAPSHOT_LIMIT};
 use aionui_api_types::ChatFileRef;
 use aionui_project::{FileOp, ProjectService};
 use same_file::Handle;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn snapshot_files(
     project: Arc<ProjectService>,
     owner: String,
     refs: Vec<ChatFileRef>,
+    cancel: CancellationToken,
 ) -> Result<Vec<Vec<u8>>, ByteGrantError> {
-    let upload_root = std::env::temp_dir().join("aionui");
-    let mut paths = Vec::with_capacity(refs.len());
-    for file in refs {
-        paths.push(
-            project
-                .resolve_chat_file_ref(&owner, &file, &upload_root, FileOp::Read)
-                .await
-                .map_err(|_| ByteGrantError::File)?,
-        );
+    if cancel.is_cancelled() {
+        return Err(ByteGrantError::Revoked);
     }
-
+    // The normal resolver may perform synchronous filesystem queries. Keep
+    // those and the copy off async workers, retaining the preparation charge
+    // until this worker has discarded any partial result.
+    let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
+        let upload_root = std::env::temp_dir().join("aionui");
         let mut remaining = SNAPSHOT_LIMIT;
-        let mut files = Vec::with_capacity(paths.len());
-        for path in paths {
-            let bytes = snapshot(Path::new(&path), remaining).map_err(|_| ByteGrantError::File)?;
+        let mut files = Vec::with_capacity(refs.len());
+        for file in refs {
+            let path = runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(ByteGrantError::Revoked),
+                    path = project.resolve_chat_file_ref(&owner, &file, &upload_root, FileOp::Read) =>
+                        path.map_err(|_| ByteGrantError::File),
+                }
+            })?;
+            let bytes = snapshot(Path::new(&path), remaining, &cancel).map_err(|_| {
+                if cancel.is_cancelled() {
+                    ByteGrantError::Revoked
+                } else {
+                    ByteGrantError::File
+                }
+            })?;
             remaining -= bytes.len();
             files.push(bytes);
         }
@@ -37,6 +50,14 @@ pub(crate) async fn snapshot_files(
     })
     .await
     .map_err(|_| ByteGrantError::File)?
+}
+
+fn check_cancel(cancel: &CancellationToken) -> io::Result<()> {
+    if cancel.is_cancelled() {
+        Err(io::ErrorKind::Interrupted.into())
+    } else {
+        Ok(())
+    }
 }
 
 fn open_regular(path: &Path) -> io::Result<File> {
@@ -58,7 +79,8 @@ fn open_regular(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn snapshot(path: &Path, remaining: usize) -> io::Result<Vec<u8>> {
+fn snapshot(path: &Path, remaining: usize, cancel: &CancellationToken) -> io::Result<Vec<u8>> {
+    check_cancel(cancel)?;
     let handle = Handle::from_file(open_regular(path)?)?;
     let mut file = handle.as_file();
     let before = file.metadata()?;
@@ -66,12 +88,18 @@ fn snapshot(path: &Path, remaining: usize) -> io::Result<Vec<u8>> {
     if length > remaining {
         return Err(io::ErrorKind::InvalidData.into());
     }
+    check_cancel(cancel)?;
     let mut bytes = vec![0; length];
-    file.read_exact(&mut bytes)?;
+    for chunk in bytes.chunks_mut(64 * 1024) {
+        check_cancel(cancel)?;
+        file.read_exact(chunk)?;
+    }
+    check_cancel(cancel)?;
     if file.read(&mut [0])? != 0 {
         return Err(io::ErrorKind::InvalidData.into());
     }
 
+    check_cancel(cancel)?;
     let current = Handle::from_file(open_regular(path)?)?;
     if handle != current
         || !unchanged(&before, &file.metadata()?)?
@@ -101,13 +129,27 @@ mod tests {
     fn byte_grant_copy_enforces_the_exact_length_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source");
+        let cancel = CancellationToken::new();
         std::fs::write(&path, b"abcd").unwrap();
-        assert_eq!(snapshot(&path, 4).unwrap(), b"abcd");
-        assert_eq!(snapshot(&path, 3).unwrap_err().kind(), io::ErrorKind::InvalidData);
-        assert_eq!(snapshot(dir.path(), 4).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(snapshot(&path, 4, &cancel).unwrap(), b"abcd");
         assert_eq!(
-            snapshot(&path.with_extension("missing"), 4).unwrap_err().kind(),
+            snapshot(&path, 3, &cancel).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            snapshot(dir.path(), 4, &cancel).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            snapshot(&path.with_extension("missing"), 4, &cancel)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::NotFound
+        );
+        cancel.cancel();
+        assert_eq!(
+            snapshot(&path, 4, &cancel).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
         );
     }
 }

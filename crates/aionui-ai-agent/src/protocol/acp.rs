@@ -44,6 +44,7 @@ use tokio::process::ChildStdout;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 use tokio_util::sync::{CancellationToken, DropGuard};
+use tracing::instrument::WithSubscriber;
 use tracing::{debug, info, warn};
 
 use crate::protocol::acp_dialect;
@@ -270,13 +271,22 @@ impl AcpProtocol {
         self.initialize_response.read().unwrap().clone()
     }
 
+    pub(crate) fn private_peer_diagnostics(&self) -> bool {
+        self.relay.offer_host_bytes
+    }
+
     fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
         let response = self.initialize_response.read().unwrap();
         let agent_name = response
             .as_ref()
             .and_then(|r| r.agent_info.as_ref())
             .map(|info| info.name.as_str());
-        AcpError::from_sdk_for_agent(error, method, agent_name)
+        let error = AcpError::from_sdk_for_agent(error, method, agent_name);
+        if self.relay.negotiated_byte_source() {
+            error.without_remote_detail(method)
+        } else {
+            error
+        }
     }
 
     /// Client-hosted terminals of this connection (for UI queries / kill).
@@ -374,7 +384,9 @@ impl AcpProtocol {
         // connection loss cannot prove that the agent did not execute it.
         self.ensure_connected()?;
         let method = AGENT_METHOD_NAMES.session_prompt;
-        log_client_request(method, &json_str(&req));
+        if !self.private_peer_diagnostics() {
+            log_client_request(method, &json_str(&req));
+        }
         let rsp = if let Some(turn_id) = turn_id.filter(|_| self.relay.candidate) {
             let (tx, rx) = oneshot::channel();
             let relay = self.relay.clone();
@@ -402,7 +414,9 @@ impl AcpProtocol {
         } else {
             self.connection.send_request(req).block_task().await
         };
-        log_agent_response(method, &json_or_err(&rsp));
+        if !self.private_peer_diagnostics() {
+            log_agent_response(method, &json_or_err(&rsp));
+        }
         rsp.map_err(|err| {
             let transport_closed = agent_client_protocol::is_incoming_transport_closed(&err) || !self.is_connected();
             self.map_sdk_error(err, method).after_prompt_dispatch(transport_closed)
@@ -414,7 +428,9 @@ impl AcpProtocol {
         if !self.is_connected() {
             return;
         }
-        log_client_notify(AGENT_METHOD_NAMES.session_cancel, &json_str(&notification));
+        if !self.private_peer_diagnostics() {
+            log_client_notify(AGENT_METHOD_NAMES.session_cancel, &json_str(&notification));
+        }
         let _ = self.connection.send_notification(notification);
     }
 
@@ -512,6 +528,7 @@ impl AcpProtocol {
             id
         })?;
         let sent = sent.expect("dispatched SDK request");
+        debug!("ACP session extension queued");
         let (reply_tx, reply_rx) = oneshot::channel();
         let wire_reply = std::mem::replace(&mut call.reply, reply_rx);
         let relay = self.relay.clone();
@@ -567,7 +584,9 @@ impl AcpProtocol {
             return;
         }
         let method = format!("_{}", notification.method);
-        log_client_notify(&method, &json_str(&notification));
+        if !self.private_peer_diagnostics() {
+            log_client_notify(&method, &json_str(&notification));
+        }
         let wrapped = ClientNotification::ExtNotification(notification);
         let _ = self.connection.send_notification(wrapped);
     }
@@ -610,12 +629,17 @@ impl AcpProtocol {
         Req::Response: serde::Serialize + std::fmt::Debug + Send + 'static,
     {
         self.ensure_connected()?;
-        log_client_request(method, &json_str(&req));
+        if !self.private_peer_diagnostics() {
+            log_client_request(method, &json_str(&req));
+        }
         let connection = self.connection.clone();
         let method_owned = method.to_owned();
+        let private = self.private_peer_diagnostics();
         let sdk_result = Self::await_config_rpc_detached(method, duration, async move {
             let rsp = connection.send_request(req).block_task().await;
-            log_agent_response(&method_owned, &json_or_err(&rsp));
+            if !private {
+                log_agent_response(&method_owned, &json_or_err(&rsp));
+            }
             rsp
         })
         .await?;
@@ -659,9 +683,13 @@ impl AcpProtocol {
         Req::Response: serde::Serialize + std::fmt::Debug + Send,
     {
         self.ensure_connected()?;
-        log_client_request(method, &json_str(&req));
+        if !self.private_peer_diagnostics() {
+            log_client_request(method, &json_str(&req));
+        }
         let rsp = self.connection.send_request(req).block_task().await;
-        log_agent_response(method, &json_or_err(&rsp));
+        if !self.private_peer_diagnostics() {
+            log_agent_response(method, &json_or_err(&rsp));
+        }
         rsp.map_err(|e| self.map_sdk_error(e, method))
     }
 
@@ -678,14 +706,22 @@ impl AcpProtocol {
         Req::Response: serde::de::DeserializeOwned + serde::Serialize + std::fmt::Debug + Send,
     {
         self.ensure_connected()?;
-        log_client_request(method, &json_str(&req));
+        if !self.private_peer_diagnostics() {
+            log_client_request(method, &json_str(&req));
+        }
         let untyped = UntypedMessage::new(method, &req).map_err(|e| self.map_sdk_error(e, method))?;
         let raw = self.connection.send_request(untyped).block_task().await;
-        log_agent_response(method, &json_or_err(&raw));
+        if !self.private_peer_diagnostics() {
+            log_agent_response(method, &json_or_err(&raw));
+        }
         let raw = raw.map_err(|e| self.map_sdk_error(e, method))?;
         let legacy_models = raw.get("models").cloned();
         let response: Req::Response = serde_json::from_value(raw).map_err(|e| AcpError::AgentInternal {
-            message: format!("failed to parse {method} response: {e}"),
+            message: if self.private_peer_diagnostics() {
+                format!("Invalid {method} response")
+            } else {
+                format!("failed to parse {method} response: {e}")
+            },
             code: -32603,
             data: None,
         })?;
@@ -878,7 +914,10 @@ async fn run_sdk_background(
     let phase_for_main = Arc::clone(&phase);
 
     let handshake_relay = relay.clone();
-    let result = Client
+    // SDK 2.0.0 logs complete frames from its transport actor and typed
+    // dispatch. Both are polled by connect_with. Scope the dispatch per
+    // connection so TRACE remains available elsewhere and no frame is edited.
+    let sdk = Client
         .builder()
         .on_receive_notification(
             {
@@ -997,7 +1036,14 @@ async fn run_sdk_background(
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::Initializing;
                 let raw = connection.send_request(req).block_task().await;
                 log_agent_response("initialize", &json_or_err(&raw));
-                raw.map_err(|e| AcpError::from_sdk(e, "initialize"))
+                raw.map_err(|e| {
+                    let error = AcpError::from_sdk(e, "initialize");
+                    if handshake_relay.offer_host_bytes {
+                        error.without_remote_detail("initialize")
+                    } else {
+                        error
+                    }
+                })
             };
 
             let Some(tx) = init_tx.take() else {
@@ -1033,8 +1079,12 @@ async fn run_sdk_background(
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::ShuttingDown;
             }
             Ok(())
-        })
-        .await;
+        });
+    let result = if relay.offer_host_bytes {
+        sdk.with_subscriber(tracing::Dispatch::none()).await
+    } else {
+        sdk.await
+    };
 
     alive.store(false, Ordering::Release);
     relay.disconnected();
@@ -1070,6 +1120,7 @@ async fn run_sdk_background(
 
     match result {
         Ok(_) => debug!(?close_phase, "ACP SDK connection closed normally"),
+        Err(_) if relay.offer_host_bytes => warn!(?close_phase, "ACP SDK connection closed with error"),
         Err(e) => warn!(?close_phase, error = %ErrorChain(&e), "ACP SDK connection closed with error"),
     }
 }
@@ -1551,6 +1602,50 @@ mod tests {
         tracing::subscriber::with_default(subscriber, f);
 
         String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn byte_grant_sdk_trace_positive_control_captures_plain_and_escaped_frames() {
+        let plain = "private-h1-standard-raw";
+        let escaped = r#"private-h1-standard-"quoted"\끝"#;
+        let log = capture_logs(tracing::Level::TRACE, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (send, receive) = mpsc::channel(1);
+                let outgoing = futures_util::sink::unfold(send, move |send, line: String| async move {
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if request["method"] == "initialize" {
+                        let response = serde_json::json!({
+                            "jsonrpc":"2.0",
+                            "id": request["id"],
+                            "result": {"protocolVersion":1, "_meta":{"control":[plain,escaped]}},
+                        });
+                        send.send(Ok(response.to_string())).await.unwrap();
+                    }
+                    Ok::<_, std::io::Error>(send)
+                });
+                let incoming = futures_util::stream::unfold(receive, |mut receive| async {
+                    receive.recv().await.map(|line| (line, receive))
+                });
+                let lines = Lines::new(Box::pin(outgoing), Box::pin(incoming));
+                Client
+                    .builder()
+                    .connect_with(lines, async move |connection: ConnectionTo<Agent>| {
+                        let response = connection.send_request(build_initialize_request()).block_task().await?;
+                        assert_eq!(response.meta.unwrap()["control"], serde_json::json!([plain, escaped]));
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            });
+        });
+        assert!(log.contains("Received JSON-RPC message"));
+        assert!(log.contains(plain));
+        let escaped = serde_json::to_string(escaped).unwrap();
+        assert!(log.contains(&escaped[1..escaped.len() - 1]));
     }
 
     #[test]

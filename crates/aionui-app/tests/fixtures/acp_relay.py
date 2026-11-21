@@ -19,6 +19,10 @@ output_lock = threading.Lock()
 pause_next = False
 byte_exchange = None
 host_bytes_enabled = counter.with_suffix(".host-bytes-enabled").exists()
+diagnostic_fixture = counter.with_suffix(".diagnostic-fixture").exists()
+raw_marker = "private-h1-standard-raw"
+escaped_marker = 'private-h1-standard-"quoted"\\끝'
+
 
 
 
@@ -160,9 +164,27 @@ while True:
         out = {"sessionId": session} if method != "session/load" else {}
         if meta:
             out["_meta"] = {"aelix/sessionRelay": meta}
+        if diagnostic_fixture:
+            out.setdefault("_meta", {})["fixtureDiagnostic"] = [raw_marker, escaped_marker]
         result(rpc_id, out)
     elif method == "session/prompt":
         prompt = rpc_id
+        if diagnostic_fixture:
+            print(raw_marker, json.dumps(escaped_marker), file=sys.stderr, flush=True)
+            if params["prompt"][0].get("text") == "emit standard error":
+                send({"id": rpc_id, "error": {"code": -33002,
+                    "message": raw_marker, "data": {"detail": escaped_marker}}})
+                prompt = None
+                continue
+            send({"method": "session/update", "params": {"sessionId": session, "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "diagnostic-call", "title": "Diagnostic fixture",
+                "kind": "other", "status": "in_progress",
+            }}})
+            send({"method": "session/update", "params": {"sessionId": session, "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "diagnostic-call", "status": "completed",
+                "rawOutput": {"content": [{"type": "image", "mimeType": "image/png",
+                    "data": base64.b64encode(raw_marker.encode()).decode(), "metadata": escaped_marker}]},
+            }}})
         if counter.with_suffix(".watch-shutdown").exists():
             # Fill stdout while the host drains stdin in the opposite direction.
             update("agent_message_chunk", "x" * (512 * 1024))

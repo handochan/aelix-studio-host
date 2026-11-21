@@ -264,7 +264,7 @@ impl ConversationService {
                             &request.refs,
                             browser_session.map(|(_, generation)| generation),
                             admission,
-                            || crate::byte_grant_snapshot::snapshot_files(project, source_owner, files),
+                            |cancel| crate::byte_grant_snapshot::snapshot_files(project, source_owner, files, cancel),
                         )
                         .map_err(ExtensionError::ByteGrant)
                 })

@@ -840,7 +840,7 @@ struct QueuedRequest(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Write for QueuedRequest {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let line = String::from_utf8_lossy(buf);
-        if line.contains("outgoing_protocol_actor") && line.contains("probe/queued") {
+        if line.contains("ACP session extension queued") {
             self.0.store(true, std::sync::atomic::Ordering::Release);
         }
         Ok(buf.len())
@@ -981,6 +981,7 @@ async fn rejects_queued_request(revocation: QueuedRevocation) {
     )
     .await;
     wait_until(|| dir.path().join("relay-calls.pipe-blocked").exists()).await;
+    queued.0.store(false, std::sync::atomic::Ordering::Release);
     let request = invoke(&host, &root, &binding, "queued", json!({"value":"forbidden"}))
         .header(header::COOKIE, &cookies)
         .header(header::ORIGIN, &host.url)

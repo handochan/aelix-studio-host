@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{sync::watch, time::Instant};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::acp_relay::RelayWriteAdmission;
 
@@ -112,6 +113,7 @@ struct Batch {
     reservation: Arc<Mutex<Reservation>>,
     result: watch::Sender<Option<PreparationResult>>,
     prepare_deadline: Instant,
+    _cancel_on_drop: DropGuard,
     grants: Vec<Grant>,
 }
 
@@ -174,7 +176,7 @@ impl ByteGrantBinding {
         refs: &[ChatFileRef],
         session_generation: Option<i64>,
         admission: RelayWriteAdmission,
-        snapshot: impl FnOnce() -> F,
+        snapshot: impl FnOnce(CancellationToken) -> F,
     ) -> Result<BytePreparation, ByteGrantError>
     where
         F: Future<Output = Result<Vec<Vec<u8>>, ByteGrantError>> + Send + 'static,
@@ -202,6 +204,7 @@ impl ByteGrantBinding {
         let lifetime = receiver.clone();
         let deadline = Instant::now() + PREPARE_TTL;
         let admission = Arc::new(admission);
+        let cancel = CancellationToken::new();
         binding.batches.insert(
             prepare_id.clone(),
             Batch {
@@ -211,52 +214,61 @@ impl ByteGrantBinding {
                 reservation: reservation.clone(),
                 result,
                 prepare_deadline: deadline,
+                _cancel_on_drop: cancel.clone().drop_guard(),
                 grants: Vec::new(),
             },
         );
         let binding = Arc::downgrade(self);
-        let snapshot = snapshot();
+        let snapshot = snapshot(cancel.clone());
         tokio::spawn(async move {
-            // A client dropping its HTTP request must not restart the copy.
-            // Wait for the underlying copy to stop before releasing its RAM reservation.
-            let result = match snapshot.await {
-                Ok(bytes) if Instant::now() < deadline => {
+            let record = Arc::downgrade(&reservation);
+            let cancelled = async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => ByteGrantError::Revoked,
+                    _ = tokio::time::sleep_until(deadline) => ByteGrantError::Expired,
+                }
+            };
+            tokio::pin!(snapshot, cancelled);
+            let copied = tokio::select! {
+                biased;
+                error = &mut cancelled => {
+                    Self::fail_preparation(&binding, &prepare_id, &record, error);
+                    cancel.cancel();
+                    // Keep owner/Host slots and the RAM charge until the
+                    // copy returns, including a syscall that cannot be interrupted.
+                    drop(snapshot.await);
+                    return;
+                }
+                copied = &mut snapshot => copied,
+            };
+            let result = match copied {
+                Ok(bytes) => {
                     let mut grants = Some(make_grants(bytes));
-                    match tokio::time::timeout_at(deadline, admission.acquire()).await {
-                        Ok(Ok(_lock)) => {
-                            let mut published = false;
-                            admission.commit(&mut || {
-                                if let Some(binding) = binding.upgrade() {
-                                    published = binding.publish(&prepare_id, &reservation, grants.take().unwrap());
+                    tokio::select! {
+                        biased;
+                        error = &mut cancelled => Err(error),
+                        lock = admission.acquire() => {
+                            match lock {
+                                Ok(_lock) => {
+                                    let mut published = false;
+                                    admission.commit(&mut || {
+                                        if let Some(binding) = binding.upgrade() {
+                                            published = binding.publish(&prepare_id, &reservation, grants.take().unwrap());
+                                        }
+                                    });
+                                    if published { Ok(()) } else { Err(ByteGrantError::Revoked) }
                                 }
-                            });
-                            if published {
-                                Ok(())
-                            } else {
-                                Err(ByteGrantError::Revoked)
+                                Err(_) => Err(ByteGrantError::Revoked),
                             }
                         }
-                        Ok(Err(_)) => Err(ByteGrantError::Revoked),
-                        Err(_) => Err(ByteGrantError::Expired),
                     }
                 }
-                Ok(_) => Err(ByteGrantError::Expired),
                 Err(error) => Err(error),
             };
-            let record = Arc::downgrade(&reservation);
             drop(reservation);
             if let Err(error) = result {
-                if let Some(current) = binding.upgrade() {
-                    let mut inner = current.0.lock().unwrap();
-                    if inner
-                        .batches
-                        .get(&prepare_id)
-                        .is_some_and(|batch| record.as_ptr() == Arc::as_ptr(&batch.reservation))
-                    {
-                        let batch = inner.batches.remove(&prepare_id).unwrap();
-                        batch.result.send_replace(Some(Err(error)));
-                    }
-                }
+                Self::fail_preparation(&binding, &prepare_id, &record, error);
                 return;
             }
             Self::expire(binding, prepare_id, record, lifetime).await;
@@ -267,12 +279,26 @@ impl ByteGrantBinding {
         })
     }
 
+    fn fail_preparation(binding: &Weak<Self>, key: &str, record: &Weak<Mutex<Reservation>>, error: ByteGrantError) {
+        if let Some(binding) = binding.upgrade() {
+            let mut inner = binding.0.lock().unwrap();
+            if inner
+                .batches
+                .get(key)
+                .is_some_and(|batch| record.as_ptr() == Arc::as_ptr(&batch.reservation))
+            {
+                let batch = inner.batches.remove(key).unwrap();
+                batch.result.send_replace(Some(Err(error)));
+            }
+        }
+    }
+
     fn publish(&self, key: &str, reservation: &Arc<Mutex<Reservation>>, grants: Vec<Grant>) -> bool {
         let mut binding = self.0.lock().unwrap();
         let Some(batch) = binding.batches.get_mut(key) else {
             return false;
         };
-        if !Arc::ptr_eq(&batch.reservation, reservation) {
+        if !Arc::ptr_eq(&batch.reservation, reservation) || Instant::now() >= batch.prepare_deadline {
             return false;
         }
         reservation

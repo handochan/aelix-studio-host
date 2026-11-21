@@ -1423,6 +1423,9 @@ impl AcpAgentManager {
     }
 
     fn dump_acp_final_input(&self, session_id: &str, data: &SendMessageData, final_content: &str) {
+        if self.protocol.private_peer_diagnostics() {
+            return;
+        }
         let Some(dump_dir) =
             crate::dev_prompt_dump::dump_dir_for_data_dir(&self.params.data_dir, self.params.dump_prompts)
         else {
