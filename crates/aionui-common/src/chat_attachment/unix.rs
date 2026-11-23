@@ -140,3 +140,17 @@ pub(super) fn create_child_file(parent: &File, name: &std::ffi::OsStr) -> io::Re
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
     )
 }
+
+pub(super) fn open_upload(input: &Path, _: &same_file::Handle) -> Result<(File, PathBuf), super::AttachmentError> {
+    Ok(open_path(input, false)?)
+}
+
+pub(super) fn contains_handle(root: &same_file::Handle, target: &same_file::Handle) -> io::Result<bool> {
+    let target = opened_path(target.as_file())?;
+    let root_path = opened_path(root.as_file())?;
+    let matches_root = |ancestor: &Path| super::open_identity(ancestor, true).is_ok_and(|h| h == *root);
+    if target.parent().is_some_and(|parent| parent.starts_with(&root_path)) && matches_root(&root_path) {
+        return Ok(true);
+    }
+    Ok(target.ancestors().skip(1).any(matches_root))
+}

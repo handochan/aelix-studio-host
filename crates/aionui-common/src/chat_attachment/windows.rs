@@ -53,6 +53,18 @@ pub(super) fn open_path(path: &Path, directory: bool) -> io::Result<(File, PathB
     )
 }
 
+pub(super) fn open_upload(input: &Path, root: &same_file::Handle) -> Result<(File, PathBuf), super::AttachmentError> {
+    walk::open_scoped(
+        input,
+        true,
+        windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ,
+        Some(root),
+    )?
+    .ok_or(super::AttachmentError::OutsideUploadRoot)
+}
+
+pub(super) use walk::contains_handle;
+
 pub(super) fn create_child_dir(parent: &File, name: &OsStr) -> io::Result<File> {
     security::private_child_dir(parent, name)
 }
@@ -82,7 +94,15 @@ pub(super) fn is_disk_file(file: &File, metadata: &Metadata, directory: bool) ->
 }
 
 pub(super) fn opened_path(file: &File) -> io::Result<PathBuf> {
-    let mut flags = 0;
+    match final_path(file, 0) {
+        Err(err) if err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND as i32) => {
+            final_path(file, windows_sys::Win32::Storage::FileSystem::VOLUME_NAME_GUID)
+        }
+        result => result,
+    }
+}
+
+fn final_path(file: &File, flags: u32) -> io::Result<PathBuf> {
     let mut path = vec![0; 512];
     loop {
         // SAFETY: the File owns the handle and path has length writable WCHARs.
@@ -90,12 +110,7 @@ pub(super) fn opened_path(file: &File) -> io::Result<PathBuf> {
             unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), path.as_mut_ptr(), path.len() as u32, flags) }
                 as usize;
         if length == 0 {
-            let err = io::Error::last_os_error();
-            if flags == 0 && err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND as i32) {
-                flags = windows_sys::Win32::Storage::FileSystem::VOLUME_NAME_GUID;
-                continue;
-            }
-            return Err(err);
+            return Err(io::Error::last_os_error());
         }
         if length < path.len() {
             return Ok(OsString::from_wide(&path[..length]).into());

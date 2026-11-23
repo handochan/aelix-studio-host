@@ -18,6 +18,7 @@ use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
 use windows_sys::Win32::System::SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK};
 
 use super::{drive, is_supported_path};
+use same_file::Handle;
 
 const NAME_SURROGATE: u32 = 1 << 29;
 const MAX_LINKS: usize = 32;
@@ -214,20 +215,41 @@ fn link_target(raw: &str, relative: bool, parent: &Path, mount: bool) -> io::Res
 }
 
 pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Result<(File, PathBuf)> {
+    open_scoped(input, follow_leaf, leaf_access, None)?.ok_or(io::ErrorKind::InvalidData.into())
+}
+
+/// None means the Upload walk encountered a prohibited redirection.
+pub(super) fn open_scoped(
+    input: &Path,
+    follow_leaf: bool,
+    leaf_access: u32,
+    root: Option<&Handle>,
+) -> io::Result<Option<(File, PathBuf)>> {
     let mut path = input.to_owned();
     for hop in 0..=MAX_LINKS {
         let start = roots::resolve(&path, hop != 0)?;
         let (mut prefix, mut parent) = (start.prefix, start.root);
         let mut parts = start.names.iter().peekable();
         if parts.peek().is_none() {
-            return Ok((parent, prefix));
+            return Ok(Some((parent, prefix)));
         }
+        let mut beneath = match root {
+            Some(root) => Handle::from_file(parent.try_clone()?)? == *root,
+            None => false,
+        };
         while let Some(name) = parts.next() {
             let last = parts.peek().is_none();
             let access = if last { leaf_access } else { DIR_ACCESS };
             let probe = child(&parent, name, access, FILE_OPEN, PROBE, ptr::null())?;
             let reparse = tag(&probe)?;
             if reparse & NAME_SURROGATE != 0 {
+                // A drive mapping can also start inside the root without
+                // visiting the root itself during this walk.
+                if let Some(root) = root
+                    && (beneath || contains_handle(root, &Handle::from_file(parent.try_clone()?)?)?)
+                {
+                    return Ok(None);
+                }
                 if last && !follow_leaf {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
@@ -241,19 +263,60 @@ pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Res
             let opened = data_handle(&parent, name, access, probe, reparse)?;
             prefix.push(name);
             if last {
-                return Ok((
+                return Ok(Some((
                     opened,
                     if volume_name(&prefix).is_some() {
                         input.to_owned()
                     } else {
                         prefix
                     },
-                ));
+                )));
+            }
+            if !beneath && let Some(root) = root {
+                beneath = Handle::from_file(opened.try_clone()?)? == *root;
             }
             parent = opened;
         }
     }
     Err(io::ErrorKind::InvalidData.into())
+}
+
+/// Prove the opened object's lineage by replaying its kernel-normalized NT
+/// component names from the pinned root. No DOS alias, GUID mount display
+/// spelling, or unqualified network path is opened to establish containment.
+pub(in crate::chat_attachment) fn contains_handle(root: &Handle, target: &Handle) -> io::Result<bool> {
+    if root == target {
+        return Ok(true);
+    }
+    let base = super::final_path(root.as_file(), VOLUME_NAME_NT)?;
+    let actual = super::final_path(target.as_file(), VOLUME_NAME_NT)?;
+    let Ok(relative) = actual.strip_prefix(&base) else {
+        return Ok(false);
+    };
+    if relative.as_os_str().is_empty() {
+        return Ok(false);
+    }
+    let mut parent = root.as_file().try_clone()?;
+    let mut names = relative.components().peekable();
+    while let Some(component) = names.next() {
+        let Component::Normal(name) = component else {
+            return Ok(false);
+        };
+        let access = if names.peek().is_none() {
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE
+        } else {
+            DIR_ACCESS
+        };
+        let probe = child(&parent, name, access, FILE_OPEN, PROBE, ptr::null())?;
+        let reparse = tag(&probe)?;
+        if reparse & NAME_SURROGATE != 0 {
+            return Ok(false);
+        }
+        parent = data_handle(&parent, name, access, probe, reparse)?;
+    }
+    Ok(Handle::from_file(parent)? == *target
+        && super::final_path(root.as_file(), VOLUME_NAME_NT)? == base
+        && super::final_path(target.as_file(), VOLUME_NAME_NT)? == actual)
 }
 
 fn data_handle(parent: &File, name: &OsStr, access: u32, probe: File, reparse: u32) -> io::Result<File> {

@@ -34,7 +34,6 @@ impl From<io::Error> for AttachmentError {
 
 struct UploadRoot {
     input: PathBuf,
-    path: PathBuf,
     handle: Handle,
 }
 
@@ -53,10 +52,8 @@ impl ManagedUploadRoot {
                 other => other?,
             };
             platform::verify_owner(handle.as_file())?;
-            let path = platform::opened_path(handle.as_file())?;
             Ok(Self(Arc::new(UploadRoot {
                 input: input.to_owned(),
-                path,
                 handle,
             })))
         };
@@ -210,20 +207,19 @@ impl ChatAttachment {
             ),
             None => None,
         };
-        let (file, anchor) = platform::open_path(input, false)?;
+        let (file, anchor) = open_input(input, upload_root.as_ref())?;
         let metadata = file.metadata()?;
         if !platform::is_disk_file(&file, &metadata, false) {
             return Err(AttachmentError::Unavailable);
         }
         let handle = Handle::from_file(file)?;
-        let target = platform::opened_path(handle.as_file())?;
-        let path = platform::wire_target(&anchor, target.clone())?;
         if let Some(root) = &upload_root
-            && !inside_root(&root.0, &target, &path)
+            && !platform::contains_handle(&root.0.handle, &handle)?
         {
             return Err(AttachmentError::OutsideUploadRoot);
         }
         tracing::trace!(target: "chat_file", code = "ATTACHMENT_OPENED", "opened attachment identity");
+        let path = platform::wire_target(&anchor, platform::opened_path(handle.as_file())?)?;
         let path = wire_path(&path)?.to_owned();
         let attachment = Self(Arc::new(Source {
             input: input.to_owned(),
@@ -276,14 +272,16 @@ impl ChatAttachment {
         let source = &self.0;
         if let Some(root) = &source.upload_root {
             root.verify_current()?;
-            let target = platform::opened_path(source.handle.as_file())?;
-            if !inside_root(
-                &root.0,
-                &target,
-                &platform::wire_target(Path::new(&source.path), target.clone())?,
-            ) {
+            let (current, _) = open_input(&source.input, Some(root)).map_err(|error| match error {
+                AttachmentError::OutsideUploadRoot => io::ErrorKind::PermissionDenied,
+                _ => io::ErrorKind::InvalidData,
+            })?;
+            if Handle::from_file(current)? != source.handle
+                || !platform::contains_handle(&root.0.handle, &source.handle)?
+            {
                 return Err(io::ErrorKind::InvalidData.into());
             }
+            return Ok(());
         }
 
         if open_identity(&source.input, false)? != source.handle
@@ -315,21 +313,11 @@ fn open_identity(path: &Path, directory: bool) -> io::Result<Handle> {
     Handle::from_file(file)
 }
 
-fn inside_root(root: &UploadRoot, target: &Path, wire_target: &Path) -> bool {
-    // The original physical prefix is only a lookup hint. A parent alias
-    // can still resolve to the pinned root after its former name is reused.
-    // Verify the ancestor of the *candidate* against the pinned directory.
-    if let Ok(relative) = target.strip_prefix(&root.path)
-        && !relative.as_os_str().is_empty()
-        && let Some(ancestor) = wire_target.ancestors().nth(relative.components().count())
-        && open_identity(ancestor, true).is_ok_and(|current| current == root.handle)
-    {
-        return true;
+fn open_input(input: &Path, root: Option<&ManagedUploadRoot>) -> Result<(File, PathBuf), AttachmentError> {
+    match root {
+        Some(root) => platform::open_upload(input, &root.0.handle),
+        None => Ok(platform::open_path(input, false)?),
     }
-    wire_target
-        .ancestors()
-        .skip(1)
-        .any(|ancestor| open_identity(ancestor, true).is_ok_and(|current| current == root.handle))
 }
 
 #[cfg(test)]

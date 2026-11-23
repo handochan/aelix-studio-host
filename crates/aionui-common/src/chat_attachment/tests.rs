@@ -260,7 +260,7 @@ fn remove_junction_fixture(link: &Path) {
 
 #[cfg(windows)]
 #[test]
-fn windows_junctions_follow_only_the_authorized_target() {
+fn windows_upload_rejects_junctions_even_when_the_target_stays_inside() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("managed");
     ManagedUploadRoot::open(&root).unwrap();
@@ -271,17 +271,16 @@ fn windows_junctions_follow_only_the_authorized_target() {
         fs::write(target.join("file.txt"), b"fixture").unwrap();
     }
     let link = root.join("link");
-    junction::create(&inside, &link).unwrap();
-    let source = ChatAttachment::open(&link.join("file.txt"), Some(&root)).unwrap();
-    remove_junction_fixture(&link);
-    junction::create(&outside, &link).unwrap();
-    assert!(source.metadata().is_err());
-    assert!(matches!(
-        ChatAttachment::open(&link.join("file.txt"), Some(&root)),
-        Err(AttachmentError::OutsideUploadRoot)
-    ));
-    assert!(ChatAttachment::open(&link.join("file.txt"), None).is_ok());
-    remove_junction_fixture(&link);
+    for target in [&inside, &outside] {
+        junction::create(target, &link).unwrap();
+        let path = link.join("file.txt");
+        assert!(matches!(
+            ChatAttachment::open(&path, Some(&root)),
+            Err(AttachmentError::OutsideUploadRoot)
+        ));
+        assert!(ChatAttachment::open(&path, None).is_ok());
+        remove_junction_fixture(&link);
+    }
 }
 
 #[cfg(windows)]
@@ -330,7 +329,7 @@ fn windows_symlinks_check_the_substitute_before_any_target_open() {
     fs::write(&local, b"selected").unwrap();
     symlink_file(&local, &link).unwrap();
     platform::walk::OPENS.with_borrow_mut(Vec::clear);
-    let source = ChatAttachment::open(&link, Some(&root)).unwrap();
+    let source = ChatAttachment::open(&link, None).unwrap();
     platform::walk::OPENS.with_borrow(|opens| {
         let link_index = opens.iter().position(|open| open.name == "selected").unwrap();
         assert!(opens[link_index + 1..].iter().any(|open| open.name == "real file"));
@@ -343,7 +342,10 @@ fn windows_symlinks_check_the_substitute_before_any_target_open() {
         platform::walk::OPENS.with_borrow_mut(Vec::clear);
         match operation {
             0 => assert_unavailable(ChatAttachment::open(&link, None)),
-            1 => assert_unavailable(ChatAttachment::open(&link, Some(&root))),
+            1 => assert!(matches!(
+                ChatAttachment::open(&link, Some(&root)),
+                Err(AttachmentError::OutsideUploadRoot)
+            )),
             _ => assert!(source.metadata().is_err()),
         }
         platform::walk::OPENS.with_borrow(|opens| {
@@ -547,18 +549,20 @@ fn windows_relative_link_and_intermediate_unc_link() {
     let link = root.join("sub/relative");
     symlink_file(r"..\target", &link).unwrap();
     assert!(fs::read_link(&link).unwrap().is_relative());
-    assert_eq!(
-        ChatAttachment::open(&link, Some(&root))
-            .unwrap()
-            .metadata()
-            .unwrap()
-            .len(),
-        8
-    );
+    assert_eq!(ChatAttachment::open(&link, None).unwrap().metadata().unwrap().len(), 8);
+    assert!(matches!(
+        ChatAttachment::open(&link, Some(&root)),
+        Err(AttachmentError::OutsideUploadRoot)
+    ));
     symlink_dir(r"\\localhost\h60-never-open", root.join("redirect")).unwrap();
     for policy in [None, Some(root.as_path())] {
         platform::walk::OPENS.with_borrow_mut(Vec::clear);
-        assert_unavailable(ChatAttachment::open(&root.join("redirect/leaf"), policy));
+        let result = ChatAttachment::open(&root.join("redirect/leaf"), policy);
+        if policy.is_some() {
+            assert!(matches!(result, Err(AttachmentError::OutsideUploadRoot)));
+        } else {
+            assert_unavailable(result);
+        }
         assert_eq!(remote_root_opens(), 0);
         platform::walk::OPENS.with_borrow(|v| assert_eq!(v.last().unwrap().name, "redirect"));
     }
@@ -597,12 +601,55 @@ fn windows_walks_the_subst_mapping_before_open_and_recheck() {
 #[test]
 #[ignore = "requires the CI local volume GUID mounted folder"]
 fn windows_walks_local_mounted_volume() {
-    let directory = PathBuf::from(std::env::var_os("HOST60_VOLUME_MOUNT").expect("mounted folder required"));
-    let root = directory.join("managed");
-    ManagedUploadRoot::open(&root).unwrap();
-    let path = root.join("mounted.txt");
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{DeleteVolumeMountPointW, SetVolumeMountPointW};
+
+    let base = PathBuf::from(std::env::var_os("HOST60_ACL_FIXTURES").unwrap());
+    let outer = base.join("readable");
+    let mount = outer.join("mounted");
+    let relative = PathBuf::from(std::env::var_os("HOST60_VOLUME_RELATIVE").unwrap());
+    assert!(
+        !relative.is_absolute()
+            && relative
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+    );
+    let inner = mount.join(&relative).join("managed");
+    let path = inner.join("mounted.txt");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(&path, b"approved before mount").unwrap();
+    let prior = ChatAttachment::open(&path, Some(&outer)).unwrap();
+    fs::rename(&path, outer.join("original")).unwrap();
+    // SetVolumeMountPoint needs an empty directory. Keep the original file
+    // handle live and remove only the now-empty fixture directories.
+    let mut dir = inner.as_path();
+    while dir != mount {
+        fs::remove_dir(dir).unwrap();
+        dir = dir.parent().unwrap();
+    }
+    let mut name = mount.as_os_str().to_owned();
+    name.push(r"\");
+    let mount_wide: Vec<_> = name.encode_wide().chain([0]).collect();
+    let guid: Vec<_> = std::env::var_os("HOST60_VOLUME_GUID")
+        .unwrap()
+        .encode_wide()
+        .chain([0])
+        .collect();
+    // Both strings remain NUL terminated for the call. The CI harness also
+    // checks for a remaining mount before cleaning up its fixture directory.
+    assert_ne!(
+        unsafe { SetVolumeMountPointW(mount_wide.as_ptr(), guid.as_ptr()) },
+        0,
+        "fixture mount failed: {}",
+        io::Error::last_os_error()
+    );
+    fs::create_dir_all(inner.parent().unwrap()).unwrap();
+    ManagedUploadRoot::open(&inner).unwrap();
     fs::write(&path, b"mounted volume").unwrap();
-    for policy in [None, Some(root.as_path())] {
+
+    // The mount is above this inner root. Local and an Upload genuinely
+    // belonging to the mounted volume may read the same real file.
+    for policy in [None, Some(inner.as_path())] {
         let file = ChatAttachment::open(&path, policy).unwrap();
         assert!(platform::is_supported_path(Path::new(file.path())));
         assert_eq!(
@@ -615,4 +662,33 @@ fn windows_walks_local_mounted_volume() {
             b"mounted volume"
         );
     }
+    let trusted = ManagedUploadRoot::open(&outer).unwrap();
+    let real_file = ChatAttachment::open(&path, None).unwrap();
+    assert!(
+        !platform::contains_handle(&trusted.0.handle, &real_file.0.handle).unwrap(),
+        "the mounted file's physical ancestry must exclude the outer root"
+    );
+    platform::walk::OPENS.with_borrow_mut(Vec::clear);
+    assert!(matches!(
+        ChatAttachment::open(&path, Some(&outer)),
+        Err(AttachmentError::OutsideUploadRoot)
+    ));
+    platform::walk::OPENS.with_borrow(|v| assert_eq!(v.last().unwrap().name, "mounted"));
+    platform::walk::OPENS.with_borrow_mut(Vec::clear);
+    assert_eq!(
+        prior
+            .with_file::<()>(|_| panic!("mounted replacement reached read"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    platform::walk::OPENS.with_borrow(|v| assert_eq!(v.last().unwrap().name, "mounted"));
+    drop(real_file);
+    assert_ne!(
+        unsafe { DeleteVolumeMountPointW(mount_wide.as_ptr()) },
+        0,
+        "unmount: {}",
+        io::Error::last_os_error()
+    );
+    println!("real mounted folder: Local and volume-owned Upload read; outer Upload rejected on admission and recheck");
 }

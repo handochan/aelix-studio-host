@@ -15,8 +15,9 @@ $driveName = [string]$letter + ':'
 $mapped = $false
 $shared = $false
 $substCreated = $false
-$volumeMounted = $false
-$mount = Join-Path $base mounted
+$vhd = Join-Path $base 'mount-fixture.vhd'
+$vhdAttached = $false
+$mount = Join-Path (Join-Path $base 'readable') 'mounted'
 try {
     $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     New-SmbShare -Name $share -Path $base -FullAccess $account | Out-Null
@@ -80,27 +81,37 @@ try {
     compact.exe /c /f /exe:xpress4k $env:HOST60_WOF_FILE
     if ($LASTEXITCODE -ne 0) { throw 'Required XPRESS4K compression failed.' }
 
-    $ignoreArgs = @('--ignored', '--nocapture')
-    New-Item -ItemType Directory -Path $mount | Out-Null
+    # Prefer an unlettered volume so the real target cannot be addressed by
+    # a DOS drive name. Only initialize the newly created, identified RAW VHD.
     try {
+        $scriptFile = Join-Path $base 'create-vhd.txt'
+        @(('create vdisk file="{0}" maximum=64 type=expandable' -f $vhd), 'exit') | Set-Content -LiteralPath $scriptFile -Encoding ascii
+        $createdDisk = diskpart.exe /s $scriptFile
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $vhd)) { throw "diskpart exit=$LASTEXITCODE $createdDisk" }
+        $image = Mount-DiskImage -ImagePath $vhd -Access ReadWrite -NoDriveLetter -PassThru -ErrorAction Stop
+        $vhdAttached = $true
+        $disk = $image | Get-Disk -ErrorAction Stop
+        if ($image.ImagePath -ne $vhd -or $disk.Count -ne 1 -or $disk.IsBoot -or $disk.IsSystem -or
+            $disk.Size -ne 64MB -or $disk.PartitionStyle -ne 'RAW') { throw 'Unexpected identity or geometry of private VHD.' }
+        $disk | Initialize-Disk -PartitionStyle GPT -ErrorAction Stop
+        $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -ErrorAction Stop
+        Set-Partition -InputObject $part -NoDefaultDriveLetter $true -ErrorAction Stop
+        Format-Volume -Partition $part -FileSystem NTFS -AllocationUnitSize 4096 -NewFileSystemLabel H60TEST -Confirm:$false -ErrorAction Stop | Out-Null
+        $vol = $part | Get-Volume -ErrorAction Stop
+        if ($vol.DriveLetter -or -not $vol.Path) { throw 'Test VHD requires a GUID and no drive letter.' }
+        $env:HOST60_VOLUME_GUID = $vol.Path
+        $env:HOST60_VOLUME_RELATIVE = 'owned-fixture'
+        Write-Host "Using drive-letterless NTFS fixture $($vol.Path)"
+    } catch {
+        Write-Host "::notice::Private VHD unavailable: $($_.Exception.Message); using the existing second local volume."
         $targetDrive = [IO.Path]::GetPathRoot($systemTemp)
-        if ($targetDrive -eq [IO.Path]::GetPathRoot($mount)) { throw "Only one fixture volume ($targetDrive)" }
+        if ($targetDrive -eq [IO.Path]::GetPathRoot($mount)) { throw "No distinct local fixture volume ($targetDrive)." }
         $guidOutput = mountvol.exe $targetDrive /L
         if ($LASTEXITCODE -ne 0) { throw "mountvol /L exit=$LASTEXITCODE $guidOutput" }
-        $guid = ($guidOutput -join '').Trim()
-        $mountOutput = mountvol.exe $mount $guid
-        if ($LASTEXITCODE -ne 0) { throw "mountvol exit=$LASTEXITCODE $mountOutput" }
-        $volumeMounted = $true
-    } catch {
-        Write-Host "::notice::Mounted-volume fixture unavailable: $($_.Exception.Message)"
-        $ignoreArgs += @('--skip', 'windows_walks_local_mounted_volume')
+        $env:HOST60_VOLUME_GUID = ($guidOutput -join '').Trim()
+        $env:HOST60_VOLUME_RELATIVE = [IO.Path]::GetRelativePath($targetDrive, $env:HOST60_FILTER_BASE)
     }
-    if ($volumeMounted) {
-        $relative = [IO.Path]::GetRelativePath($targetDrive, $env:HOST60_FILTER_BASE)
-        $env:HOST60_VOLUME_MOUNT = Join-Path $mount $relative
-        Write-Host "Mounted local second volume $guid for the validator test"
-    }
-    cargo test --locked -p aionui-common --lib chat_attachment:: -- @ignoreArgs
+    cargo test --locked -p aionui-common --lib chat_attachment:: -- --ignored --nocapture
     $integrationsExit = $LASTEXITCODE
     if ($integrationsExit -ne 0) { Write-Warning 'Mandatory mapped-drive, alias or ACL checks failed.' }
     if ($integrationsExit -eq 0) {
@@ -113,10 +124,12 @@ try {
 
     if ($basicExit -ne 0 -or $integrationsExit -ne 0) { throw 'Windows attachment provenance tests failed.' }
 } finally {
-    if ($volumeMounted) {
+    $mountItem = Get-Item -LiteralPath $mount -Force -ErrorAction SilentlyContinue
+    if ($mountItem -and ($mountItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         mountvol.exe $mount /D
         if ($LASTEXITCODE -ne 0) { throw 'Cannot detach fixture mount; leaving its parent untouched.' }
     }
+    if ($vhdAttached) { Dismount-DiskImage -ImagePath $vhd -ErrorAction Stop }
     if ($substCreated) { subst.exe $substName /D }
     if ($env:HOST60_LINK_TO_MAPPED_FILE) { [IO.File]::Delete($env:HOST60_LINK_TO_MAPPED_FILE) }
     if ($mapped) { net.exe use $driveName /delete /y }

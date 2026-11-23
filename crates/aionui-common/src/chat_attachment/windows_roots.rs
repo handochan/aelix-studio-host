@@ -101,11 +101,12 @@ fn classify(target: &str) -> io::Result<Mapping<'_>> {
         }
         return Err(denied());
     }
+    // An unqualified MUP name leaves provider selection to the OS. Only
+    // these two names explicitly select the SMB mini-redirector.
     let tail = strip_ci(target, r"\Device\LanmanRedirector\")
-        .or_else(|| strip_ci(target, r"\Device\Mup\"))
+        .or_else(|| strip_ci(target, r"\Device\Mup\;LanmanRedirector\"))
         .ok_or_else(denied)?;
-    // The redirector can include its provider name and a per-logon drive ID.
-    let mut share = strip_ci(tail, r";LanmanRedirector\").unwrap_or(tail);
+    let mut share = tail;
     if share.starts_with(';') {
         let (id, rest) = share.split_once('\\').ok_or_else(denied)?;
         if id.len() < 4
@@ -302,13 +303,21 @@ mod tests {
             classify(r"\Device\LanmanRedirector\;Z:000009ab\localhost\share"),
             Ok(Mapping::Network(_))
         ));
-        assert!(matches!(classify(r"\Device\Mup\server\share"), Ok(Mapping::Network(_))));
+        for target in [
+            r"\Device\Mup\;LanmanRedirector\server\share",
+            r"\Device\Mup\;lanmanredirector\;Z:000009ab\localhost\share",
+        ] {
+            assert!(matches!(classify(target), Ok(Mapping::Network(native)) if native == target));
+        }
         assert!(matches!(classify(r"\??\C:\sub"), Ok(Mapping::Subst(_))));
         for bad in [
             r"\Device\HarddiskVolume1\hidden",
             r"\Device\NamedPipe",
             r"\??\UNC\server\share",
+            r"\Device\Mup\server\share",
+            r"\Device\Mup\;Z:000009ab\host\share",
             r"\Device\Mup\;WebDavRedirector\host\share",
+            r"\Device\WebDavRedirector\host\share",
         ] {
             assert!(classify(bad).is_err());
         }
