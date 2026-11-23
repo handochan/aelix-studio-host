@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use aionui_api_types::ChatFileRef;
-use aionui_db::{Database, IProjectStore, SqliteProjectStore, init_database_memory};
+use aionui_db::{Database, IProjectStore, ProjectKind, SqliteProjectStore, init_database_memory};
 use aionui_project::ProjectService;
 use aionui_project::canonical::{canonicalize, to_file_uri};
 use aionui_project::types::{AttachInput, FileOp, ReferenceInput};
@@ -44,6 +44,35 @@ async fn create_standard_creates_then_reuses_by_canonical() {
     assert_eq!(a.project.project_id, b.project.project_id);
     assert_eq!(a.folder.folder_id, b.folder.folder_id);
     assert_eq!(a.project_explorer.pe_id, b.project_explorer.pe_id);
+}
+
+#[tokio::test]
+async fn reopening_reuses_legacy_file_uri_folder_and_project() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("review^demo")).unwrap();
+    let (svc, store, _db) = harness(root.path().join("temporary-projects")).await;
+
+    let user = "system_default_user";
+    let raw_parent = uri_of(root.path());
+    let key_parent = canonicalize(&raw_parent).unwrap();
+    let legacy_key = format!("{}/review^demo", key_parent.as_str());
+    let legacy_uri = format!("{raw_parent}/review^demo");
+    // Seed the pre-upgrade key before running project resolution.
+    let folder = store.upsert_folder(&legacy_key, &legacy_uri).await.unwrap();
+    let (project, workspace) = store
+        .create_project_with_workspace_entry(user, &folder.folder_id, "review^demo", ProjectKind::Standard)
+        .await
+        .unwrap();
+
+    let reopened = svc
+        .resolve_existing(user, format!("{raw_parent}/review%5Edemo"))
+        .await
+        .unwrap();
+    assert_eq!(reopened.folder.folder_id, folder.folder_id);
+    assert_eq!(reopened.folder.resource_canonical, legacy_key);
+    assert_eq!(reopened.folder.resource_uri, legacy_uri);
+    assert_eq!(reopened.project.project_id, project.project_id);
+    assert_eq!(reopened.project_explorer.pe_id, workspace.pe_id);
 }
 
 #[tokio::test]

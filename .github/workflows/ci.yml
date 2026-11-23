@@ -127,13 +127,18 @@ jobs:
       - name: Preserve repository bytes
         run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+      - run: rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component clippy
       - name: Use the MSVC linker
         shell: pwsh
         run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust-windows-staging
+      - name: Project file URI compatibility and Clippy
+        run: |
+          cargo clippy --locked --target x86_64-pc-windows-msvc -p aionui-project --all-targets -- -D warnings
+          cargo test --locked --target x86_64-pc-windows-msvc -p aionui-project --lib canonical::canonical_test::legacy_file_uri_
+          cargo test --locked --target x86_64-pc-windows-msvc -p aionui-project --test service reopening_reuses_legacy_file_uri_folder_and_project -- --exact
       # Includes real child-process leases/hard exits, unlock/relock races,
       # guard Drop/container removal and preservation of unmarked user data.
       - name: Staging ownership and lifecycle
