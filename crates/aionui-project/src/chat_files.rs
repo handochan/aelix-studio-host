@@ -9,13 +9,19 @@
 //! this backend edge.
 
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use aionui_api_types::ChatFileRef;
+use aionui_common::chat_attachment::{
+    AttachmentError, ChatAttachment, MAX_INLINE_FILE_BYTES, ManagedUploadRoot, PromptAttachment, inline_media_mime,
+};
 use aionui_common::constants::AIONUI_FILES_MARKER;
 
 use crate::canonical;
 use crate::service::ProjectService;
 use crate::types::{FileOp, ProjectError, ReferenceInput};
+
+const MAX_MESSAGE_FILE_REFS: usize = 100;
 
 /// A chat message whose attachments have been resolved to absolute paths and
 /// re-inlined into [`content`](Self::content) via the `[[AION_FILES]]` marker.
@@ -28,6 +34,22 @@ pub struct ResolvedChatMessage {
     /// aionrs's `build_content_blocks` strips the marker (files match) and
     /// re-adds its own; clearing this would leak the raw marker to aionrs.
     pub files: Vec<String>,
+    /// Opened identities for the Local and Upload paths used in Host byte reads.
+    pub attachments: Vec<PromptAttachment>,
+}
+
+pub enum ResolvedChatFile {
+    Project(String),
+    Attachment(ChatAttachment),
+}
+
+impl ResolvedChatFile {
+    fn into_path(self) -> String {
+        match self {
+            Self::Project(path) => path,
+            Self::Attachment(file) => file.path().to_owned(),
+        }
+    }
 }
 
 impl ProjectService {
@@ -44,12 +66,47 @@ impl ProjectService {
         files: &[ChatFileRef],
         upload_root: &Path,
     ) -> Result<ResolvedChatMessage, ProjectError> {
+        if files.len() > MAX_MESSAGE_FILE_REFS {
+            return Err(ProjectError::TooManyChatFiles);
+        }
+        let shared_root = Arc::new(OnceLock::new());
         let mut paths = Vec::with_capacity(files.len());
+        let mut attachments = Vec::with_capacity(files.len());
+        let mut seen = std::collections::HashMap::<(bool, &str), (String, PromptAttachment)>::new();
         for file in files {
-            paths.push(
-                self.resolve_chat_file_ref(user_id, file, upload_root, FileOp::Read)
-                    .await?,
-            );
+            // Distinct submitted aliases can name the same canonical file.
+            // Retain their separate policy and recheck each at its own index.
+            let key = match file {
+                ChatFileRef::Local { path } => Some((false, path.as_str())),
+                ChatFileRef::Upload { path } => Some((true, path.as_str())),
+                ChatFileRef::Project { .. } => None,
+            };
+            if let Some((path, source)) = key.and_then(|key| seen.get(&key)) {
+                paths.push(path.clone());
+                attachments.push(source.repeat());
+                continue;
+            }
+            let resolved = self
+                .resolve_chat_file_shared(user_id, file, upload_root, FileOp::Read, shared_root.clone())
+                .await?;
+            let (path, source) = match resolved {
+                ResolvedChatFile::Project(path) => (path, PromptAttachment::Project),
+                ResolvedChatFile::Attachment(file) => {
+                    let path = file.path().to_owned();
+                    let source =
+                        if inline_media_mime(&path).is_some() && file.admitted_length() <= MAX_INLINE_FILE_BYTES {
+                            PromptAttachment::inline(file)
+                        } else {
+                            PromptAttachment::PathOnly
+                        };
+                    (path, source)
+                }
+            };
+            if let Some(key) = key {
+                seen.insert(key, (path.clone(), source.clone()));
+            }
+            paths.push(path);
+            attachments.push(source);
         }
 
         let content = if paths.is_empty() {
@@ -57,23 +114,14 @@ impl ProjectService {
         } else {
             format!("{content}\n\n{AIONUI_FILES_MARKER}\n{}", paths.join("\n"))
         };
-        Ok(ResolvedChatMessage { content, files: paths })
+        Ok(ResolvedChatMessage {
+            content,
+            files: paths,
+            attachments,
+        })
     }
 
-    /// Resolve a single [`ChatFileRef`] to an absolute device path.
-    ///
-    /// The per-ref identity→path core shared by [`resolve_chat_message`](Self::resolve_chat_message)
-    /// (send boundary) and the preview content endpoint (`aionui-file`, cross-crate — hence `pub`).
-    /// Guards differ by variant:
-    /// - `Project` → [`resolve_reference`](Self::resolve_reference) with the caller's `op` (lexical +
-    ///   realpath containment; read paths pass `Read`, the write endpoint passes `Write`); must exist
-    ///   (file or folder).
-    /// - `Upload` → an existing regular file under the managed `upload_root` (D2 invariant).
-    /// - `Local` → a canonicalized existing regular file; **no sandbox** (the host picker that
-    ///   produced it already exposes the whole filesystem).
-    ///
-    /// `op` only affects the `Project` arm's containment mode; `Upload`/`Local` are path-based and
-    /// identical regardless of op.
+    /// Resolve a reference for callers that only need its path.
     pub async fn resolve_chat_file_ref(
         &self,
         user_id: &str,
@@ -81,7 +129,34 @@ impl ProjectService {
         upload_root: &Path,
         op: FileOp,
     ) -> Result<String, ProjectError> {
-        match file {
+        self.resolve_chat_file(user_id, file, upload_root, op)
+            .await
+            .map(ResolvedChatFile::into_path)
+    }
+
+    /// Resolve Project refs through their existing PE authorization. Local and
+    /// Upload refs keep the opened regular file for callers that read its bytes
+    /// or metadata.
+    pub async fn resolve_chat_file(
+        &self,
+        user_id: &str,
+        file: &ChatFileRef,
+        upload_root: &Path,
+        op: FileOp,
+    ) -> Result<ResolvedChatFile, ProjectError> {
+        self.resolve_chat_file_shared(user_id, file, upload_root, op, Arc::new(OnceLock::new()))
+            .await
+    }
+
+    async fn resolve_chat_file_shared(
+        &self,
+        user_id: &str,
+        file: &ChatFileRef,
+        upload_root: &Path,
+        op: FileOp,
+        shared_root: Arc<OnceLock<std::io::Result<ManagedUploadRoot>>>,
+    ) -> Result<ResolvedChatFile, ProjectError> {
+        let (path, root) = match file {
             ChatFileRef::Project { pe_id, relative_path } => {
                 let resolved = self
                     .resolve_reference(
@@ -96,37 +171,30 @@ impl ProjectService {
                 let abs = resolved.absolute_path.ok_or_else(|| ProjectError::ChatFileMissing {
                     path: relative_path.clone(),
                 })?;
-                // A project ref may point at a file or a folder (the tree
-                // allows attaching a directory); require only that it exists.
+                // The project tree allows attaching a directory.
                 if !Path::new(&abs).exists() {
                     return Err(ProjectError::ChatFileMissing { path: abs });
                 }
-                Ok(abs)
+                return Ok(ResolvedChatFile::Project(abs));
             }
-            ChatFileRef::Upload { path } => {
-                let candidate = Path::new(path);
-                if !candidate.is_file() {
-                    return Err(ProjectError::ChatFileMissing { path: path.clone() });
-                }
-                if !path_within(upload_root, candidate) {
-                    return Err(ProjectError::UploadPathOutsideRoot { path: path.clone() });
-                }
-                Ok(path.clone())
-            }
-            ChatFileRef::Local { path } => {
-                // A path the user explicitly picked in the host-file browser,
-                // which already exposes the whole filesystem. No managed-root
-                // restriction (that is the upload channel's D2 invariant only);
-                // just canonicalize (collapsing `..`/symlinks) and require an
-                // existing regular file.
-                let canonical = std::fs::canonicalize(path)
-                    .map_err(|_| ProjectError::LocalPathNotReadable { path: path.clone() })?;
-                if !canonical.is_file() {
-                    return Err(ProjectError::LocalPathNotReadable { path: path.clone() });
-                }
-                Ok(canonical.to_string_lossy().into_owned())
-            }
-        }
+            ChatFileRef::Upload { path } => (path.clone(), Some(upload_root.to_owned())),
+            ChatFileRef::Local { path } => (path.clone(), None),
+        };
+        tokio::task::spawn_blocking(move || {
+            ChatAttachment::open_cached(
+                Path::new(&path),
+                root.as_deref().map(|root| (root, shared_root.as_ref())),
+            )
+            .map(ResolvedChatFile::Attachment)
+            .map_err(|error| match error {
+                AttachmentError::UntrustedRoot => ProjectError::UploadRootUnavailable,
+                AttachmentError::OutsideUploadRoot => ProjectError::UploadPathOutsideRoot { path },
+                AttachmentError::Unavailable if root.is_some() => ProjectError::ChatFileMissing { path },
+                AttachmentError::Unavailable => ProjectError::LocalPathNotReadable { path },
+            })
+        })
+        .await
+        .unwrap_or_else(|_| Err(ProjectError::LocalPathNotReadable { path: String::new() }))
     }
 
     /// Upgrade a [`ChatFileRef`] to its strongest identity for `project_id`.
@@ -165,8 +233,7 @@ impl ProjectService {
             return Ok(file.clone());
         };
 
-        // Resolve symlinks and `..` before comparing, matching `path_within` and
-        // `realpath_within`. A path that does not exist cannot be placed under a
+        // Resolve symlinks and `..` before comparing, matching `realpath_within`. A path that does not exist cannot be placed under a
         // root, and the caller still has a missing-file state to render, so keep the
         // local ref rather than failing.
         let Ok(absolute) = std::fs::canonicalize(path) else {
@@ -247,15 +314,6 @@ impl ProjectService {
 
         Ok(None)
     }
-}
-
-/// Whether `target` resolves inside `root` (both canonicalized, so `..` and
-/// symlinks cannot escape). `target` is expected to exist (checked before).
-fn path_within(root: &Path, target: &Path) -> bool {
-    let (Ok(root), Ok(target)) = (std::fs::canonicalize(root), std::fs::canonicalize(target)) else {
-        return false;
-    };
-    target.starts_with(root)
 }
 
 #[cfg(test)]

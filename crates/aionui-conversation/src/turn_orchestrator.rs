@@ -37,6 +37,7 @@ pub(crate) struct TurnStartInput {
     pub content: String,
     /// Attachment absolute paths, already resolved.
     pub files: Vec<String>,
+    pub attachments: Vec<aionui_common::chat_attachment::PromptAttachment>,
     pub inject_skills: Vec<String>,
     pub required_runtime_mode: Option<String>,
     pub build_options: BuildTaskOptions,
@@ -438,6 +439,7 @@ impl ConversationTurnOrchestrator {
                             msg_id: next_turn_msg_id.clone(),
                             turn_id: Some(input.turn_id.clone()),
                             files: vec![],
+                            attachments: Vec::new(),
                             inject_skills: vec![],
                         },
                         next_turn_msg_id,
@@ -470,6 +472,7 @@ impl ConversationTurnOrchestrator {
             msg_id: first_turn_msg_id.clone(),
             turn_id: Some(turn_id.clone()),
             files: input.files,
+            attachments: input.attachments,
             inject_skills: input.inject_skills,
         };
         let mut replayed = false;

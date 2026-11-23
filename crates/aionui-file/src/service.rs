@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use aionui_common::chat_attachment::{ChatAttachment, ManagedUploadRoot};
 use base64::Engine;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
@@ -352,11 +353,46 @@ fn split_base_ext(name: &str) -> (&str, &str) {
     }
 }
 
+fn store_upload(root_path: &Path, directory: &str, name: &str, bytes: &[u8]) -> Result<String, FileError> {
+    let root =
+        ManagedUploadRoot::open(root_path).map_err(|_| FileError::Internal("cannot access upload directory".into()))?;
+    let dir = root
+        .destination(directory.as_ref())
+        .map_err(|_| FileError::Internal("cannot create upload directory".into()))?;
+
+    let (base, ext) = split_base_ext(name);
+    let mut candidate = name.to_owned();
+    let mut counter: u32 = 2;
+    loop {
+        match dir.create_new(candidate.as_ref()) {
+            Ok((mut f, file_path)) => {
+                f.write_all(bytes)
+                    .map_err(|_| FileError::Internal("cannot write upload file".into()))?;
+                root.verify_current()
+                    .map_err(|_| FileError::Internal("cannot access upload directory".into()))?;
+                return Ok(file_path.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if counter > 1000 {
+                    return Err(FileError::Internal("too many upload name collisions".into()));
+                }
+                candidate = format!("{base}({counter}){ext}");
+                counter += 1;
+            }
+            Err(_) => return Err(FileError::Internal("cannot write upload file".into())),
+        }
+    }
+}
+
 /// Get file metadata synchronously.
 fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, FileError> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| FileError::NotFound(format!("cannot read metadata for '{}': {e}", path.display())))?;
 
+    Ok(file_metadata_from_stat(path, &metadata))
+}
+
+fn file_metadata_from_stat(path: &Path, metadata: &std::fs::Metadata) -> FileMetadata {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -381,14 +417,14 @@ fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, FileError> {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    Ok(FileMetadata {
+    FileMetadata {
         name,
         path: path.to_string_lossy().into_owned(),
         size,
         mime_type,
         last_modified,
         is_directory,
-    })
+    }
 }
 
 /// Copy a single file, creating parent directories as needed.
@@ -640,6 +676,18 @@ impl crate::traits::IFileService for FileService {
                 }
                 other => other,
             })
+    }
+
+    async fn attachment_metadata(&self, attachment: ChatAttachment) -> Result<FileMetadata, FileError> {
+        tokio::task::spawn_blocking(move || {
+            let metadata = attachment.metadata().map_err(|_| {
+                tracing::warn!(target: "chat_file", code = "FILE_NOT_FOUND", "resolved attachment changed or is unavailable");
+                FileError::TargetNotFound
+            })?;
+            Ok(file_metadata_from_stat(Path::new(attachment.path()), &metadata))
+        })
+        .await
+        .map_err(|_| FileError::Internal("metadata task failed".to_owned()))?
     }
 
     async fn get_files_by_dir(&self, dir: &str, root: &str) -> Result<Vec<DirOrFile>, FileError> {
@@ -896,26 +944,23 @@ impl crate::traits::IFileService for FileService {
             return Err(FileError::BadRequest("file name must not be empty".to_owned()));
         }
         if has_traversal(file_name) {
-            return Err(FileError::BadRequest(format!(
-                "file name '{}' contains invalid traversal patterns",
-                file_name
-            )));
+            return Err(FileError::BadRequest(
+                "file name contains invalid traversal patterns".into(),
+            ));
         }
         if file_name.contains('/') || file_name.contains('\\') {
-            return Err(FileError::BadRequest(format!(
-                "file name '{}' must not contain path separators",
-                file_name
-            )));
+            return Err(FileError::BadRequest(
+                "file name must not contain path separators".into(),
+            ));
         }
 
         // Validate optional conversation_id: no separators / traversal.
         let conv_id = match conversation_id {
             Some(id) if !id.is_empty() => {
                 if has_traversal(id) || id.contains('/') || id.contains('\\') {
-                    return Err(FileError::BadRequest(format!(
-                        "conversation id '{}' contains invalid characters",
-                        id
-                    )));
+                    return Err(FileError::BadRequest(
+                        "conversation id contains invalid characters".into(),
+                    ));
                 }
                 Some(id.to_owned())
             }
@@ -924,54 +969,16 @@ impl crate::traits::IFileService for FileService {
 
         let name = file_name.to_owned();
         let bytes = data.to_vec();
-
         tokio::task::spawn_blocking(move || {
-            let mut dir = std::env::temp_dir().join("aionui");
-            if let Some(conv_id) = conv_id.as_deref() {
-                dir = dir.join(conv_id);
-            } else {
-                dir = dir.join("general");
-            }
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| FileError::Internal(format!("cannot create upload directory: {e}")))?;
-
-            let (base, ext) = split_base_ext(&name);
-            let mut candidate = name.clone();
-            let mut counter: u32 = 2;
-            loop {
-                let file_path = dir.join(&candidate);
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&file_path)
-                {
-                    Ok(mut f) => {
-                        f.write_all(&bytes).map_err(|e| {
-                            FileError::Internal(format!("cannot write upload file '{}': {e}", file_path.display()))
-                        })?;
-                        return Ok(file_path.to_string_lossy().into_owned());
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        if counter > 1000 {
-                            return Err(FileError::Internal(format!(
-                                "too many name collisions for upload file '{}'",
-                                name
-                            )));
-                        }
-                        candidate = format!("{base}({counter}){ext}");
-                        counter += 1;
-                    }
-                    Err(e) => {
-                        return Err(FileError::Internal(format!(
-                            "cannot write upload file '{}': {e}",
-                            file_path.display()
-                        )));
-                    }
-                }
-            }
+            store_upload(
+                &std::env::temp_dir().join("aionui"),
+                conv_id.as_deref().unwrap_or("general"),
+                &name,
+                &bytes,
+            )
         })
         .await
-        .map_err(|e| FileError::Internal(format!("create upload file task failed: {e}")))?
+        .map_err(|_| FileError::Internal("create upload file task failed".into()))?
     }
 
     async fn get_image_base64(&self, path: &str, extra_root: Option<&Path>) -> Result<String, FileError> {
@@ -1079,6 +1086,25 @@ mod tests {
 
     // The `resolved_*` methods under test are trait methods, not inherent ones.
     use crate::traits::IFileService;
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_writer_refuses_untrusted_root_before_creating_or_writing_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private-root-name");
+        let saved = store_upload(&root, "general", "selected", b"good").unwrap();
+        assert_eq!(std::fs::read(saved).unwrap(), b"good");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(store_upload(&root, "new-group", "private-name", b"bytes"),
+            Err(FileError::Internal(message)) if message == "cannot access upload directory"));
+        assert!(!root.join("new-group").exists());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(dir.path(), root.join("redirect")).unwrap();
+        assert!(matches!(store_upload(&root, "redirect", "private-name", b"bytes"),
+            Err(FileError::Internal(message)) if message == "cannot create upload directory"));
+        assert!(!dir.path().join("private-name").exists());
+    }
 
     #[test]
     fn build_dir_tree_sync_lists_files_and_dirs() {

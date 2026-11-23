@@ -1163,3 +1163,6 @@ async fn acp_relay_turn_reports_input_loss_for_a_slow_database_and_for_an_insert
 
 #[path = "byte_grants.rs"]
 mod byte_grants;
+
+#[path = "attachment_provenance.rs"]
+mod attachment_provenance;

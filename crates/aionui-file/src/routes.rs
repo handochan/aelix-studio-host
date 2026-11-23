@@ -527,9 +527,9 @@ async fn content_metadata(
     body: Result<Json<ContentMetadataRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<FileMetadataResponse>>, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
-    let abs = state
+    let file = state
         .project
-        .resolve_chat_file_ref(
+        .resolve_chat_file(
             &user.id,
             &req.file,
             &content_upload_root(),
@@ -537,7 +537,12 @@ async fn content_metadata(
         )
         .await
         .map_err(chat_file_resolve_error)?;
-    let meta = state.file_service.resolved_metadata(Path::new(&abs)).await?;
+    let meta = match file {
+        aionui_project::ResolvedChatFile::Project(path) => {
+            state.file_service.resolved_metadata(Path::new(&path)).await?
+        }
+        aionui_project::ResolvedChatFile::Attachment(file) => state.file_service.attachment_metadata(file).await?,
+    };
     Ok(Json(ApiResponse::ok(to_metadata_response(meta))))
 }
 
@@ -1182,7 +1187,8 @@ mod tests {
             .map(|(before, _)| before)
             .expect("routes.rs has a #[cfg(test)] module");
 
-        let resolve_calls = handlers.matches(".resolve_chat_file_ref(").count();
+        let resolve_calls =
+            handlers.matches(".resolve_chat_file_ref(").count() + handlers.matches(".resolve_chat_file(").count();
         let sealed = handlers.matches(".map_err(chat_file_resolve_error)?").count();
 
         assert_eq!(

@@ -8,17 +8,25 @@
 //! `manager/aionrs/content.rs`: strip the trailing marker block when it
 //! matches `files` exactly, then rebuild.
 
+use std::fs::Metadata;
+use std::io::Read;
 use std::path::Path;
+
+#[cfg(test)]
+use aionui_common::chat_attachment::ChatAttachment;
+use aionui_common::chat_attachment::{PromptAttachment, inline_media_mime};
 
 use aionui_common::constants::AIONUI_FILES_MARKER;
 use tracing::warn;
 
-use crate::types::PromptMediaCaps;
+use crate::AgentError;
+use crate::types::{PromptMediaCaps, SendMessageData};
 
 /// Max bytes for a single attachment sent as an inline base64 content block.
 /// Above this the attachment degrades to a path (Claude's hard per-image API
 /// limit, and a sane ceiling for one wire frame).
-pub const MAX_MEDIA_BLOCK_BYTES: u64 = 5 * 1024 * 1024;
+pub const MAX_MEDIA_BLOCK_BYTES: u64 = aionui_common::chat_attachment::MAX_INLINE_FILE_BYTES;
+const MAX_PROMPT_MEDIA_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Coarse media classification for prompt content blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +43,9 @@ pub struct MediaAttachment {
     /// Full mime type (e.g. `image/png`, `audio/mpeg`).
     pub mime: String,
     pub kind: MediaKind,
+    /// Bytes reserved from this request at classification, also enforced during the read.
+    pub byte_limit: u64,
+    file_index: usize,
 }
 
 /// Result of [`partition_media`].
@@ -59,6 +70,60 @@ pub struct MediaPartition {
 /// larger than [`MAX_MEDIA_BLOCK_BYTES`]. With `caps == default()` the input
 /// passes through byte-identical.
 pub fn partition_media(content: &str, files: &[String], caps: PromptMediaCaps) -> MediaPartition {
+    partition_with_metadata(content, files, caps, &[])
+}
+
+pub(crate) async fn prepare_prompt_media(
+    data: &SendMessageData,
+    caps: PromptMediaCaps,
+) -> Result<MediaPartition, AgentError> {
+    if data.attachments.is_empty() {
+        return Ok(partition_media(&data.content, &data.files, caps));
+    }
+    let content = data.content.clone();
+    let files = data.files.clone();
+    let attachments = data.attachments.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut metadata = Vec::with_capacity(attachments.len());
+        for attachment in &attachments {
+            metadata.push(match attachment {
+                PromptAttachment::Inline(_) => match attachment.pinned() {
+                    Some(file) => FileStat::Verified(file.metadata().map_err(attachment_unavailable)?),
+                    None => FileStat::PathOnly,
+                },
+                PromptAttachment::PathOnly => FileStat::PathOnly,
+                PromptAttachment::Project => FileStat::ByPath,
+            });
+        }
+        let partition = partition_with_metadata(&content, &files, caps, &metadata);
+        let mut selected = partition.media.iter().map(|media| media.file_index).peekable();
+        for (index, source) in attachments.iter().enumerate() {
+            if selected.next_if_eq(&index).is_none() {
+                source.release();
+            }
+        }
+        Ok(partition)
+    })
+    .await
+    .map_err(attachment_unavailable)?
+}
+
+fn attachment_unavailable(_: impl std::error::Error) -> AgentError {
+    AgentError::bad_request("The message attachment changed or is unavailable.")
+}
+
+enum FileStat {
+    Verified(Metadata),
+    PathOnly,
+    ByPath,
+}
+
+fn partition_with_metadata(
+    content: &str,
+    files: &[String],
+    caps: PromptMediaCaps,
+    metadata: &[FileStat],
+) -> MediaPartition {
     if files.is_empty() || caps == PromptMediaCaps::default() {
         return MediaPartition {
             content: content.to_owned(),
@@ -69,9 +134,19 @@ pub fn partition_media(content: &str, files: &[String], caps: PromptMediaCaps) -
 
     let mut path_files = Vec::new();
     let mut media = Vec::new();
-    for path in files {
-        match classify(path, caps) {
-            Some(attachment) => media.push(attachment),
+    let mut remaining = MAX_PROMPT_MEDIA_BYTES;
+    for (index, path) in files.iter().enumerate() {
+        match classify(
+            path,
+            caps,
+            metadata.get(index).unwrap_or(&FileStat::ByPath),
+            remaining,
+            index,
+        ) {
+            Some(attachment) => {
+                remaining -= attachment.byte_limit;
+                media.push(attachment);
+            }
             None => path_files.push(path.clone()),
         }
     }
@@ -89,30 +164,45 @@ pub fn partition_media(content: &str, files: &[String], caps: PromptMediaCaps) -
 }
 
 /// Classify one attachment; `Some` means "send as a native block".
-fn classify(path: &str, caps: PromptMediaCaps) -> Option<MediaAttachment> {
-    let mime = mime_guess::from_path(path).first()?;
+fn classify(
+    path: &str,
+    caps: PromptMediaCaps,
+    verified: &FileStat,
+    remaining: u64,
+    file_index: usize,
+) -> Option<MediaAttachment> {
+    let mime = inline_media_mime(path)?;
     let kind = match mime.type_().as_str() {
         // SVG is source text, not a raster image — vision APIs reject it.
         "image" if caps.image && mime.subtype() != "svg" => MediaKind::Image,
         "audio" if caps.audio => MediaKind::Audio,
         _ => return None,
     };
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() && meta.len() <= MAX_MEDIA_BLOCK_BYTES => Some(MediaAttachment {
+    let metadata = match verified {
+        FileStat::Verified(stat) => Some(stat.clone()),
+        FileStat::PathOnly => return None,
+        FileStat::ByPath => std::fs::metadata(path).ok(),
+    };
+    match metadata {
+        Some(meta) if meta.is_file() && meta.len() <= MAX_MEDIA_BLOCK_BYTES.min(remaining) => Some(MediaAttachment {
             path: path.to_owned(),
+            byte_limit: meta.len(),
+            file_index,
             mime: mime.essence_str().to_owned(),
             kind,
         }),
-        Ok(meta) if meta.is_file() => {
+        Some(meta) if meta.is_file() => {
             warn!(
-                path,
                 bytes = meta.len(),
                 "media attachment exceeds block size limit; sending as path"
             );
             None
         }
         _ => {
-            warn!(path, "media attachment unreadable; sending as path");
+            warn!(
+                code = "ATTACHMENT_UNAVAILABLE",
+                "media attachment unreadable; sending as path"
+            );
             None
         }
     }
@@ -165,17 +255,68 @@ pub fn content_with_all_paths(content: &str, files: &[String]) -> String {
 /// the path form) when the file vanished or grew past the limit between
 /// classification and read.
 pub async fn read_media_bytes(attachment: &MediaAttachment) -> Option<Vec<u8>> {
-    match tokio::fs::read(Path::new(&attachment.path)).await {
-        Ok(bytes) if bytes.len() as u64 <= MAX_MEDIA_BLOCK_BYTES => Some(bytes),
-        Ok(bytes) => {
-            warn!(path = %attachment.path, bytes = bytes.len(), "media attachment exceeds block size limit at read; sending as path");
-            None
-        }
-        Err(err) => {
-            warn!(path = %attachment.path, error = %err, "media attachment read failed; sending as path");
+    use tokio::io::AsyncReadExt;
+    let bounded = async {
+        let file = tokio::fs::File::open(Path::new(&attachment.path)).await?;
+        let mut bytes = Vec::new();
+        file.take(attachment.byte_limit + 1).read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    };
+    match bounded.await {
+        Ok(bytes) if bytes.len() as u64 <= attachment.byte_limit => Some(bytes),
+        Ok(_) => None,
+        Err(_) => {
+            warn!(
+                code = "ATTACHMENT_UNAVAILABLE",
+                "media attachment read failed; sending as path"
+            );
             None
         }
     }
+}
+
+pub(crate) async fn read_prompt_media(
+    media: &MediaAttachment,
+    attachments: &[PromptAttachment],
+) -> Result<Option<Vec<u8>>, AgentError> {
+    let attachment = match attachments.get(media.file_index) {
+        Some(source @ PromptAttachment::Inline(_)) => {
+            let Some(file) = source.pinned() else {
+                return Ok(None);
+            };
+            file
+        }
+        Some(PromptAttachment::PathOnly) => return Ok(None),
+        Some(PromptAttachment::Project) => return Ok(read_media_bytes(media).await),
+        None if attachments.is_empty() => return Ok(read_media_bytes(media).await),
+        None => {
+            return Err(AgentError::bad_request(
+                "The message attachment changed or is unavailable.",
+            ));
+        }
+    };
+    let limit = media.byte_limit;
+    let bytes = tokio::task::spawn_blocking(move || {
+        attachment.with_file(|file| {
+            let size = file.metadata()?.len();
+            if size > limit {
+                return Ok(None);
+            }
+            let mut bytes = Vec::with_capacity(size as usize);
+            file.take(limit + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > limit {
+                return Ok(None);
+            }
+            Ok(Some(bytes))
+        })
+    })
+    .await
+    .map_err(attachment_unavailable)?
+    .map_err(attachment_unavailable)?;
+    if bytes.is_none() {
+        attachments[media.file_index].release();
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -201,6 +342,181 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn cumulative_inline_budget_keeps_overflow_as_paths_and_bounds_the_actual_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("image.png");
+        std::fs::File::create(&image)
+            .unwrap()
+            .set_len(MAX_MEDIA_BLOCK_BYTES)
+            .unwrap();
+        let path = image.to_str().unwrap().to_owned();
+        let tiny = dir.path().join("one.png");
+        std::fs::write(&tiny, [1]).unwrap();
+        let tiny = tiny.to_str().unwrap().to_owned();
+        let below = dir.path().join("below.png");
+        std::fs::File::create(&below)
+            .unwrap()
+            .set_len(MAX_MEDIA_BLOCK_BYTES - 1)
+            .unwrap();
+        let files = [vec![path.clone(); 9], vec![below.to_str().unwrap().to_owned()]].concat();
+        let partition = partition_media("", &files, CAPS_IMAGE);
+        assert_eq!(partition.media.len(), 10);
+        assert!(partition.path_files.is_empty());
+        assert_eq!(
+            partition.media.iter().map(|m| m.byte_limit).sum::<u64>(),
+            MAX_PROMPT_MEDIA_BYTES - 1
+        );
+        let files = [vec![path.clone(); 10], vec![tiny.clone(), path.clone()]].concat();
+        let partition = partition_media("", &files, CAPS_IMAGE);
+        assert_eq!(partition.media.len(), 10);
+        assert_eq!(
+            partition.media.iter().map(|m| m.byte_limit).sum::<u64>(),
+            MAX_PROMPT_MEDIA_BYTES
+        );
+        assert_eq!(partition.path_files, [tiny.clone(), path.clone()]);
+        assert!(partition.content.contains(&tiny));
+        let files = [vec![path.clone(); 9], vec![tiny.clone(), path.clone(), tiny.clone()]].concat();
+        let partition = partition_media("", &files, CAPS_IMAGE);
+        assert_eq!(partition.media.len(), 11);
+        assert_eq!(partition.path_files, [path]);
+        let reserved = partition.media.last().unwrap();
+        assert_eq!(reserved.byte_limit, 1);
+        std::fs::write(&tiny, [1, 2]).unwrap();
+        assert!(read_media_bytes(reserved).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn overflow_releases_only_that_occurrences_handle_across_turn_clones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.png");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_MEDIA_BLOCK_BYTES)
+            .unwrap();
+        let source = ChatAttachment::open(&path, None).unwrap();
+        let files = vec![source.path().to_owned(); 11];
+        let candidate = PromptAttachment::inline(source);
+        let data = SendMessageData {
+            content: String::new(),
+            msg_id: "budget".into(),
+            turn_id: None,
+            files,
+            attachments: (0..11).map(|_| candidate.repeat()).collect(),
+            inject_skills: vec![],
+        };
+        let replay = data.clone();
+        let selected = prepare_prompt_media(&data, CAPS_IMAGE).await.unwrap();
+        assert_eq!(selected.media.len(), 10);
+        assert!(replay.attachments[..10].iter().all(|a| a.pinned().is_some()));
+        assert!(replay.attachments[10].pinned().is_none());
+        assert_eq!(
+            prepare_prompt_media(&replay, CAPS_IMAGE)
+                .await
+                .unwrap()
+                .path_files
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn growth_after_classification_falls_back_and_releases_the_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.png");
+        std::fs::write(&path, b"small").unwrap();
+        let file = ChatAttachment::open(&path, None).unwrap();
+        let data = SendMessageData {
+            content: String::new(),
+            msg_id: "growth".into(),
+            turn_id: None,
+            files: vec![file.path().into()],
+            attachments: vec![PromptAttachment::inline(file)],
+            inject_skills: vec![],
+        };
+        let replay = data.clone();
+        let selected = prepare_prompt_media(&data, CAPS_IMAGE).await.unwrap();
+        std::fs::write(&path, b"larger").unwrap();
+        assert!(
+            read_prompt_media(&selected.media[0], &data.attachments)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(replay.attachments[0].pinned().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn duplicate_canonical_paths_recheck_the_reference_at_the_media_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.png");
+        let alias = dir.path().join("alias.png");
+        std::fs::write(&path, b"original").unwrap();
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        let local = ChatAttachment::open(&path, None).unwrap();
+        let upload = ChatAttachment::open(&alias, Some(dir.path())).unwrap();
+        assert_eq!(local.path(), upload.path());
+        let data = SendMessageData {
+            content: "duplicate".into(),
+            msg_id: "id".into(),
+            turn_id: None,
+            files: vec![local.path().into(), upload.path().into()],
+            attachments: vec![PromptAttachment::inline(local), PromptAttachment::inline(upload)],
+            inject_skills: vec![],
+        };
+        let partition = prepare_prompt_media(&data, CAPS_IMAGE).await.unwrap();
+        std::fs::remove_file(alias).unwrap();
+        assert_eq!(
+            read_prompt_media(&partition.media[0], &data.attachments)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"original"
+        );
+        assert!(matches!(
+            read_prompt_media(&partition.media[1], &data.attachments).await,
+            Err(AgentError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn provenance_rejects_a_swap_between_media_classification_and_read() {
+        for upload in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("managed");
+            aionui_common::chat_attachment::ManagedUploadRoot::open(&root).unwrap();
+            let path = root.join("attachment.png");
+            std::fs::write(&path, b"selected bytes").unwrap();
+            let source = ChatAttachment::open(&path, upload.then_some(root.as_path())).unwrap();
+            let data = SendMessageData {
+                content: "image attachment".into(),
+                msg_id: "swap-fixture".into(),
+                turn_id: None,
+                files: vec![source.path().to_owned()],
+                attachments: vec![PromptAttachment::inline(source)],
+                inject_skills: vec![],
+            };
+            let partition = prepare_prompt_media(&data, CAPS_IMAGE).await.unwrap();
+            let media = &partition.media[0];
+            assert_eq!(
+                read_prompt_media(media, &data.attachments).await.unwrap().unwrap(),
+                b"selected bytes"
+            );
+
+            std::fs::rename(&path, dir.path().join("original.png")).unwrap();
+            std::fs::write(&path, b"replacement").unwrap();
+            assert!(matches!(
+                read_prompt_media(media, &data.attachments).await,
+                Err(AgentError::BadRequest(reason)) if reason == "The message attachment changed or is unavailable."
+            ));
+            assert!(matches!(
+                prepare_prompt_media(&data, PromptMediaCaps::default()).await,
+                Err(AgentError::BadRequest(reason)) if reason == "The message attachment changed or is unavailable."
+            ));
+        }
     }
 
     #[test]

@@ -220,9 +220,10 @@ impl From<ProjectError> for ApiError {
             | ProjectError::UnsupportedResourceScheme { .. }
             | ProjectError::InvalidRelativePath { .. }
             | ProjectError::ResourceOutsideFolder { .. } => (StatusCode::BAD_REQUEST, "invalid_resource", None),
-            ProjectError::TempDirExists { .. } | ProjectError::WorkspaceMissing => {
+            ProjectError::TooManyChatFiles | ProjectError::TempDirExists { .. } | ProjectError::WorkspaceMissing => {
                 (StatusCode::BAD_REQUEST, "invalid_request", None)
             }
+            ProjectError::UploadRootUnavailable => (StatusCode::NOT_FOUND, "chat_file_missing", None),
             ProjectError::UploadPathOutsideRoot { path } => (
                 StatusCode::BAD_REQUEST,
                 "upload_path_outside_root",

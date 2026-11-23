@@ -576,12 +576,19 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "getrandom 0.2.17",
+ "junction",
+ "libc",
+ "mime_guess",
+ "same-file",
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -125,6 +125,11 @@ pub struct ResolvedResource {
 /// rather than relying on message parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
+    #[error("Could not resolve a message attachment.")]
+    TooManyChatFiles,
+
+    #[error("Could not resolve a message attachment.")]
+    UploadRootUnavailable,
     #[error("folder not found: {path}")]
     FolderNotFound { path: String },
 
@@ -207,7 +212,8 @@ impl ProjectError {
             ProjectError::ResourceOutsideFolder { .. } => "resource_outside_folder",
             ProjectError::UnsupportedResourceScheme { .. } => "unsupported_resource_scheme",
             ProjectError::UploadPathOutsideRoot { .. } => "upload_path_outside_root",
-            ProjectError::ChatFileMissing { .. } => "chat_file_missing",
+            ProjectError::TooManyChatFiles => "too_many_chat_files",
+            ProjectError::UploadRootUnavailable | ProjectError::ChatFileMissing { .. } => "chat_file_missing",
             ProjectError::LocalPathNotReadable { .. } => "local_path_not_readable",
             ProjectError::Database(_) => "internal_db_error",
         }

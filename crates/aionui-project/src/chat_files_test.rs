@@ -9,9 +9,25 @@ use crate::canonical::to_file_uri;
 use crate::types::ProjectError;
 use aionui_api_types::ChatFileRef;
 
+struct TestUploadRoot {
+    _parent: TempDir,
+    path: std::path::PathBuf,
+}
+impl TestUploadRoot {
+    fn new() -> Self {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("managed");
+        aionui_common::chat_attachment::ManagedUploadRoot::open(&path).unwrap();
+        Self { _parent: parent, path }
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 /// Build a service with a tempdir standard project. Returns (service, pe_id,
 /// workspace dir, upload_root dir).
-async fn setup() -> (Arc<ProjectService>, String, TempDir, TempDir) {
+async fn setup() -> (Arc<ProjectService>, String, TempDir, TestUploadRoot) {
     let db = init_database_memory().await.unwrap();
     let store: Arc<dyn IProjectStore> = Arc::new(SqliteProjectStore::new(db.pool().clone()));
     let service = Arc::new(ProjectService::new(Arc::clone(&store), std::env::temp_dir()));
@@ -20,7 +36,7 @@ async fn setup() -> (Arc<ProjectService>, String, TempDir, TempDir) {
         .create_standard("system_default_user", to_file_uri(dir.path()).unwrap())
         .await
         .unwrap();
-    let upload_root = tempfile::tempdir().unwrap();
+    let upload_root = TestUploadRoot::new();
     (service, created.project_explorer.pe_id, dir, upload_root)
 }
 
@@ -131,7 +147,7 @@ async fn emitted_absolute_path_keeps_real_root_casing() {
         .create_standard("system_default_user", to_file_uri(&mixed_root).unwrap())
         .await
         .unwrap();
-    let upload_root = tempfile::tempdir().unwrap();
+    let upload_root = TestUploadRoot::new();
 
     let out = service
         .resolve_chat_message(
@@ -205,7 +221,7 @@ async fn upload_under_root_is_accepted() {
         )
         .await
         .unwrap();
-    assert_eq!(out.files, vec![path]);
+    assert_eq!(out.files, vec![std::fs::canonicalize(up).unwrap().to_string_lossy()]);
 }
 
 #[tokio::test]
@@ -635,4 +651,33 @@ async fn upgraded_ref_carries_exactly_the_fs_channel_target_fields() {
     };
     assert_eq!(target.pe_id, pe_id);
     assert_eq!(target.relative_path, "watched.md");
+}
+
+#[tokio::test]
+async fn normal_send_checks_ref_count_before_io_and_releases_path_only_handles() {
+    let (service, _, workspace, root) = setup().await;
+    let text = workspace.path().join("large.txt");
+    std::fs::write(&text, "valid").unwrap();
+    let files = vec![
+        ChatFileRef::Local {
+            path: text.to_string_lossy().into_owned()
+        };
+        100
+    ];
+    let resolved = service
+        .resolve_chat_message("user", "", &files, root.path())
+        .await
+        .unwrap();
+    assert_eq!(resolved.files.len(), 100);
+    assert!(
+        resolved
+            .attachments
+            .iter()
+            .all(|file| matches!(file, aionui_common::chat_attachment::PromptAttachment::PathOnly))
+    );
+    let missing = vec![ChatFileRef::Local { path: "missing".into() }; 101];
+    assert!(matches!(
+        service.resolve_chat_message("user", "", &missing, root.path()).await,
+        Err(ProjectError::TooManyChatFiles)
+    ));
 }

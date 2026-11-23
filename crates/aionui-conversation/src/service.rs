@@ -535,6 +535,7 @@ impl ConversationService {
             return Ok(ResolvedChatMessage {
                 content: content.to_owned(),
                 files: Vec::new(),
+                attachments: Vec::new(),
             });
         }
         let project = self
@@ -556,7 +557,14 @@ impl ConversationService {
                     "could not resolve message attachments"
                 );
                 ConversationError::BadRequest {
-                    reason: err.to_string(),
+                    reason: match err {
+                        aionui_project::ProjectError::ChatFileMissing { .. }
+                        | aionui_project::ProjectError::LocalPathNotReadable { .. }
+                        | aionui_project::ProjectError::UploadPathOutsideRoot { .. } => {
+                            "Could not resolve a message attachment.".to_owned()
+                        }
+                        other => other.to_string(),
+                    },
                 }
             })
     }
@@ -3779,6 +3787,7 @@ impl ConversationService {
             msg_id: user_msg_id.clone(),
             turn_id: Some(active_turn_id.clone()),
             files: resolved.files.clone(),
+            attachments: resolved.attachments.clone(),
             inject_skills,
         };
         match agent.deliver_midturn(data).await {
@@ -4091,6 +4100,7 @@ impl ConversationService {
             conversation: row,
             content: resolved.content,
             files: resolved.files,
+            attachments: resolved.attachments,
             inject_skills: req.inject_skills,
             required_runtime_mode: None,
             build_options: build_opts,
@@ -4213,6 +4223,7 @@ impl ConversationService {
                 conversation: row,
                 content: request.content,
                 files: request.files,
+                attachments: Vec::new(),
                 inject_skills: request.inject_skills,
                 required_runtime_mode: request.required_runtime_mode,
                 build_options: build_opts,

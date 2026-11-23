@@ -134,6 +134,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust-windows-staging
+      - name: Local and Upload attachment provenance
+        env:
+          HOST60_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: pwsh
+        run: ./scripts/just/test-windows-attachment-provenance.ps1
       - name: Project file URI compatibility and Clippy
         run: |
           cargo clippy --locked --target x86_64-pc-windows-msvc -p aionui-project --all-targets -- -D warnings
