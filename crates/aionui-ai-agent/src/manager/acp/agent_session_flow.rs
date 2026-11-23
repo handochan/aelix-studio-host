@@ -716,6 +716,9 @@ async fn build_prompt_blocks(
                 code = "ATTACHMENT_FALLBACK",
                 "media attachment fell back to a path-only prompt"
             );
+            for source in &data.attachments {
+                source.release();
+            }
             return Ok(vec![ContentBlock::from(data.content.clone())]);
         };
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);

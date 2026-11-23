@@ -35,7 +35,7 @@ async fn attachment_provenance_matches_normal_send_and_running_metadata_without_
     use std::os::unix::fs::symlink;
 
     let trace = Capture::default();
-    let _capture = tracing::subscriber::set_default(trace.subscriber());
+    tracing::subscriber::set_global_default(trace.subscriber()).expect("capture Host and blocking worker events");
     let workspace = tempfile::tempdir().unwrap();
     let base = workspace.path();
     std::fs::write(base.join("relay-calls.attachment-fixture"), "").unwrap();
@@ -93,6 +93,19 @@ async fn attachment_provenance_matches_normal_send_and_running_metadata_without_
         }
     }
 
+    let too_many = vec![json!({"kind":"local","path":local}); 101];
+    let body = read(
+        post(&messages)
+            .json(&json!({"content":content,"files":too_many}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["code"], "BAD_REQUEST");
+    assert_eq!(body["error"], "Could not resolve a message attachment.");
+
     let local_ref = json!({"kind":"local","path":local});
     let upload_ref = json!({"kind":"upload","path":uploaded});
     for (reference, path, length) in [(&local_ref, &local, bytes.len()), (&upload_ref, &uploaded, 14)] {
@@ -137,16 +150,50 @@ async fn attachment_provenance_matches_normal_send_and_running_metadata_without_
     assert_eq!(prompt[1]["data"], encoded);
     host.tasks.kill_and_wait(&id, None).await;
 
+    // Trigger the actual file-service warning after admission, on spawn_blocking.
+    use aionui_file::IFileService;
+    let file_service =
+        aionui_file::FileService::new(std::sync::Arc::new(aionui_realtime::BroadcastEventBus::new(1)), vec![]);
+    let leaf = external.path().join(name);
+    let stale = aionui_common::chat_attachment::ChatAttachment::open(&leaf, None).unwrap();
+    std::fs::rename(leaf, external.path().join("removed")).unwrap();
+    assert!(matches!(
+        file_service.attachment_metadata(stale).await,
+        Err(aionui_file::FileError::TargetNotFound)
+    ));
+
+    let distrusted = external.path().join("h2-path-insecure-root");
+    std::fs::create_dir(&distrusted).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&distrusted, std::fs::Permissions::from_mode(0o777)).unwrap();
+    tokio::task::spawn_blocking(move || {
+        assert!(matches!(
+            aionui_common::chat_attachment::ChatAttachment::open(&distrusted.join(name), Some(&distrusted)),
+            Err(aionui_common::chat_attachment::AttachmentError::UntrustedRoot)
+        ));
+    })
+    .await
+    .unwrap();
     let logs = trace.text();
-    assert!(logs.contains("could not resolve message attachments"));
-    assert!(logs.contains("could not resolve chat file reference"));
-    assert!(logs.contains("ACP prompt carries native media content blocks"));
-    let positive = Capture::default();
-    tracing::subscriber::with_default(positive.subscriber(), || {
-        tracing::trace!(path = %name, content = %content, bytes = %std::str::from_utf8(bytes).unwrap(), %encoded);
+    for signal in [
+        "ATTACHMENT_OPENED",
+        "UPLOAD_ROOT_UNTRUSTED",
+        "resolved attachment changed or is unavailable",
+        "could not resolve message attachments",
+        "could not resolve chat file reference",
+        "ACP prompt carries native media content blocks",
+    ] {
+        assert!(logs.contains(signal), "missing production signal: {signal}");
+    }
+    assert!(!logs.contains("h2-path-insecure-root"));
+    let control_bytes = encoded.clone();
+    let test_thread = std::thread::current().id();
+    tokio::task::spawn_blocking(move || {
+        assert_ne!(std::thread::current().id(), test_thread);
+        tracing::trace!(path = %name, content = %content, bytes = %std::str::from_utf8(bytes).unwrap(), encoded = %control_bytes);
         tracing::trace!(path = ?name, content = ?content);
-    });
-    let positive = positive.text();
+    }).await.unwrap();
+    let positive = trace.text();
     for marker in [
         name.to_owned(),
         format!("{name:?}").trim_matches('"').to_owned(),

@@ -432,6 +432,9 @@ impl IAgentTask for AionrsAgentManager {
             "Building structured Aionrs content blocks"
         );
         let content_blocks = build_content_blocks(&data.content, &data.files);
+        for source in &data.attachments {
+            source.release();
+        }
         debug!(
             block_count = content_blocks.len(),
             "Built structured Aionrs content blocks"

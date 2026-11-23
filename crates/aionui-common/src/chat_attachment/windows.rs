@@ -1,17 +1,20 @@
-use std::ffi::OsString;
-use std::fs::{File, Metadata, OpenOptions};
+#[path = "windows_security.rs"]
+mod security;
+#[path = "windows_walk.rs"]
+pub(super) mod walk;
+pub(super) use security::{create_private_dir, verify_owner};
+
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, Metadata};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, PathBuf, Prefix};
 
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK,
-    GetFileType, GetFinalPathNameByHandleW,
-};
+use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType, GetFinalPathNameByHandleW};
 
-fn drive(path: &Path) -> Option<char> {
+pub(super) fn drive(path: &Path) -> Option<char> {
     match path.components().next()? {
         Component::Prefix(prefix) => match prefix.kind() {
             Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => Some(char::from(drive)),
@@ -42,10 +45,28 @@ pub(super) fn is_supported_path(path: &Path) -> bool {
         })
 }
 
-pub(super) fn configure_open(options: &mut OpenOptions, directory: bool) {
-    if directory {
-        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    }
+pub(super) fn open_path(path: &Path, directory: bool) -> io::Result<(File, PathBuf)> {
+    walk::open(
+        path,
+        !directory,
+        windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ,
+    )
+}
+
+pub(super) fn create_child_dir(parent: &File, name: &OsStr) -> io::Result<File> {
+    security::private_child_dir(parent, name)
+}
+
+pub(super) fn create_child_file(parent: &File, name: &OsStr) -> io::Result<File> {
+    use windows_sys::Wdk::Storage::FileSystem::{FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT};
+    walk::child(
+        parent,
+        name,
+        windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE,
+        FILE_CREATE,
+        FILE_OPEN_REPARSE_POINT | FILE_NON_DIRECTORY_FILE,
+        std::ptr::null(),
+    )
 }
 
 pub(super) fn is_disk_file(file: &File, metadata: &Metadata, directory: bool) -> bool {
@@ -54,7 +75,7 @@ pub(super) fn is_disk_file(file: &File, metadata: &Metadata, directory: bool) ->
         return false;
     }
     if directory {
-        metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        metadata.is_dir()
     } else {
         metadata.is_file()
     }
@@ -85,10 +106,8 @@ pub(super) fn wire_target(input: &Path, target: PathBuf) -> io::Result<PathBuf> 
     // that drive's own root, and hand out the equivalent drive-letter path.
     let letter = drive(input).ok_or(io::ErrorKind::InvalidInput)?;
     let root_path = PathBuf::from(format!("{letter}:\\"));
-    let mut options = OpenOptions::new();
-    options.read(true);
-    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    let root = opened_path(&options.open(&root_path)?)?;
+    let (root, _) = open_path(&root_path, true)?;
+    let root = opened_path(&root)?;
     let relative = target.strip_prefix(root).map_err(|_| io::ErrorKind::InvalidData)?;
     let path = root_path.join(relative);
     if !is_supported_path(&path) || relative.as_os_str().is_empty() {

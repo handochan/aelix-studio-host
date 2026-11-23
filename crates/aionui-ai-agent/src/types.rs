@@ -22,7 +22,7 @@ pub struct SendMessageData {
     pub files: Vec<String>,
     /// Host-only identities retained for Local and Upload byte reads.
     #[serde(skip)]
-    pub attachments: Vec<aionui_common::chat_attachment::ChatAttachment>,
+    pub attachments: Vec<aionui_common::chat_attachment::PromptAttachment>,
     /// Skills to inject into this message turn.
     #[serde(default)]
     pub inject_skills: Vec<String>,

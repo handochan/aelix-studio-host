@@ -134,6 +134,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v1-rust-windows-staging
+      - name: Local and Upload attachment provenance
+        env:
+          HOST60_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: pwsh
+        run: ./scripts/just/test-windows-attachment-provenance.ps1
       # Includes real child-process leases/hard exits, unlock/relock races,
       # guard Drop/container removal and preservation of unmarked user data.
       - name: Staging ownership and lifecycle
@@ -145,8 +150,6 @@ jobs:
       - name: Partial-file response and nullable history
         run: |
           cargo test --locked -p aionui-extension --test zip_import_security review_regressions::http_200_preserves_per_skill_failure_fields_and_imports_the_other_skill -- --exact --test-threads=1
-      - name: Local and Upload attachment provenance
-        run: 'cargo test --locked -p aionui-common --lib chat_attachment::'
       - name: ACP child stdin backpressure and revocation
         run: |
           cargo test --locked -p aionui-ai-agent --lib acp_relay_windows_child_stdin_ -- --test-threads=1

@@ -37,7 +37,7 @@ pub(crate) struct TurnStartInput {
     pub content: String,
     /// Attachment absolute paths, already resolved.
     pub files: Vec<String>,
-    pub attachments: Vec<aionui_common::chat_attachment::ChatAttachment>,
+    pub attachments: Vec<aionui_common::chat_attachment::PromptAttachment>,
     pub inject_skills: Vec<String>,
     pub required_runtime_mode: Option<String>,
     pub build_options: BuildTaskOptions,

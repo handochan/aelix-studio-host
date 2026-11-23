@@ -16,12 +16,18 @@ base64.workspace = true
 getrandom.workspace = true
 semver.workspace = true
 same-file = "1.0.6"
+tracing.workspace = true
+mime_guess.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+    "Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Storage_FileSystem",
+    "Win32_Security_Authorization", "Win32_System_IO", "Win32_System_Ioctl",
+    "Win32_System_SystemServices", "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

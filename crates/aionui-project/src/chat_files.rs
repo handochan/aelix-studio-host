@@ -9,14 +9,19 @@
 //! this backend edge.
 
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use aionui_api_types::ChatFileRef;
-use aionui_common::chat_attachment::{AttachmentError, ChatAttachment};
+use aionui_common::chat_attachment::{
+    AttachmentError, ChatAttachment, MAX_INLINE_FILE_BYTES, ManagedUploadRoot, PromptAttachment, inline_media_mime,
+};
 use aionui_common::constants::AIONUI_FILES_MARKER;
 
 use crate::canonical;
 use crate::service::ProjectService;
 use crate::types::{FileOp, ProjectError, ReferenceInput};
+
+const MAX_MESSAGE_FILE_REFS: usize = 100;
 
 /// A chat message whose attachments have been resolved to absolute paths and
 /// re-inlined into [`content`](Self::content) via the `[[AION_FILES]]` marker.
@@ -30,7 +35,7 @@ pub struct ResolvedChatMessage {
     /// re-adds its own; clearing this would leak the raw marker to aionrs.
     pub files: Vec<String>,
     /// Opened identities for the Local and Upload paths used in Host byte reads.
-    pub attachments: Vec<ChatAttachment>,
+    pub attachments: Vec<PromptAttachment>,
 }
 
 pub enum ResolvedChatFile {
@@ -61,17 +66,47 @@ impl ProjectService {
         files: &[ChatFileRef],
         upload_root: &Path,
     ) -> Result<ResolvedChatMessage, ProjectError> {
+        if files.len() > MAX_MESSAGE_FILE_REFS {
+            return Err(ProjectError::TooManyChatFiles);
+        }
+        let shared_root = Arc::new(OnceLock::new());
         let mut paths = Vec::with_capacity(files.len());
-        let mut attachments = Vec::new();
+        let mut attachments = Vec::with_capacity(files.len());
+        let mut seen = std::collections::HashMap::<(bool, &str), (String, PromptAttachment)>::new();
         for file in files {
-            let resolved = self.resolve_chat_file(user_id, file, upload_root, FileOp::Read).await?;
-            match resolved {
-                ResolvedChatFile::Project(path) => paths.push(path),
-                ResolvedChatFile::Attachment(file) => {
-                    paths.push(file.path().to_owned());
-                    attachments.push(file);
-                }
+            // Distinct submitted aliases can name the same canonical file.
+            // Retain their separate policy and recheck each at its own index.
+            let key = match file {
+                ChatFileRef::Local { path } => Some((false, path.as_str())),
+                ChatFileRef::Upload { path } => Some((true, path.as_str())),
+                ChatFileRef::Project { .. } => None,
+            };
+            if let Some((path, source)) = key.and_then(|key| seen.get(&key)) {
+                paths.push(path.clone());
+                attachments.push(source.repeat());
+                continue;
             }
+            let resolved = self
+                .resolve_chat_file_shared(user_id, file, upload_root, FileOp::Read, shared_root.clone())
+                .await?;
+            let (path, source) = match resolved {
+                ResolvedChatFile::Project(path) => (path, PromptAttachment::Project),
+                ResolvedChatFile::Attachment(file) => {
+                    let path = file.path().to_owned();
+                    let source =
+                        if inline_media_mime(&path).is_some() && file.admitted_length() <= MAX_INLINE_FILE_BYTES {
+                            PromptAttachment::inline(file)
+                        } else {
+                            PromptAttachment::PathOnly
+                        };
+                    (path, source)
+                }
+            };
+            if let Some(key) = key {
+                seen.insert(key, (path.clone(), source.clone()));
+            }
+            paths.push(path);
+            attachments.push(source);
         }
 
         let content = if paths.is_empty() {
@@ -109,6 +144,18 @@ impl ProjectService {
         upload_root: &Path,
         op: FileOp,
     ) -> Result<ResolvedChatFile, ProjectError> {
+        self.resolve_chat_file_shared(user_id, file, upload_root, op, Arc::new(OnceLock::new()))
+            .await
+    }
+
+    async fn resolve_chat_file_shared(
+        &self,
+        user_id: &str,
+        file: &ChatFileRef,
+        upload_root: &Path,
+        op: FileOp,
+        shared_root: Arc<OnceLock<std::io::Result<ManagedUploadRoot>>>,
+    ) -> Result<ResolvedChatFile, ProjectError> {
         let (path, root) = match file {
             ChatFileRef::Project { pe_id, relative_path } => {
                 let resolved = self
@@ -134,13 +181,17 @@ impl ProjectService {
             ChatFileRef::Local { path } => (path.clone(), None),
         };
         tokio::task::spawn_blocking(move || {
-            ChatAttachment::open(Path::new(&path), root.as_deref())
-                .map(ResolvedChatFile::Attachment)
-                .map_err(|error| match error {
-                    AttachmentError::OutsideUploadRoot => ProjectError::UploadPathOutsideRoot { path },
-                    AttachmentError::Unavailable if root.is_some() => ProjectError::ChatFileMissing { path },
-                    AttachmentError::Unavailable => ProjectError::LocalPathNotReadable { path },
-                })
+            ChatAttachment::open_cached(
+                Path::new(&path),
+                root.as_deref().map(|root| (root, shared_root.as_ref())),
+            )
+            .map(ResolvedChatFile::Attachment)
+            .map_err(|error| match error {
+                AttachmentError::UntrustedRoot => ProjectError::UploadRootUnavailable,
+                AttachmentError::OutsideUploadRoot => ProjectError::UploadPathOutsideRoot { path },
+                AttachmentError::Unavailable if root.is_some() => ProjectError::ChatFileMissing { path },
+                AttachmentError::Unavailable => ProjectError::LocalPathNotReadable { path },
+            })
         })
         .await
         .unwrap_or_else(|_| Err(ProjectError::LocalPathNotReadable { path: String::new() }))

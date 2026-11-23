@@ -16,47 +16,59 @@ pub(crate) async fn snapshot_files(
     refs: Vec<ChatFileRef>,
     cancel: CancellationToken,
 ) -> Result<Vec<Vec<u8>>, ByteGrantError> {
-    if cancel.is_cancelled() {
-        return Err(ByteGrantError::Revoked);
-    }
-    // The normal resolver may perform synchronous filesystem queries. Keep
-    // those and the copy off async workers, retaining the preparation charge
-    // until this worker has discarded any partial result.
-    let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let upload_root = std::env::temp_dir().join("aionui");
-        let mut remaining = SNAPSHOT_LIMIT;
-        let mut files = Vec::with_capacity(refs.len());
-        for file in refs {
-            let source = runtime.block_on(async {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => Err(ByteGrantError::Revoked),
-                    source = project.resolve_chat_file(&owner, &file, &upload_root, FileOp::Read) =>
-                        source.map_err(|_| ByteGrantError::File),
-                }
-            })?;
-            let result = match source {
-                ResolvedChatFile::Project(path) => snapshot(Path::new(&path), remaining, &cancel),
-                ResolvedChatFile::Attachment(attachment) => attachment.with_file(|file| {
-                    let before = file.metadata()?;
-                    read_snapshot(file, &before, remaining, &cancel)
-                }),
-            };
-            let bytes = result.map_err(|_| {
-                if cancel.is_cancelled() {
-                    ByteGrantError::Revoked
-                } else {
-                    ByteGrantError::File
-                }
-            })?;
-            remaining -= bytes.len();
-            files.push(bytes);
+    let upload_root = std::env::temp_dir().join("aionui");
+    snapshot_inputs(refs, cancel, |file| {
+        let project = project.clone();
+        let owner = owner.clone();
+        let upload_root = upload_root.clone();
+        async move {
+            project
+                .resolve_chat_file(&owner, &file, &upload_root, FileOp::Read)
+                .await
+                .map_err(|_| ByteGrantError::File)
         }
-        Ok(files)
     })
     .await
-    .map_err(|_| ByteGrantError::File)?
+}
+
+async fn snapshot_inputs<Fut>(
+    refs: Vec<ChatFileRef>,
+    cancel: CancellationToken,
+    mut resolve: impl FnMut(ChatFileRef) -> Fut,
+) -> Result<Vec<Vec<u8>>, ByteGrantError>
+where
+    Fut: Future<Output = Result<ResolvedChatFile, ByteGrantError>>,
+{
+    let mut remaining = SNAPSHOT_LIMIT;
+    let mut files = Vec::with_capacity(refs.len());
+    for file in refs {
+        if cancel.is_cancelled() {
+            return Err(ByteGrantError::Revoked);
+        }
+        // Binding::prepare awaits this future after cancellation. Joining both
+        // stages keeps the pool reservation alive until their last syscall exits.
+        let source = resolve(file).await;
+        if cancel.is_cancelled() {
+            return Err(ByteGrantError::Revoked);
+        }
+        let source = source?;
+        let token = cancel.clone();
+        let result = tokio::task::spawn_blocking(move || match source {
+            ResolvedChatFile::Project(path) => snapshot(Path::new(&path), remaining, &token),
+            ResolvedChatFile::Attachment(attachment) => {
+                attachment.with_file(|file| read_snapshot(file, &file.metadata()?, remaining, &token))
+            }
+        })
+        .await
+        .map_err(|_| ByteGrantError::File)?;
+        if cancel.is_cancelled() {
+            return Err(ByteGrantError::Revoked);
+        }
+        let bytes = result.map_err(|_| ByteGrantError::File)?;
+        remaining -= bytes.len();
+        files.push(bytes);
+    }
+    Ok(files)
 }
 
 fn check_cancel(cancel: &CancellationToken) -> io::Result<()> {
@@ -140,6 +152,89 @@ fn unchanged(before: &Metadata, after: &Metadata) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_slots_remain_charged_while_file_validation_is_blocked() {
+        use aionui_ai_agent::protocol::{
+            acp_relay::RelayWriteAdmission,
+            byte_grants::{ByteGrantBinding, ByteGrantPool},
+        };
+        use std::time::Duration;
+        let binding = Arc::new(ByteGrantBinding::default());
+        let pool = Arc::new(ByteGrantPool::default());
+        let admission = || {
+            RelayWriteAdmission::new(None, tokio::time::Instant::now() + Duration::from_secs(60), |write| {
+                write()
+            })
+        };
+        let refs = vec![ChatFileRef::Local {
+            path: "/fixture".into(),
+        }];
+        let mut releases = Vec::new();
+        // Distinct live bindings isolate the per-owner pool limit from the
+        // independent one-pending-batch limit on a single binding.
+        let workers = [
+            Arc::new(ByteGrantBinding::default()),
+            Arc::new(ByteGrantBinding::default()),
+        ];
+        for (worker, id) in workers.iter().zip(["one", "two"]) {
+            let (release, wait) = std::sync::mpsc::channel();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (observed, cancelled) = tokio::sync::oneshot::channel();
+            let (done, finished) = tokio::sync::oneshot::channel();
+            let batch = refs.clone();
+            let pending = worker
+                .prepare(
+                    &pool,
+                    "user",
+                    id.into(),
+                    &refs,
+                    None,
+                    admission(),
+                    move |token| async move {
+                        let observer = token.clone();
+                        tokio::spawn(async move {
+                            observer.cancelled().await;
+                            observed.send(()).unwrap();
+                        });
+                        let mut gate = Some((entered, wait));
+                        let result = snapshot_inputs(batch, token, move |_| {
+                            let (entered, wait) = gate.take().unwrap();
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    entered.send(()).unwrap();
+                                    wait.recv_timeout(Duration::from_secs(30)).unwrap();
+                                    Err(ByteGrantError::File)
+                                })
+                                .await
+                                .unwrap()
+                            }
+                        })
+                        .await;
+                        done.send(()).unwrap();
+                        result
+                    },
+                )
+                .unwrap();
+            started.await.unwrap();
+            tokio::time::advance(Duration::from_secs(31)).await;
+            assert!(matches!(pending.result().await, Err(ByteGrantError::Expired)));
+            cancelled.await.unwrap();
+            tokio::task::yield_now().await;
+            releases.push((release, finished));
+        }
+        let reserve = || {
+            binding.prepare(&pool, "user", "again".into(), &refs, None, admission(), |_| async {
+                Ok(vec![vec![1]])
+            })
+        };
+        assert!(matches!(reserve(), Err(ByteGrantError::Limit)));
+        for (release, finished) in releases {
+            release.send(()).unwrap();
+            finished.await.unwrap();
+        }
+        assert!(reserve().unwrap().result().await.is_ok());
+    }
 
     #[test]
     fn byte_grant_copy_enforces_the_exact_length_budget() {
