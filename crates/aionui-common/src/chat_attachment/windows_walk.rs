@@ -1,10 +1,9 @@
 //! Walk from a permitted drive root using one handle-relative NT open per name.
 //! A concurrently replaced ancestor cannot introduce a new traversal.
 use std::ffi::{OsStr, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Component, Path, PathBuf};
 use std::ptr;
@@ -37,23 +36,9 @@ thread_local! {
     pub(in crate::chat_attachment) static OPENS: std::cell::RefCell<Vec<ObservedOpen>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn drive_root(letter: char) -> io::Result<(PathBuf, File)> {
-    let path = PathBuf::from(format!("{letter}:\\"));
-    let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
-    #[cfg(test)]
-    OPENS.with_borrow_mut(|opens| {
-        opens.push(ObservedOpen {
-            name: path.as_os_str().into(),
-            no_follow: flags & FILE_FLAG_OPEN_REPARSE_POINT != 0,
-            backup_semantics: flags & FILE_FLAG_BACKUP_SEMANTICS != 0,
-        })
-    });
-    let file = OpenOptions::new()
-        .access_mode(DIR_ACCESS)
-        .custom_flags(flags)
-        .open(&path)?;
-    Ok((path, file))
-}
+#[path = "windows_roots.rs"]
+mod roots;
+pub(super) use roots::volume_name;
 
 // Each call names exactly one child of an already opened parent. Do not pass
 // absolute names, separators, device names or stream names to NtCreateFile.
@@ -66,6 +51,19 @@ pub(super) fn child(
     descriptor: *const SECURITY_DESCRIPTOR,
 ) -> io::Result<File> {
     super::super::check_child_name(name)?;
+    nt_open(Some(parent), name, access, disposition, options, descriptor)
+}
+
+// Absolute names here are verified NT device roots. Every other call uses a
+// single component relative to a pinned parent.
+fn nt_open(
+    parent: Option<&File>,
+    name: &OsStr,
+    access: u32,
+    disposition: u32,
+    options: u32,
+    descriptor: *const SECURITY_DESCRIPTOR,
+) -> io::Result<File> {
     #[cfg(test)]
     OPENS.with_borrow_mut(|opens| {
         opens.push(ObservedOpen {
@@ -83,7 +81,7 @@ pub(super) fn child(
     };
     let attributes = OBJECT_ATTRIBUTES {
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
-        RootDirectory: parent.as_raw_handle(),
+        RootDirectory: parent.map_or(ptr::null_mut(), AsRawHandle::as_raw_handle),
         ObjectName: &name,
         // The probe opens the final reparse point itself. Never let the IO
         // manager restart name lookup, even if a tag changes before the
@@ -190,10 +188,10 @@ fn substitute(file: &File, expected: u32, parent: &Path) -> io::Result<PathBuf> 
         .collect();
     let raw = OsString::from_wide(&wide);
     let raw = raw.to_str().ok_or_else(invalid)?;
-    link_target(raw, relative, parent)
+    link_target(raw, relative, parent, expected == IO_REPARSE_TAG_MOUNT_POINT)
 }
 
-fn link_target(raw: &str, relative: bool, parent: &Path) -> io::Result<PathBuf> {
+fn link_target(raw: &str, relative: bool, parent: &Path, mount: bool) -> io::Result<PathBuf> {
     let path = if relative {
         let path = Path::new(raw);
         if path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_))) {
@@ -207,7 +205,9 @@ fn link_target(raw: &str, relative: bool, parent: &Path) -> io::Result<PathBuf> 
             None => PathBuf::from(raw),
         }
     };
-    if !is_supported_path(&path) {
+    if !(is_supported_path(&path)
+        || (mount || relative && volume_name(parent).is_some()) && volume_name(&path).is_some())
+    {
         return Err(io::ErrorKind::InvalidData.into());
     }
     Ok(path)
@@ -215,22 +215,14 @@ fn link_target(raw: &str, relative: bool, parent: &Path) -> io::Result<PathBuf> 
 
 pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Result<(File, PathBuf)> {
     let mut path = input.to_owned();
-    for _ in 0..=MAX_LINKS {
-        if !is_supported_path(&path) {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        // Win32 normalizes ordinary DOS paths (including trailing dots); an
-        // explicitly verbatim path keeps its exact component spelling.
-        let absolute = std::path::absolute(&path)?;
-        let (mut prefix, mut parent) = drive_root(drive(&absolute).ok_or(io::ErrorKind::InvalidInput)?)?;
-        let mut parts = absolute.components().skip(2).peekable();
+    for hop in 0..=MAX_LINKS {
+        let start = roots::resolve(&path, hop != 0)?;
+        let (mut prefix, mut parent) = (start.prefix, start.root);
+        let mut parts = start.names.iter().peekable();
         if parts.peek().is_none() {
             return Ok((parent, prefix));
         }
-        while let Some(component) = parts.next() {
-            let Component::Normal(name) = component else {
-                return Err(io::ErrorKind::InvalidInput.into());
-            };
+        while let Some(name) = parts.next() {
             let last = parts.peek().is_none();
             let access = if last { leaf_access } else { DIR_ACCESS };
             let probe = child(&parent, name, access, FILE_OPEN, PROBE, ptr::null())?;
@@ -241,7 +233,7 @@ pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Res
                 }
                 let mut next = substitute(&probe, reparse, &prefix)?;
                 for part in parts {
-                    next.push(part.as_os_str());
+                    next.push(part);
                 }
                 path = next;
                 break;
@@ -249,7 +241,14 @@ pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Res
             let opened = data_handle(&parent, name, access, probe, reparse)?;
             prefix.push(name);
             if last {
-                return Ok((opened, prefix));
+                return Ok((
+                    opened,
+                    if volume_name(&prefix).is_some() {
+                        input.to_owned()
+                    } else {
+                        prefix
+                    },
+                ));
             }
             parent = opened;
         }
@@ -326,10 +325,47 @@ mod tests {
             r"\??\Volume{1234}\leaf",
             r"Z:leaf",
         ] {
-            assert!(link_target(raw, false, parent).is_err(), "{raw}");
+            assert!(link_target(raw, false, parent, false).is_err(), "{raw}");
         }
-        assert!(link_target(r"\??\Z:\leaf", false, parent).is_ok());
-        assert!(link_target(r"..\other\leaf", true, parent).is_ok());
-        assert!(link_target(r"\\server\share\leaf", true, parent).is_err());
+        assert!(link_target(r"\??\Z:\leaf", false, parent, false).is_ok());
+        assert!(link_target(r"..\other\leaf", true, parent, false).is_ok());
+        assert!(link_target(r"\\server\share\leaf", true, parent, false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+
+    #[test]
+    fn kernel_stops_a_link_inserted_between_probe_and_filter_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected");
+        std::fs::write(&selected, b"original").unwrap();
+        std::fs::write(dir.path().join("other"), b"fixture").unwrap();
+        let (parent, _) = open(dir.path(), true, DIR_ACCESS).unwrap();
+        let name = OsStr::new("selected");
+        let probe = child(&parent, name, FILE_GENERIC_READ, FILE_OPEN, PROBE, ptr::null()).unwrap();
+        std::fs::rename(&selected, dir.path().join("pinned")).unwrap();
+        std::os::windows::fs::symlink_file("other", &selected).unwrap();
+        OPENS.with_borrow_mut(Vec::clear);
+        let err = data_handle(
+            &parent,
+            name,
+            FILE_GENERIC_READ,
+            probe,
+            windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_CLOUD,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.raw_os_error(),
+            Some(unsafe { RtlNtStatusToDosError(STATUS_REPARSE_POINT_ENCOUNTERED) } as i32),
+            "expected the kernel's reparse rejection before the post-open identity check: {err}"
+        );
+        OPENS.with_borrow(|opens| {
+            assert_eq!(opens.len(), 1);
+            assert_eq!(opens[0].name, name);
+            assert!(!opens[0].no_follow);
+        });
     }
 }

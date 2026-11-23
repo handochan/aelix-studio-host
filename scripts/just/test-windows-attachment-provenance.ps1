@@ -6,17 +6,6 @@ cargo test --locked -p aionui-common --lib chat_attachment:: -- --nocapture
 $basicExit = $LASTEXITCODE
 if ($basicExit -ne 0) { Write-Warning 'Basic Windows attachment tests failed; collecting integration results.' }
 
-function Test-WofFixture([string]$path) {
-    # Hosted workspace volumes may use an allocation size incompatible with
-    # WOF. A failed fixture is recorded separately from a failed data read.
-    $PSNativeCommandUseErrorActionPreference = $false
-    [IO.File]::WriteAllText($path, ('W' * 65536), [Text.Encoding]::ASCII)
-    compact.exe /c /f /exe:lzx $path | Out-Host
-    if ($LASTEXITCODE -ne 0) { return $false }
-    $tag = fsutil.exe reparsepoint query $path
-    return ($LASTEXITCODE -eq 0 -and ($tag -join ' ') -match '0x80000017')
-}
-
 $base = Join-Path (Join-Path $env:GITHUB_WORKSPACE target) ("h60-" + [guid]::NewGuid().ToString('N'))
 $share = Split-Path -Leaf $base
 New-Item -ItemType Directory -Path $base -Force | Out-Null
@@ -25,6 +14,9 @@ if (-not $letter) { throw 'No drive letter available for the SMB fixture.' }
 $driveName = [string]$letter + ':'
 $mapped = $false
 $shared = $false
+$substCreated = $false
+$volumeMounted = $false
+$mount = Join-Path $base mounted
 try {
     $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     New-SmbShare -Name $share -Path $base -FullAccess $account | Out-Null
@@ -63,7 +55,52 @@ try {
         Set-Acl -LiteralPath $fixture.FullName -AclObject $acl
     }
 
-    cargo test --locked -p aionui-common --lib chat_attachment:: -- --ignored --nocapture --skip windows_non_surrogate_filter_reads_logical_bytes
+    $env:HOST60_SUBST_BASE = Join-Path $base 'subst-root'
+    $real = Join-Path $env:HOST60_SUBST_BASE 'real'
+    $prefix = Join-Path $env:HOST60_SUBST_BASE 'prefix'
+    New-Item -ItemType Directory -Force -Path (Join-Path $real 'scope') | Out-Null
+    New-Item -ItemType Junction -Path $prefix -Target $real | Out-Null
+    $substLetter = (89..69 | ForEach-Object { [char]$_ } | Where-Object { -not (Get-PSDrive -Name $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1)
+    if (-not $substLetter) { throw 'No drive letter available for SUBST.' }
+    $substName = [string]$substLetter + ':'
+    subst.exe $substName (Join-Path $prefix 'scope')
+    if ($LASTEXITCODE -ne 0) { throw 'Real SUBST fixture failed.' }
+    $substCreated = $true
+    $env:HOST60_SUBST_DRIVE = $substName + '\'
+
+    $systemTemp = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp'
+    $env:HOST60_FILTER_BASE = Join-Path $systemTemp $share
+    New-Item -ItemType Directory -Path $env:HOST60_FILTER_BASE | Out-Null
+    $env:HOST60_WOF_REFERENCE = Join-Path $base 'reference.bin'
+    $env:HOST60_WOF_FILE = Join-Path $env:HOST60_FILTER_BASE 'fixture.exe'
+    # Use the system NTFS volume for XPRESS4K; D: on the hosted image rejects compression.
+    $bytes = [IO.File]::ReadAllBytes((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
+    [IO.File]::WriteAllBytes($env:HOST60_WOF_REFERENCE, $bytes)
+    [IO.File]::WriteAllBytes($env:HOST60_WOF_FILE, $bytes)
+    compact.exe /c /f /exe:xpress4k $env:HOST60_WOF_FILE
+    if ($LASTEXITCODE -ne 0) { throw 'Required XPRESS4K compression failed.' }
+
+    $ignoreArgs = @('--ignored', '--nocapture')
+    New-Item -ItemType Directory -Path $mount | Out-Null
+    try {
+        $targetDrive = [IO.Path]::GetPathRoot($systemTemp)
+        if ($targetDrive -eq [IO.Path]::GetPathRoot($mount)) { throw "Only one fixture volume ($targetDrive)" }
+        $guidOutput = mountvol.exe $targetDrive /L
+        if ($LASTEXITCODE -ne 0) { throw "mountvol /L exit=$LASTEXITCODE $guidOutput" }
+        $guid = ($guidOutput -join '').Trim()
+        $mountOutput = mountvol.exe $mount $guid
+        if ($LASTEXITCODE -ne 0) { throw "mountvol exit=$LASTEXITCODE $mountOutput" }
+        $volumeMounted = $true
+    } catch {
+        Write-Host "::notice::Mounted-volume fixture unavailable: $($_.Exception.Message)"
+        $ignoreArgs += @('--skip', 'windows_walks_local_mounted_volume')
+    }
+    if ($volumeMounted) {
+        $relative = [IO.Path]::GetRelativePath($targetDrive, $env:HOST60_FILTER_BASE)
+        $env:HOST60_VOLUME_MOUNT = Join-Path $mount $relative
+        Write-Host "Mounted local second volume $guid for the validator test"
+    }
+    cargo test --locked -p aionui-common --lib chat_attachment:: -- @ignoreArgs
     $integrationsExit = $LASTEXITCODE
     if ($integrationsExit -ne 0) { Write-Warning 'Mandatory mapped-drive, alias or ACL checks failed.' }
     if ($integrationsExit -eq 0) {
@@ -74,23 +111,13 @@ try {
             $rules[0].IdentityReference -ne $userSid) { throw 'New upload root does not have the protected owner-only ACL.' }
     }
 
-    $systemTemp = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp'
-    $wofPaths = @((Join-Path $base 'wof.txt'), (Join-Path $systemTemp ($share + '-wof.txt')))
-    $testedWof = $false
-    foreach ($path in $wofPaths) {
-        if (Test-WofFixture $path) {
-            $env:HOST60_WOF_FILE = $path
-            cargo test --locked -p aionui-common --lib windows_non_surrogate_filter_reads_logical_bytes -- --ignored --nocapture
-            if ($LASTEXITCODE -ne 0) { throw 'Reading a real WOF file failed.' }
-            $testedWof = $true
-            break
-        }
-    }
-    if (-not $testedWof) {
-        Write-Host '::notice::Real WOF read skipped: neither hosted volume provisioned a WOF tag (compact output above). No OneDrive sync provider is configured.'
-    }
     if ($basicExit -ne 0 -or $integrationsExit -ne 0) { throw 'Windows attachment provenance tests failed.' }
 } finally {
+    if ($volumeMounted) {
+        mountvol.exe $mount /D
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot detach fixture mount; leaving its parent untouched.' }
+    }
+    if ($substCreated) { subst.exe $substName /D }
     if ($env:HOST60_LINK_TO_MAPPED_FILE) { [IO.File]::Delete($env:HOST60_LINK_TO_MAPPED_FILE) }
     if ($mapped) { net.exe use $driveName /delete /y }
     if ($shared) { Remove-SmbShare -Name $share -Force }

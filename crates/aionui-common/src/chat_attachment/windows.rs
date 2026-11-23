@@ -82,13 +82,20 @@ pub(super) fn is_disk_file(file: &File, metadata: &Metadata, directory: bool) ->
 }
 
 pub(super) fn opened_path(file: &File) -> io::Result<PathBuf> {
+    let mut flags = 0;
     let mut path = vec![0; 512];
     loop {
         // SAFETY: the File owns the handle and path has length writable WCHARs.
-        let length = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), path.as_mut_ptr(), path.len() as u32, 0) }
-            as usize;
+        let length =
+            unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), path.as_mut_ptr(), path.len() as u32, flags) }
+                as usize;
         if length == 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            if flags == 0 && err.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND as i32) {
+                flags = windows_sys::Win32::Storage::FileSystem::VOLUME_NAME_GUID;
+                continue;
+            }
+            return Err(err);
         }
         if length < path.len() {
             return Ok(OsString::from_wide(&path[..length]).into());
@@ -102,6 +109,11 @@ pub(super) fn wire_target(input: &Path, target: PathBuf) -> io::Result<PathBuf> 
         return Ok(target);
     }
 
+    if walk::volume_name(&target).is_some() && is_supported_path(input) {
+        // A mounted volume can have no drive letter. Keep the checked mount
+        // spelling; verify_current resolves it again and compares the handle.
+        return std::path::absolute(input);
+    }
     // The final path of a mapped drive can be UNC. Keep only a target under
     // that drive's own root, and hand out the equivalent drive-letter path.
     let letter = drive(input).ok_or(io::ErrorKind::InvalidInput)?;

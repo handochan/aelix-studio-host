@@ -356,6 +356,19 @@ mod tests {
         let tiny = dir.path().join("one.png");
         std::fs::write(&tiny, [1]).unwrap();
         let tiny = tiny.to_str().unwrap().to_owned();
+        let below = dir.path().join("below.png");
+        std::fs::File::create(&below)
+            .unwrap()
+            .set_len(MAX_MEDIA_BLOCK_BYTES - 1)
+            .unwrap();
+        let files = [vec![path.clone(); 9], vec![below.to_str().unwrap().to_owned()]].concat();
+        let partition = partition_media("", &files, CAPS_IMAGE);
+        assert_eq!(partition.media.len(), 10);
+        assert!(partition.path_files.is_empty());
+        assert_eq!(
+            partition.media.iter().map(|m| m.byte_limit).sum::<u64>(),
+            MAX_PROMPT_MEDIA_BYTES - 1
+        );
         let files = [vec![path.clone(); 10], vec![tiny.clone(), path.clone()]].concat();
         let partition = partition_media("", &files, CAPS_IMAGE);
         assert_eq!(partition.media.len(), 10);

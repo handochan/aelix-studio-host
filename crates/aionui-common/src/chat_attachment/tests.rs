@@ -413,7 +413,12 @@ fn windows_real_mapping_and_short_name() {
     let link = path("HOST60_LINK_TO_MAPPED_FILE");
     std::os::windows::fs::symlink_file(&mapped, &link).unwrap();
     for input in [mapped.clone(), link] {
+        platform::walk::OPENS.with_borrow_mut(Vec::clear);
         let remote = ChatAttachment::open(&input, None).unwrap();
+        assert!(
+            remote_root_opens() > 0,
+            "real mapped share must exercise the remote-open counter"
+        );
         assert_eq!(platform::drive(Path::new(remote.path())), platform::drive(&mapped));
         assert_eq!(
             remote
@@ -429,21 +434,8 @@ fn windows_real_mapping_and_short_name() {
 }
 
 #[cfg(windows)]
-#[test]
-#[ignore = "requires a WOF-compressed file on the Windows runner"]
-fn windows_non_surrogate_filter_reads_logical_bytes() {
-    let path = PathBuf::from(std::env::var_os("HOST60_WOF_FILE").expect("Windows CI must provide a WOF file"));
-    let selected = ChatAttachment::open(&path, None).unwrap();
-    let bytes = selected
-        .with_file(|mut file| {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
-        .unwrap();
-    assert_eq!(bytes.len(), 65536);
-    assert!(bytes.iter().all(|b| *b == b'W'));
-}
+#[path = "windows_filter_fixtures.rs"]
+mod filters;
 
 #[cfg(unix)]
 #[test]
@@ -486,5 +478,141 @@ fn windows_checks_upload_root_owner_and_dacl() {
         ("foreign", false),
     ] {
         assert_eq!(ManagedUploadRoot::open(&base.join(name)).is_ok(), trusted, "{name}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_posix_acl_mask_controls_effective_named_user_write() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("managed");
+    let root = ManagedUploadRoot::open(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let foreign = unsafe { libc::geteuid() } ^ 1;
+    for mask in [6u16, 4] {
+        // Linux system.posix_acl_access v2: owner, named user with rw,
+        // owning group, effective group-class mask, other.
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (1u16, 7u16, u32::MAX),
+            (2, 6, foreign),
+            (4, 0, u32::MAX),
+            (16, mask, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(perm.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        let ret = unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                c"system.posix_acl_access".as_ptr(),
+                acl.as_ptr().cast(),
+                acl.len(),
+                0,
+            )
+        };
+        assert_eq!(ret, 0, "POSIX ACL fixture: {}", io::Error::last_os_error());
+        assert_eq!((file.metadata().unwrap().mode() >> 3) & 7, u32::from(mask));
+        assert_eq!(root.verify_current().is_ok(), mask & 2 == 0);
+        assert_eq!(ManagedUploadRoot::open(&path).is_ok(), mask & 2 == 0);
+    }
+}
+
+#[cfg(windows)]
+fn remote_root_opens() -> usize {
+    platform::walk::OPENS.with_borrow(|opens| {
+        opens
+            .iter()
+            .filter(|open| {
+                let name = open.name.to_string_lossy().to_ascii_lowercase();
+                name.starts_with(r"\device\mup\") || name.starts_with(r"\device\lanmanredirector\")
+            })
+            .count()
+    })
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_relative_link_and_intermediate_unc_link() {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("managed");
+    ManagedUploadRoot::open(&root).unwrap();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("target"), b"relative").unwrap();
+    let link = root.join("sub/relative");
+    symlink_file(r"..\target", &link).unwrap();
+    assert!(fs::read_link(&link).unwrap().is_relative());
+    assert_eq!(
+        ChatAttachment::open(&link, Some(&root))
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len(),
+        8
+    );
+    symlink_dir(r"\\localhost\h60-never-open", root.join("redirect")).unwrap();
+    for policy in [None, Some(root.as_path())] {
+        platform::walk::OPENS.with_borrow_mut(Vec::clear);
+        assert_unavailable(ChatAttachment::open(&root.join("redirect/leaf"), policy));
+        assert_eq!(remote_root_opens(), 0);
+        platform::walk::OPENS.with_borrow(|v| assert_eq!(v.last().unwrap().name, "redirect"));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the CI SUBST drive with a local junction in its own mapping"]
+fn windows_walks_the_subst_mapping_before_open_and_recheck() {
+    use std::os::windows::fs::symlink_dir;
+    let get = |name| PathBuf::from(std::env::var_os(name).expect("SUBST fixture required"));
+    let base = get("HOST60_SUBST_BASE");
+    let drive = get("HOST60_SUBST_DRIVE");
+    let real = base.join("real/scope");
+    fs::create_dir(real.join("data")).unwrap();
+    fs::write(real.join("data/file"), b"local").unwrap();
+    junction::create(real.join("data"), real.join("allowed")).unwrap();
+    symlink_dir(r"\\localhost\h60-never-open", real.join("denied")).unwrap();
+    let good = drive.join("allowed/file");
+    let file = ChatAttachment::open(&good, None).unwrap();
+    assert_eq!(file.metadata().unwrap().len(), 5);
+    platform::walk::OPENS.with_borrow_mut(Vec::clear);
+    assert_unavailable(ChatAttachment::open(&drive.join("denied/file"), None));
+    assert_eq!(remote_root_opens(), 0);
+    // Now change an intermediate component embedded in QueryDosDevice's result.
+    remove_junction_fixture(&base.join("prefix"));
+    symlink_dir(r"\\localhost\h60-never-open", base.join("prefix")).unwrap();
+    platform::walk::OPENS.with_borrow_mut(Vec::clear);
+    assert_unavailable(ChatAttachment::open(&good, None));
+    assert!(file.metadata().is_err());
+    assert_eq!(remote_root_opens(), 0);
+    platform::walk::OPENS.with_borrow(|v| assert_eq!(v.last().unwrap().name, "prefix"));
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the CI local volume GUID mounted folder"]
+fn windows_walks_local_mounted_volume() {
+    let directory = PathBuf::from(std::env::var_os("HOST60_VOLUME_MOUNT").expect("mounted folder required"));
+    let root = directory.join("managed");
+    ManagedUploadRoot::open(&root).unwrap();
+    let path = root.join("mounted.txt");
+    fs::write(&path, b"mounted volume").unwrap();
+    for policy in [None, Some(root.as_path())] {
+        let file = ChatAttachment::open(&path, policy).unwrap();
+        assert!(platform::is_supported_path(Path::new(file.path())));
+        assert_eq!(
+            file.with_file(|mut fd| {
+                let mut b = Vec::new();
+                fd.read_to_end(&mut b)?;
+                Ok(b)
+            })
+            .unwrap(),
+            b"mounted volume"
+        );
     }
 }

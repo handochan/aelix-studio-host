@@ -62,6 +62,16 @@ pub(super) fn open_path(path: &Path, directory: bool) -> io::Result<(File, PathB
     Ok((options.open(path)?, path.to_owned()))
 }
 
+#[cfg(target_os = "macos")]
+#[path = "darwin_acl.rs"]
+mod darwin_acl;
+
+#[cfg(target_os = "macos")]
+pub(super) fn create_private_dir(path: &Path) -> io::Result<()> {
+    darwin_acl::create_private_dir(path)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(super) fn create_private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
@@ -71,11 +81,20 @@ pub(super) fn create_private_dir(path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn verify_owner(file: &File) -> io::Result<()> {
+    let _uid = verify_mode(file)?;
+    #[cfg(target_os = "macos")]
+    darwin_acl::verify(file, _uid)?;
+    Ok(())
+}
+
+fn verify_mode(file: &File) -> io::Result<libc::uid_t> {
     let metadata = file.metadata()?;
+    // On Linux the group mode bits encode the POSIX ACL mask. A named
+    // principal cannot have effective write permission without group-write.
     if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    Ok(())
+    Ok(metadata.uid())
 }
 
 fn child_name(name: &std::ffi::OsStr) -> io::Result<std::ffi::CString> {

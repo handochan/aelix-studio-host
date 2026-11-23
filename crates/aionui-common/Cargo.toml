@@ -24,7 +24,7 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
-    "Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Storage_FileSystem",
+    "Wdk_System_SystemServices", "Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Storage_FileSystem",
     "Win32_Security_Authorization", "Win32_System_IO", "Win32_System_Ioctl",
     "Win32_System_SystemServices", "Win32_System_Threading",
 ] }
@@ -35,3 +35,4 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "1.4"
+windows-sys = { version = "0.61", features = ["Win32_Storage_CloudFilters", "Win32_System_LibraryLoader"] }
