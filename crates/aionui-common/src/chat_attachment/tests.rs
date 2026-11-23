@@ -332,8 +332,8 @@ fn windows_symlinks_check_the_substitute_before_any_target_open() {
     platform::walk::OPENS.with_borrow_mut(Vec::clear);
     let source = ChatAttachment::open(&link, Some(&root)).unwrap();
     platform::walk::OPENS.with_borrow(|opens| {
-        let link_index = opens.iter().position(|name| name == "selected").unwrap();
-        assert!(opens[link_index + 1..].iter().any(|name| name == "real file"));
+        let link_index = opens.iter().position(|open| open.name == "selected").unwrap();
+        assert!(opens[link_index + 1..].iter().any(|open| open.name == "real file"));
     });
     assert_eq!(source.metadata().unwrap().len(), 8);
     fs::remove_file(&link).unwrap();
@@ -347,13 +347,24 @@ fn windows_symlinks_check_the_substitute_before_any_target_open() {
             _ => assert!(source.metadata().is_err()),
         }
         platform::walk::OPENS.with_borrow(|opens| {
-            assert_eq!(opens.last().unwrap(), "selected");
+            let last = opens.last().unwrap();
+            assert_eq!(last.name, "selected");
+            assert!(
+                last.no_follow && last.backup_semantics,
+                "the kernel must receive a no-follow probe for the link"
+            );
             assert!(
                 opens
                     .iter()
-                    .all(|name| !name.to_string_lossy().contains("h60-unopened-share"))
+                    .filter(|open| open.name == "selected")
+                    .all(|open| open.no_follow)
             );
-            assert!(opens.iter().all(|name| name != "remote-leaf"));
+            assert!(
+                opens
+                    .iter()
+                    .all(|open| !open.name.to_string_lossy().contains("h60-unopened-share"))
+            );
+            assert!(opens.iter().all(|open| open.name != "remote-leaf"));
         });
     }
     fs::remove_file(&link).unwrap();

@@ -26,17 +26,31 @@ const PROBE: u32 = FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT;
 const DIR_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
 #[cfg(test)]
+pub(in crate::chat_attachment) struct ObservedOpen {
+    pub(in crate::chat_attachment) name: OsString,
+    pub(in crate::chat_attachment) no_follow: bool,
+    pub(in crate::chat_attachment) backup_semantics: bool,
+}
+
+#[cfg(test)]
 thread_local! {
-    pub(in crate::chat_attachment) static OPENS: std::cell::RefCell<Vec<OsString>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub(in crate::chat_attachment) static OPENS: std::cell::RefCell<Vec<ObservedOpen>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn drive_root(letter: char) -> io::Result<(PathBuf, File)> {
     let path = PathBuf::from(format!("{letter}:\\"));
+    let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
     #[cfg(test)]
-    OPENS.with_borrow_mut(|opens| opens.push(path.as_os_str().into()));
+    OPENS.with_borrow_mut(|opens| {
+        opens.push(ObservedOpen {
+            name: path.as_os_str().into(),
+            no_follow: flags & FILE_FLAG_OPEN_REPARSE_POINT != 0,
+            backup_semantics: flags & FILE_FLAG_BACKUP_SEMANTICS != 0,
+        })
+    });
     let file = OpenOptions::new()
         .access_mode(DIR_ACCESS)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .custom_flags(flags)
         .open(&path)?;
     Ok((path, file))
 }
@@ -53,7 +67,13 @@ pub(super) fn child(
 ) -> io::Result<File> {
     super::super::check_child_name(name)?;
     #[cfg(test)]
-    OPENS.with_borrow_mut(|opens| opens.push(name.into()));
+    OPENS.with_borrow_mut(|opens| {
+        opens.push(ObservedOpen {
+            name: name.into(),
+            no_follow: options & FILE_OPEN_REPARSE_POINT != 0,
+            backup_semantics: options & FILE_OPEN_FOR_BACKUP_INTENT != 0,
+        })
+    });
     let mut wide: Vec<_> = name.encode_wide().collect();
     let length = u16::try_from(wide.len() * 2).map_err(|_| io::ErrorKind::InvalidInput)?;
     let name = UNICODE_STRING {
@@ -226,24 +246,7 @@ pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Res
                 path = next;
                 break;
             }
-            let opened = if reparse == 0 {
-                probe
-            } else {
-                // Give non-name-surrogate providers their normal data-open
-                // semantics, anchored to this parent with name reparsing disabled.
-                let filtered = child(
-                    &parent,
-                    name,
-                    access,
-                    FILE_OPEN,
-                    FILE_OPEN_FOR_BACKUP_INTENT,
-                    ptr::null(),
-                )?;
-                if same_file::Handle::from_file(probe)? != same_file::Handle::from_file(filtered.try_clone()?)? {
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-                filtered
-            };
+            let opened = data_handle(&parent, name, access, probe, reparse)?;
             prefix.push(name);
             if last {
                 return Ok((opened, prefix));
@@ -254,6 +257,29 @@ pub(super) fn open(input: &Path, follow_leaf: bool, leaf_access: u32) -> io::Res
     Err(io::ErrorKind::InvalidData.into())
 }
 
+fn data_handle(parent: &File, name: &OsStr, access: u32, probe: File, reparse: u32) -> io::Result<File> {
+    if reparse == 0 {
+        return Ok(probe);
+    }
+    if reparse & NAME_SURROGATE != 0 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    // Give non-name-surrogate providers their normal data-open semantics,
+    // anchored to this parent with name reparsing disabled.
+    let filtered = child(
+        parent,
+        name,
+        access,
+        FILE_OPEN,
+        FILE_OPEN_FOR_BACKUP_INTENT,
+        ptr::null(),
+    )?;
+    if same_file::Handle::from_file(probe)? != same_file::Handle::from_file(filtered.try_clone()?)? {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(filtered)
+}
+
 pub(super) fn is_surrogate(file: &File) -> io::Result<bool> {
     Ok(tag(file)? & NAME_SURROGATE != 0)
 }
@@ -261,6 +287,33 @@ pub(super) fn is_surrogate(file: &File) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_surrogate_tags_select_normal_data_opens() {
+        use std::io::Read;
+        use windows_sys::Win32::System::SystemServices::{
+            IO_REPARSE_TAG_CLOUD, IO_REPARSE_TAG_DEDUP, IO_REPARSE_TAG_WOF,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data"), b"logical data").unwrap();
+        let (parent, _) = open(dir.path(), true, DIR_ACCESS).unwrap();
+        let name = OsStr::new("data");
+        // Inject only the tag. Both the probe and data open are real NT opens.
+        // A separate provisioned test reads an actual filter-managed file.
+        for reparse in [IO_REPARSE_TAG_CLOUD, IO_REPARSE_TAG_DEDUP, IO_REPARSE_TAG_WOF] {
+            OPENS.with_borrow_mut(Vec::clear);
+            let probe = child(&parent, name, FILE_GENERIC_READ, FILE_OPEN, PROBE, ptr::null()).unwrap();
+            let mut file = data_handle(&parent, name, FILE_GENERIC_READ, probe, reparse).unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"logical data");
+            OPENS.with_borrow(|opens| {
+                assert_eq!(opens.len(), 2);
+                assert!(opens[0].no_follow && !opens[1].no_follow);
+                assert!(opens.iter().all(|o| o.name == name && o.backup_semantics));
+            });
+        }
+    }
 
     #[test]
     fn substitute_names_must_resolve_to_a_drive() {
