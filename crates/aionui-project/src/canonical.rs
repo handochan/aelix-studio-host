@@ -1,6 +1,8 @@
+use std::cell::Cell;
 use std::path::{Component, Path, PathBuf};
 
-use url::Url;
+use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
+use url::{SyntaxViolation, Url};
 
 use crate::types::ProjectError;
 
@@ -29,7 +31,10 @@ impl Canonical {
 
 /// Parse the scheme of a provider URI (for provider dispatch; not persisted).
 pub fn parse_scheme(uri: &str) -> Result<Scheme, ProjectError> {
-    let url = Url::parse(uri).map_err(|_| ProjectError::FolderCanonicalizeFailed { uri: uri.to_owned() })?;
+    file_scheme(&Url::parse(uri).map_err(|_| invalid_uri(uri))?)
+}
+
+fn file_scheme(url: &Url) -> Result<Scheme, ProjectError> {
     match url.scheme() {
         "file" => Ok(Scheme::File),
         other => Err(ProjectError::UnsupportedResourceScheme {
@@ -46,13 +51,9 @@ pub fn parse_scheme(uri: &str) -> Result<Scheme, ProjectError> {
 /// slash, fold path casing per platform, rebuild the `file:` URI (percent-
 /// encoded, no fragment/query).
 pub fn canonicalize(uri: &str) -> Result<Canonical, ProjectError> {
-    // Only file: is supported; other schemes are rejected up front.
-    parse_scheme(uri)?;
-
-    let url = Url::parse(uri).map_err(|_| ProjectError::FolderCanonicalizeFailed { uri: uri.to_owned() })?;
-    let path = url
-        .to_file_path()
-        .map_err(|_| ProjectError::FolderCanonicalizeFailed { uri: uri.to_owned() })?;
+    let url = parse_resource_url(uri)?;
+    file_scheme(&url)?;
+    let path = url.to_file_path().map_err(|_| invalid_uri(uri))?;
 
     let normalized = normalize_lexical(&path);
     let folded = if IGNORE_PATH_CASING {
@@ -61,11 +62,7 @@ pub fn canonicalize(uri: &str) -> Result<Canonical, ProjectError> {
         normalized
     };
 
-    // from_file_path yields a percent-encoded file: URI with no trailing slash
-    // and no fragment/query.
-    let canonical_url =
-        Url::from_file_path(&folded).map_err(|_| ProjectError::FolderCanonicalizeFailed { uri: uri.to_owned() })?;
-    Ok(Canonical(canonical_url.to_string()))
+    file_uri(&folded).map(Canonical).ok_or_else(|| invalid_uri(uri))
 }
 
 /// Display-name derivation: the final path segment of a canonical folder.
@@ -80,11 +77,7 @@ pub fn basename(canonical: &Canonical) -> String {
 /// Does not canonicalize — callers pass the result to [`canonicalize`] for the
 /// identity form.
 pub fn to_file_uri(path: &Path) -> Result<String, ProjectError> {
-    Url::from_file_path(path)
-        .map(|u| u.to_string())
-        .map_err(|_| ProjectError::FolderCanonicalizeFailed {
-            uri: path.to_string_lossy().into_owned(),
-        })
+    file_uri(path).ok_or_else(|| invalid_uri(&path.to_string_lossy()))
 }
 
 /// Derive the absolute filesystem path from a `file:` canonical URI.
@@ -96,10 +89,108 @@ pub fn fs_path(canonical: &Canonical) -> Result<PathBuf, ProjectError> {
 /// the runtime provider, which receives already-resolved URIs as `&str` (a
 /// [`Canonical`] cannot be constructed outside [`canonicalize`]).
 pub fn uri_to_path(uri: &str) -> Result<PathBuf, ProjectError> {
-    Url::parse(uri)
-        .ok()
-        .and_then(|u| u.to_file_path().ok())
-        .ok_or_else(|| ProjectError::FolderCanonicalizeFailed { uri: uri.to_owned() })
+    parse_resource_url(uri)?.to_file_path().map_err(|_| invalid_uri(uri))
+}
+
+fn invalid_uri(uri: &str) -> ProjectError {
+    ProjectError::FolderCanonicalizeFailed { uri: uri.to_owned() }
+}
+
+fn parse_resource_url(uri: &str) -> Result<Url, ProjectError> {
+    let drive_with_host = Cell::new(false);
+    let url = Url::options()
+        .syntax_violation_callback(Some(&|violation| {
+            if violation == SyntaxViolation::FileWithHostAndWindowsDrive {
+                drive_with_host.set(true);
+            }
+        }))
+        .parse(uri)
+        .map_err(|_| invalid_uri(uri))?;
+    if drive_with_host.get() {
+        // url 2.5.8 dropped the host when it recognized a drive letter during
+        // parsing. Rebuild from the parsed path so normal UNC shares keep their
+        // host, including paths that only resemble a drive after normalization.
+        return Url::parse(&format!("file://{}", url.path())).map_err(|_| invalid_uri(uri));
+    }
+    Ok(url)
+}
+
+// Keep the url 2.5.8 file-path encoding for persisted resource_canonical keys
+// and for file URIs that feed stored resource_uri values and URI comparisons.
+const FILE_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
+
+fn file_uri(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut uri = String::from("file://");
+    push_file_path(&mut uri, path)?;
+    Some(uri)
+}
+
+#[cfg(not(windows))]
+fn push_file_path(uri: &mut String, path: &Path) -> Option<()> {
+    const UNIX_FILE_SEGMENT: &AsciiSet = &FILE_SEGMENT.add(b'\\');
+    let mut segments = path.components().skip(1).peekable();
+    if segments.peek().is_none() {
+        uri.push('/');
+    }
+    for segment in segments {
+        uri.push('/');
+        uri.extend(percent_encode(
+            segment.as_os_str().as_encoded_bytes(),
+            UNIX_FILE_SEGMENT,
+        ));
+    }
+    Some(())
+}
+
+#[cfg(windows)]
+fn push_file_path(uri: &mut String, path: &Path) -> Option<()> {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return None;
+    };
+    let disk = match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            uri.push('/');
+            uri.push(char::from(letter));
+            uri.push(':');
+            true
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            let host = url::Host::parse(server.to_str()?).ok()?;
+            uri.push_str(&host.to_string());
+            uri.push('/');
+            uri.extend(percent_encode(share.to_str()?.as_bytes(), FILE_SEGMENT));
+            false
+        }
+        _ => return None,
+    };
+    let mut segments = components
+        .filter(|component| *component != Component::RootDir)
+        .peekable();
+    if disk && segments.peek().is_none() {
+        uri.push('/');
+    }
+    for segment in segments {
+        uri.push('/');
+        uri.extend(percent_encode(segment.as_os_str().to_str()?.as_bytes(), FILE_SEGMENT));
+    }
+    Some(())
 }
 
 /// Lexically resolve `.` / `..` and collapse redundant separators without

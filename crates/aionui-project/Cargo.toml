@@ -11,6 +11,7 @@ aionui-common.workspace = true
 aionui-db.workspace = true
 axum.workspace = true
 url.workspace = true
+percent-encoding = "2"
 chrono.workspace = true
 thiserror.workspace = true
 serde.workspace = true
