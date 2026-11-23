@@ -205,7 +205,7 @@ async fn upload_under_root_is_accepted() {
         )
         .await
         .unwrap();
-    assert_eq!(out.files, vec![path]);
+    assert_eq!(out.files, vec![std::fs::canonicalize(up).unwrap().to_string_lossy()]);
 }
 
 #[tokio::test]

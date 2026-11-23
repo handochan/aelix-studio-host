@@ -498,7 +498,7 @@ impl AcpAgentManager {
 
         let prompt_blocks = {
             use crate::agent_task::IAgentTask as _;
-            build_prompt_blocks(data, self.prompt_media_caps()).await
+            build_prompt_blocks(data, self.prompt_media_caps()).await?
         };
 
         // Subscribe BEFORE emitting Start so we can observe every event
@@ -694,12 +694,15 @@ impl AcpAgentManager {
 /// `uri`, and another silently reported an invented file size. Dropping the
 /// media path from the text leaves such an agent able to see the image but
 /// unable to open the file.
-async fn build_prompt_blocks(data: &SendMessageData, caps: crate::types::PromptMediaCaps) -> Vec<ContentBlock> {
+async fn build_prompt_blocks(
+    data: &SendMessageData,
+    caps: crate::types::PromptMediaCaps,
+) -> Result<Vec<ContentBlock>, AgentError> {
     use base64::Engine as _;
 
-    let partition = crate::media::partition_media(&data.content, &data.files, caps);
+    let partition = crate::media::prepare_prompt_media(data, caps).await?;
     if partition.media.is_empty() {
-        return vec![ContentBlock::from(partition.content)];
+        return Ok(vec![ContentBlock::from(partition.content)]);
     }
 
     let mut media_blocks = Vec::with_capacity(partition.media.len());
@@ -708,9 +711,12 @@ async fn build_prompt_blocks(data: &SendMessageData, caps: crate::types::PromptM
         // form: partial degradation would need the marker block rebuilt a
         // second time, and a file vanishing between classify and read is too
         // rare to warrant that complexity.
-        let Some(bytes) = crate::media::read_media_bytes(attachment).await else {
-            warn!(path = %attachment.path, "media attachment read failed; falling back to path-only prompt");
-            return vec![ContentBlock::from(data.content.clone())];
+        let Some(bytes) = crate::media::read_prompt_media(attachment, &data.attachments).await? else {
+            warn!(
+                code = "ATTACHMENT_FALLBACK",
+                "media attachment fell back to a path-only prompt"
+            );
+            return Ok(vec![ContentBlock::from(data.content.clone())]);
         };
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         media_blocks.push(match attachment.kind {
@@ -741,7 +747,7 @@ async fn build_prompt_blocks(data: &SendMessageData, caps: crate::types::PromptM
         &data.files,
     )));
     blocks.extend(media_blocks);
-    blocks
+    Ok(blocks)
 }
 
 /// Thin wrapper retained for the existing empty-turn detection tests; the
@@ -1759,9 +1765,12 @@ mod tests {
             msg_id: "m1".into(),
             turn_id: None,
             files: vec![img],
+            attachments: Vec::new(),
             inject_skills: vec![],
         };
-        let blocks = super::build_prompt_blocks(&data, crate::types::PromptMediaCaps::default()).await;
+        let blocks = super::build_prompt_blocks(&data, crate::types::PromptMediaCaps::default())
+            .await
+            .unwrap();
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             ContentBlock::Text(text) => assert_eq!(text.text, content),
@@ -1789,13 +1798,14 @@ mod tests {
             msg_id: "m2".into(),
             turn_id: None,
             files: vec![img.clone(), pdf.clone()],
+            attachments: Vec::new(),
             inject_skills: vec![],
         };
         let caps = crate::types::PromptMediaCaps {
             image: true,
             audio: false,
         };
-        let blocks = super::build_prompt_blocks(&data, caps).await;
+        let blocks = super::build_prompt_blocks(&data, caps).await.unwrap();
         assert_eq!(blocks.len(), 2);
         match &blocks[0] {
             ContentBlock::Text(text) => {
@@ -1841,13 +1851,14 @@ mod tests {
             msg_id: "m4".into(),
             turn_id: None,
             files: vec![img.clone()],
+            attachments: Vec::new(),
             inject_skills: vec![],
         };
         let caps = crate::types::PromptMediaCaps {
             image: true,
             audio: false,
         };
-        let blocks = super::build_prompt_blocks(&data, caps).await;
+        let blocks = super::build_prompt_blocks(&data, caps).await.unwrap();
         assert_eq!(blocks.len(), 2, "text + native image block: {blocks:?}");
         match &blocks[0] {
             // Byte-identical to the pre-multimodal text: the path never left.
@@ -1873,6 +1884,7 @@ mod tests {
             msg_id: "m3".into(),
             turn_id: None,
             files: vec![img_path.clone()],
+            attachments: Vec::new(),
             inject_skills: vec![],
         };
         let caps = crate::types::PromptMediaCaps {
@@ -1883,7 +1895,7 @@ mod tests {
         // inside build_prompt_blocks — so remove the file first and verify the
         // whole prompt degrades to the original text form.
         std::fs::remove_file(&img).unwrap();
-        let blocks = super::build_prompt_blocks(&data, caps).await;
+        let blocks = super::build_prompt_blocks(&data, caps).await.unwrap();
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             ContentBlock::Text(text) => assert_eq!(text.text, content),

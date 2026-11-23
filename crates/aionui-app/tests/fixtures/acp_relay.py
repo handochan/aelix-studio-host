@@ -20,6 +20,7 @@ pause_next = False
 byte_exchange = None
 host_bytes_enabled = counter.with_suffix(".host-bytes-enabled").exists()
 diagnostic_fixture = counter.with_suffix(".diagnostic-fixture").exists()
+attachment_fixture = counter.with_suffix(".attachment-fixture").exists()
 raw_marker = "private-h1-standard-raw"
 escaped_marker = 'private-h1-standard-"quoted"\\끝'
 
@@ -138,7 +139,7 @@ while True:
                 any(name in os.environ for name in ("ANTHROPIC_LOG", "OPENAI_LOG", "GEMINI_NEXT_GEN_API_LOG"))))
         result(rpc_id, {
             "protocolVersion": 1, "agentInfo": {"name": peer, "version": "fixture"},
-            "agentCapabilities": {"loadSession": True, "_meta": {**byte_meta, "aelix/sessionRelay": {
+            "agentCapabilities": {"loadSession": True, "promptCapabilities": {"image": attachment_fixture}, "_meta": {**byte_meta, "aelix/sessionRelay": {
                 "version": 1, "requests": ["_aelix/session/probe/echo", "_aelix/session/probe/size",
                                            "_aelix/session/probe/finish", "_aelix/session/probe/write",
                                            "_aelix/session/requests/lookup", "_aelix/session/probe/hold",
@@ -174,6 +175,8 @@ while True:
         result(rpc_id, out)
     elif method == "session/prompt":
         prompt = rpc_id
+        if attachment_fixture:
+            counter.with_suffix(".attachment-prompt").write_text(encode(params["prompt"]), encoding="utf-8")
         if diagnostic_fixture:
             print(raw_marker, json.dumps(escaped_marker), file=sys.stderr, flush=True)
             if params["prompt"][0].get("text") == "emit standard error":

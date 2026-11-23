@@ -344,6 +344,7 @@ async fn prompt(instance: &AgentInstance, content: &str) -> Result<(), AgentSend
             msg_id: content.into(),
             turn_id: None,
             files: vec![],
+            attachments: Vec::new(),
             inject_skills: vec![],
         })
         .await
@@ -859,6 +860,7 @@ async fn first_slash_prompt_with_attachments_consumes_the_prelude_as_ordinary_in
                 msg_id: "attachment".into(),
                 turn_id: None,
                 files: vec![path.clone()],
+                attachments: Vec::new(),
                 inject_skills: vec![],
             })
             .await

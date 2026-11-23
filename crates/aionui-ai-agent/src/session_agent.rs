@@ -547,8 +547,8 @@ impl SessionAgentTask {
     /// the path also remains in the original text because partition already ran,
     /// which the adapters tolerate (they resolve links independently of the
     /// text). Shared by `send_message` and `deliver_midturn`.
-    async fn build_prompt_blocks(&self, data: &SendMessageData) -> Vec<ContentBlock> {
-        let partition = crate::media::partition_media(&data.content, &data.files, self.prompt_media_caps());
+    async fn build_prompt_blocks(&self, data: &SendMessageData) -> Result<Vec<ContentBlock>, crate::AgentError> {
+        let partition = crate::media::prepare_prompt_media(data, self.prompt_media_caps()).await?;
         let link_media_paths = self.backend.capabilities().prompt_blocks.resource;
         let mut content: Vec<ContentBlock> = Vec::new();
         if !partition.content.is_empty() {
@@ -564,7 +564,7 @@ impl SessionAgentTask {
         }
         let mut media_links = 0usize;
         for attachment in &partition.media {
-            match crate::media::read_media_bytes(attachment).await {
+            match crate::media::read_prompt_media(attachment, &data.attachments).await? {
                 Some(bytes) => {
                     content.push(match attachment.kind {
                         crate::media::MediaKind::Image => ContentBlock::Image {
@@ -607,7 +607,7 @@ impl SessionAgentTask {
                 "session prompt carries native media content blocks"
             );
         }
-        content
+        Ok(content)
     }
 
     /// B5 mid-turn delivery: hand a message to the RUNNING turn instead of
@@ -622,7 +622,7 @@ impl SessionAgentTask {
     /// boundary mid-stream).
     pub async fn deliver_midturn(&self, data: SendMessageData) -> Result<(), AgentSendError> {
         self.runtime.touch();
-        let content = self.build_prompt_blocks(&data).await;
+        let content = self.build_prompt_blocks(&data).await?;
         self.dump_session_cli_final_input(&content, Some(data.msg_id.as_str()));
         let cmd = Command::Steer {
             content,
@@ -1337,7 +1337,7 @@ impl IAgentTask for SessionAgentTask {
 
     async fn send_message(&self, data: SendMessageData) -> Result<(), AgentSendError> {
         self.runtime.touch();
-        let content = self.build_prompt_blocks(&data).await;
+        let content = self.build_prompt_blocks(&data).await?;
         // DEV (`--dump-prompts`): borrow the final blocks BEFORE they move into
         // Command::Send. No-op / best-effort — never affects the dispatch.
         self.dump_session_cli_final_input(&content, Some(data.msg_id.as_str()));
@@ -6464,6 +6464,7 @@ mod persist_tests {
                 msg_id: "m1".into(),
                 turn_id: None,
                 files: Vec::new(),
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -6935,6 +6936,7 @@ mod pump_tests {
                 msg_id: "m-media".into(),
                 turn_id: None,
                 files: vec![img.clone(), pdf.clone()],
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -7007,6 +7009,7 @@ mod pump_tests {
                 msg_id: "m-link".into(),
                 turn_id: None,
                 files: vec![img.clone()],
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -7071,6 +7074,7 @@ mod pump_tests {
                 msg_id: "m-nolink".into(),
                 turn_id: None,
                 files: vec![img.clone()],
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -7761,6 +7765,7 @@ mod pump_tests {
                 msg_id: "m1".into(),
                 turn_id: None,
                 files: Vec::new(),
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -7814,6 +7819,7 @@ mod pump_tests {
                 msg_id: "m-1".into(),
                 turn_id: None,
                 files: Vec::new(),
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -7893,6 +7899,7 @@ mod pump_tests {
                 msg_id: "m-2".into(),
                 turn_id: None,
                 files: Vec::new(),
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )
@@ -10211,6 +10218,7 @@ mod force_kill_tests {
                 msg_id: "m1".into(),
                 turn_id: None,
                 files: Vec::new(),
+                attachments: Vec::new(),
                 inject_skills: Vec::new(),
             },
         )

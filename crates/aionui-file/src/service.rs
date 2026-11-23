@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use aionui_common::chat_attachment::ChatAttachment;
 use base64::Engine;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
@@ -357,6 +358,10 @@ fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, FileError> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| FileError::NotFound(format!("cannot read metadata for '{}': {e}", path.display())))?;
 
+    Ok(file_metadata_from_stat(path, &metadata))
+}
+
+fn file_metadata_from_stat(path: &Path, metadata: &std::fs::Metadata) -> FileMetadata {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -381,14 +386,14 @@ fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, FileError> {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    Ok(FileMetadata {
+    FileMetadata {
         name,
         path: path.to_string_lossy().into_owned(),
         size,
         mime_type,
         last_modified,
         is_directory,
-    })
+    }
 }
 
 /// Copy a single file, creating parent directories as needed.
@@ -640,6 +645,18 @@ impl crate::traits::IFileService for FileService {
                 }
                 other => other,
             })
+    }
+
+    async fn attachment_metadata(&self, attachment: ChatAttachment) -> Result<FileMetadata, FileError> {
+        tokio::task::spawn_blocking(move || {
+            let metadata = attachment.metadata().map_err(|_| {
+                tracing::warn!(target: "chat_file", code = "FILE_NOT_FOUND", "resolved attachment changed or is unavailable");
+                FileError::TargetNotFound
+            })?;
+            Ok(file_metadata_from_stat(Path::new(attachment.path()), &metadata))
+        })
+        .await
+        .map_err(|_| FileError::Internal("metadata task failed".to_owned()))?
     }
 
     async fn get_files_by_dir(&self, dir: &str, root: &str) -> Result<Vec<DirOrFile>, FileError> {

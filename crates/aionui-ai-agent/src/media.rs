@@ -8,12 +8,18 @@
 //! `manager/aionrs/content.rs`: strip the trailing marker block when it
 //! matches `files` exactly, then rebuild.
 
+use std::collections::HashMap;
+use std::fs::Metadata;
+use std::io::Read;
 use std::path::Path;
+
+use aionui_common::chat_attachment::ChatAttachment;
 
 use aionui_common::constants::AIONUI_FILES_MARKER;
 use tracing::warn;
 
-use crate::types::PromptMediaCaps;
+use crate::AgentError;
+use crate::types::{PromptMediaCaps, SendMessageData};
 
 /// Max bytes for a single attachment sent as an inline base64 content block.
 /// Above this the attachment degrades to a path (Claude's hard per-image API
@@ -59,6 +65,43 @@ pub struct MediaPartition {
 /// larger than [`MAX_MEDIA_BLOCK_BYTES`]. With `caps == default()` the input
 /// passes through byte-identical.
 pub fn partition_media(content: &str, files: &[String], caps: PromptMediaCaps) -> MediaPartition {
+    partition_with_metadata(content, files, caps, &HashMap::new())
+}
+
+pub(crate) async fn prepare_prompt_media(
+    data: &SendMessageData,
+    caps: PromptMediaCaps,
+) -> Result<MediaPartition, AgentError> {
+    if data.attachments.is_empty() {
+        return Ok(partition_media(&data.content, &data.files, caps));
+    }
+    let content = data.content.clone();
+    let files = data.files.clone();
+    let attachments = data.attachments.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut metadata = HashMap::with_capacity(attachments.len());
+        for attachment in &attachments {
+            metadata.insert(
+                attachment.path(),
+                attachment.metadata().map_err(attachment_unavailable)?,
+            );
+        }
+        Ok(partition_with_metadata(&content, &files, caps, &metadata))
+    })
+    .await
+    .map_err(attachment_unavailable)?
+}
+
+fn attachment_unavailable(_: impl std::error::Error) -> AgentError {
+    AgentError::bad_request("The message attachment changed or is unavailable.")
+}
+
+fn partition_with_metadata(
+    content: &str,
+    files: &[String],
+    caps: PromptMediaCaps,
+    metadata: &HashMap<&str, Metadata>,
+) -> MediaPartition {
     if files.is_empty() || caps == PromptMediaCaps::default() {
         return MediaPartition {
             content: content.to_owned(),
@@ -70,7 +113,7 @@ pub fn partition_media(content: &str, files: &[String], caps: PromptMediaCaps) -
     let mut path_files = Vec::new();
     let mut media = Vec::new();
     for path in files {
-        match classify(path, caps) {
+        match classify(path, caps, metadata.get(path.as_str())) {
             Some(attachment) => media.push(attachment),
             None => path_files.push(path.clone()),
         }
@@ -89,7 +132,7 @@ pub fn partition_media(content: &str, files: &[String], caps: PromptMediaCaps) -
 }
 
 /// Classify one attachment; `Some` means "send as a native block".
-fn classify(path: &str, caps: PromptMediaCaps) -> Option<MediaAttachment> {
+fn classify(path: &str, caps: PromptMediaCaps, verified: Option<&Metadata>) -> Option<MediaAttachment> {
     let mime = mime_guess::from_path(path).first()?;
     let kind = match mime.type_().as_str() {
         // SVG is source text, not a raster image — vision APIs reject it.
@@ -97,22 +140,25 @@ fn classify(path: &str, caps: PromptMediaCaps) -> Option<MediaAttachment> {
         "audio" if caps.audio => MediaKind::Audio,
         _ => return None,
     };
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() && meta.len() <= MAX_MEDIA_BLOCK_BYTES => Some(MediaAttachment {
+    let metadata = verified.cloned().or_else(|| std::fs::metadata(path).ok());
+    match metadata {
+        Some(meta) if meta.is_file() && meta.len() <= MAX_MEDIA_BLOCK_BYTES => Some(MediaAttachment {
             path: path.to_owned(),
             mime: mime.essence_str().to_owned(),
             kind,
         }),
-        Ok(meta) if meta.is_file() => {
+        Some(meta) if meta.is_file() => {
             warn!(
-                path,
                 bytes = meta.len(),
                 "media attachment exceeds block size limit; sending as path"
             );
             None
         }
         _ => {
-            warn!(path, "media attachment unreadable; sending as path");
+            warn!(
+                code = "ATTACHMENT_UNAVAILABLE",
+                "media attachment unreadable; sending as path"
+            );
             None
         }
     }
@@ -168,14 +214,50 @@ pub async fn read_media_bytes(attachment: &MediaAttachment) -> Option<Vec<u8>> {
     match tokio::fs::read(Path::new(&attachment.path)).await {
         Ok(bytes) if bytes.len() as u64 <= MAX_MEDIA_BLOCK_BYTES => Some(bytes),
         Ok(bytes) => {
-            warn!(path = %attachment.path, bytes = bytes.len(), "media attachment exceeds block size limit at read; sending as path");
+            warn!(
+                bytes = bytes.len(),
+                "media attachment exceeds block size limit at read; sending as path"
+            );
             None
         }
-        Err(err) => {
-            warn!(path = %attachment.path, error = %err, "media attachment read failed; sending as path");
+        Err(_) => {
+            warn!(
+                code = "ATTACHMENT_UNAVAILABLE",
+                "media attachment read failed; sending as path"
+            );
             None
         }
     }
+}
+
+pub(crate) async fn read_prompt_media(
+    media: &MediaAttachment,
+    attachments: &[ChatAttachment],
+) -> Result<Option<Vec<u8>>, AgentError> {
+    let Some(attachment) = attachments
+        .iter()
+        .find(|attachment| attachment.path() == media.path)
+        .cloned()
+    else {
+        return Ok(read_media_bytes(media).await);
+    };
+    tokio::task::spawn_blocking(move || {
+        attachment.with_file(|file| {
+            let size = file.metadata()?.len();
+            if size > MAX_MEDIA_BLOCK_BYTES {
+                return Ok(None);
+            }
+            let mut bytes = Vec::with_capacity(size as usize);
+            file.take(MAX_MEDIA_BLOCK_BYTES + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_MEDIA_BLOCK_BYTES {
+                return Ok(None);
+            }
+            Ok(Some(bytes))
+        })
+    })
+    .await
+    .map_err(attachment_unavailable)?
+    .map_err(attachment_unavailable)
 }
 
 #[cfg(test)]
@@ -201,6 +283,41 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn provenance_rejects_a_swap_between_media_classification_and_read() {
+        for upload in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("attachment.png");
+            std::fs::write(&path, b"selected bytes").unwrap();
+            let source = ChatAttachment::open(&path, upload.then_some(dir.path())).unwrap();
+            let data = SendMessageData {
+                content: "image attachment".into(),
+                msg_id: "swap-fixture".into(),
+                turn_id: None,
+                files: vec![source.path().to_owned()],
+                attachments: vec![source],
+                inject_skills: vec![],
+            };
+            let partition = prepare_prompt_media(&data, CAPS_IMAGE).await.unwrap();
+            let media = &partition.media[0];
+            assert_eq!(
+                read_prompt_media(media, &data.attachments).await.unwrap().unwrap(),
+                b"selected bytes"
+            );
+
+            std::fs::rename(&path, dir.path().join("original.png")).unwrap();
+            std::fs::write(&path, b"replacement").unwrap();
+            assert!(matches!(
+                read_prompt_media(media, &data.attachments).await,
+                Err(AgentError::BadRequest(reason)) if reason == "The message attachment changed or is unavailable."
+            ));
+            assert!(matches!(
+                prepare_prompt_media(&data, PromptMediaCaps::default()).await,
+                Err(AgentError::BadRequest(reason)) if reason == "The message attachment changed or is unavailable."
+            ));
+        }
     }
 
     #[test]

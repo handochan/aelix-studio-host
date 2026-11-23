@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use aionui_common::FileChangeOperation;
+use aionui_common::{FileChangeOperation, chat_attachment::ChatAttachment};
 
 use crate::error::FileError;
 
@@ -33,6 +33,9 @@ pub trait IFileService: Send + Sync {
 
     /// Metadata for a pre-resolved absolute path.
     async fn resolved_metadata(&self, absolute_path: &Path) -> Result<FileMetadata, FileError>;
+
+    /// Metadata on the validated Local or Upload handle.
+    async fn attachment_metadata(&self, attachment: ChatAttachment) -> Result<FileMetadata, FileError>;
 
     // -- Directory browsing --
 

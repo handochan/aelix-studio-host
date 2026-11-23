@@ -20,6 +20,9 @@ pub struct SendMessageData {
     /// File paths attached to the message.
     #[serde(default)]
     pub files: Vec<String>,
+    /// Host-only identities retained for Local and Upload byte reads.
+    #[serde(skip)]
+    pub attachments: Vec<aionui_common::chat_attachment::ChatAttachment>,
     /// Skills to inject into this message turn.
     #[serde(default)]
     pub inject_skills: Vec<String>,
@@ -333,6 +336,7 @@ mod tests {
             msg_id: "msg-001".into(),
             turn_id: Some("turn-001".into()),
             files: vec!["/tmp/a.txt".into()],
+            attachments: Vec::new(),
             inject_skills: vec!["review".into()],
         };
         let json = serde_json::to_value(&data).unwrap();

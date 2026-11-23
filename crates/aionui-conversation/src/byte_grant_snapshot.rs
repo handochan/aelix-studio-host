@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use aionui_ai_agent::protocol::byte_grants::{ByteGrantError, SNAPSHOT_LIMIT};
 use aionui_api_types::ChatFileRef;
-use aionui_project::{FileOp, ProjectService};
+use aionui_project::{FileOp, ProjectService, ResolvedChatFile};
 use same_file::Handle;
 use tokio_util::sync::CancellationToken;
 
@@ -28,15 +28,22 @@ pub(crate) async fn snapshot_files(
         let mut remaining = SNAPSHOT_LIMIT;
         let mut files = Vec::with_capacity(refs.len());
         for file in refs {
-            let path = runtime.block_on(async {
+            let source = runtime.block_on(async {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(ByteGrantError::Revoked),
-                    path = project.resolve_chat_file_ref(&owner, &file, &upload_root, FileOp::Read) =>
-                        path.map_err(|_| ByteGrantError::File),
+                    source = project.resolve_chat_file(&owner, &file, &upload_root, FileOp::Read) =>
+                        source.map_err(|_| ByteGrantError::File),
                 }
             })?;
-            let bytes = snapshot(Path::new(&path), remaining, &cancel).map_err(|_| {
+            let result = match source {
+                ResolvedChatFile::Project(path) => snapshot(Path::new(&path), remaining, &cancel),
+                ResolvedChatFile::Attachment(attachment) => attachment.with_file(|file| {
+                    let before = file.metadata()?;
+                    read_snapshot(file, &before, remaining, &cancel)
+                }),
+            };
+            let bytes = result.map_err(|_| {
                 if cancel.is_cancelled() {
                     ByteGrantError::Revoked
                 } else {
@@ -82,8 +89,25 @@ fn open_regular(path: &Path) -> io::Result<File> {
 fn snapshot(path: &Path, remaining: usize, cancel: &CancellationToken) -> io::Result<Vec<u8>> {
     check_cancel(cancel)?;
     let handle = Handle::from_file(open_regular(path)?)?;
-    let mut file = handle.as_file();
+    let file = handle.as_file();
     let before = file.metadata()?;
+    let bytes = read_snapshot(file, &before, remaining, cancel)?;
+    let current = Handle::from_file(open_regular(path)?)?;
+    if handle != current
+        || !unchanged(&before, &file.metadata()?)?
+        || !unchanged(&before, &current.as_file().metadata()?)?
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(bytes)
+}
+
+fn read_snapshot(
+    mut file: &File,
+    before: &Metadata,
+    remaining: usize,
+    cancel: &CancellationToken,
+) -> io::Result<Vec<u8>> {
     let length = usize::try_from(before.len()).map_err(|_| io::ErrorKind::InvalidData)?;
     if length > remaining {
         return Err(io::ErrorKind::InvalidData.into());
@@ -98,15 +122,7 @@ fn snapshot(path: &Path, remaining: usize, cancel: &CancellationToken) -> io::Re
     if file.read(&mut [0])? != 0 {
         return Err(io::ErrorKind::InvalidData.into());
     }
-
     check_cancel(cancel)?;
-    let current = Handle::from_file(open_regular(path)?)?;
-    if handle != current
-        || !unchanged(&before, &file.metadata()?)?
-        || !unchanged(&before, &current.as_file().metadata()?)?
-    {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
     Ok(bytes)
 }
 

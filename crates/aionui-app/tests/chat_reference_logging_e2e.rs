@@ -65,7 +65,7 @@ async fn malformed_mentionable_cursor_returns_the_first_page_without_logging_its
 }
 
 #[tokio::test]
-async fn reference_failures_keep_their_http_errors_without_logging_reference_data() {
+async fn reference_failures_keep_http_codes_and_redact_resolved_attachment_paths() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let response = app
@@ -107,12 +107,12 @@ async fn reference_failures_keep_their_http_errors_without_logging_reference_dat
         (
             json!({ "kind": "local", "path": absolute }),
             "local_path_not_readable",
-            format!("local file path is not a readable file: {absolute}"),
+            "Could not resolve a message attachment.".to_owned(),
         ),
         (
             json!({ "kind": "upload", "path": absolute }),
             "chat_file_missing",
-            format!("attached file does not exist: {absolute}"),
+            "Could not resolve a message attachment.".to_owned(),
         ),
         (
             json!({ "kind": "project", "pe_id": project.project_explorer.pe_id, "relative_path": relative }),
