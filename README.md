@@ -77,6 +77,7 @@ Categories so far:
   handoff to the SDK, which provides no delivery receipt; loss during handoff
   is conservatively treated as an unknown outcome. An explicit user resend is
   a new turn ([#6](https://github.com/handochan/aelix-studio-host/issues/6)).
+- MCP attachment warnings expose [stable reason codes for Studio translation](docs/mcp-warning-tips.md).
 
 Further host changes (network defaults and session synchronization) land as
 separate, reviewed commits.
