@@ -250,7 +250,7 @@ mod tests {
     async fn pending_post_does_not_hide_sse_limit_error() {
         let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let transport = SseTransport {
-            client: Client::builder().no_proxy().build().unwrap(),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
             post_url: format!("http://{}/messages", peer.local_addr().unwrap()),
             headers: HeaderMap::new(),
             pending: Arc::new(Mutex::new(Responses::default())),
