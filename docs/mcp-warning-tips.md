@@ -8,8 +8,14 @@ saved `tips` message.
 | Host error | `params.reason_code` | Meaning |
 | --- | --- | --- |
 | `McpResolveError::ConfigurationUnavailable` | `configuration_unavailable` | The host could not load the MCP settings. |
-| `McpResolveError::InvalidConfiguration` | `invalid_configuration` | A saved MCP transport configuration is invalid. |
+| `McpResolveError::InvalidConfiguration` | `invalid_configuration` | An MCP transport configuration is invalid. |
 | `McpResolveError::Runtime` | `runtime_unavailable` | The configured MCP command or runtime could not be prepared. |
+
+The host uses `invalid_configuration` when it rejects a stored MCP transport
+configuration or a transport configuration from a session's MCP server snapshot.
+When snapshot conversion in the ACP or aionrs factory rejects an empty stdio
+command or an empty HTTP, Streamable HTTP, or SSE URL, the tip carries the
+snapshot entry's `server_id` and `server_name` with this reason code.
 
 Use `params.reason_code` to select the localized message in Studio. The strings
 in the table are stable. For older tips without a reason code or tips with an
