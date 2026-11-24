@@ -1,0 +1,17 @@
+[package]
+name = "aionui-mcp-http"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+bytes = "1"
+reqwest.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+futures-util.workspace = true
+http.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+tokio.workspace = true

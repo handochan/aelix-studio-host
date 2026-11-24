@@ -1,0 +1,550 @@
+diff --git a/aion-mcp-v0.2.11/Cargo.toml b/aion-mcp-host/Cargo.toml
+index 46cc4d7045a4213ac476eca976cc608d51985821..7e690fae5bbd98a5413d7a53e770da1bf2289b09 100644
+--- a/aion-mcp-v0.2.11/Cargo.toml
++++ b/aion-mcp-host/Cargo.toml
+@@ -4,4 +4,4 @@ description = "MCP (Model Context Protocol) client implementation for aionrs"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-repository.workspace = true
++version = "0.2.11"
++edition = "2024"
++license = "Apache-2.0"
++repository = "https://github.com/iOfficeAI/aionrs.git"
+@@ -10,4 +10,5 @@ repository.workspace = true
+-aion-types.workspace    = true
+-aion-protocol.workspace = true
+-aion-tools.workspace    = true
+-aion-config.workspace   = true
++aionui-mcp-http = { path = "../../crates/aionui-mcp-http", version = "0.2.2" }
++aion-types = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
++aion-protocol = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
++aion-tools = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
++aion-config = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
+@@ -15,10 +16,10 @@ aion-config.workspace   = true
+-tracing.workspace     = true
+-tokio.workspace       = true
+-serde.workspace       = true
+-serde_json.workspace  = true
+-async-trait.workspace = true
+-thiserror.workspace   = true
+-anyhow.workspace      = true
+-reqwest.workspace     = true
+-futures.workspace     = true
+-workspace-hack.workspace = true
++tracing = "0.1"
++tokio = { version = "1", features = ["full"] }
++serde = { version = "1", features = ["derive"] }
++serde_json = "1"
++async-trait = "0.1"
++thiserror = "2"
++anyhow = "1"
++reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
++futures = "0.3"
++workspace-hack = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.1.0" }
+diff --git a/aion-mcp-host/LICENSE b/aion-mcp-host/LICENSE
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3c7c4765ead45fbc6832f2087d0b49119d62fe0
+--- /dev/null
++++ b/aion-mcp-host/LICENSE
+@@ -0,0 +1,190 @@
++                                 Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to the Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by the Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding any notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++   END OF TERMS AND CONDITIONS
++
++   Copyright 2026 iOfficeAI
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
+diff --git a/aion-mcp-host/UPSTREAM.md b/aion-mcp-host/UPSTREAM.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c72d5d154c7a5189c9877dedab7ec36d2bcdfa7f
+--- /dev/null
++++ b/aion-mcp-host/UPSTREAM.md
+@@ -0,0 +1,27 @@
++# aion-mcp source and Host changes
++
++The source is `crates/aion-mcp` from [iOfficeAI/aionrs v0.2.11](https://github.com/iOfficeAI/aionrs/tree/8e61a90329fa9f67c4fdf7e97fe02c24dba33f75/crates/aion-mcp), commit `8e61a90329fa9f67c4fdf7e97fe02c24dba33f75`. `LICENSE` is the byte-for-byte repository-root Apache-2.0 license. The source tag has no root or package NOTICE file. Host issue #29 tracks the modification. Host issue #64 tracks proposing it upstream.
++
++## Changes against v0.2.11
++
++| File | Changed hunks |
++| --- | --- |
++| `Cargo.toml` | Resolve inherited package fields and workspace dependencies from the pinned aionrs manifest. Keep sibling crates on the same tag and depend on the shared Host HTTP readers. |
++| `src/transport/types.rs` | Add the typed transport read error. |
++| `src/transport/streamable_http.rs` | Use the body/frame readers for Streamable HTTP, retaining session headers and RPC handling. Use bounded, payload-free errors for failed reads and avoid echoing raw malformed JSON. |
++| `src/transport/sse.rs` | Cap endpoint negotiation and active RPC windows. Dispatch only matching replies and surface terminal read errors during POST acknowledgement. Stop the listener when its transport is dropped. |
++| `src/manager.rs` | Allocate distinct JSON-RPC IDs for tool calls so overlapping requests retain independent response budgets. |
++
++The Host workspace excludes this package so the existing `AIONRS` developer override can select the local SDK without a duplicate path package in Cargo.lock. Default release builds use the vendored patch. The shared readers and boundary tests live in `crates/aionui-mcp-http`; the Host transport integration tests cover handshake, tool discovery and calls through both runtime SSE paths.
++
++The JSON and individual SSE frame limits are 16 MiB, following rmcp 3.9. The frame limit counts the wire delimiters and comments. A Streamable HTTP SSE reply has a separate 32 MiB total budget to allow preceding events while awaiting one RPC result. Persistent SSE also uses that budget for endpoint negotiation and for each outstanding RPC. All incoming wire bytes count while an RPC waits, including comments and replies for other IDs. Idle connections retain the frame limit. MCP HTTP error bodies already discarded by their callers allocate no application buffer. The Host OAuth token adapter reads error bodies up to 64 KiB, following the rmcp 3.9 error-body limit. A limit failure closes the response and returns `MCP_RESPONSE_BODY_TOO_LARGE` or `MCP_SSE_EVENT_TOO_LARGE`.
++
++[UPSTREAM.diff](UPSTREAM.diff) records the full source changes. Regenerate it from the repository root with:
++
++```sh
++python3 -I -B scripts/verification/aion_mcp_upstream_diff.py
++```
++
++The script fetches the pinned tag read-only, verifies its commit, and excludes the generated diff itself. It can reuse a local aionrs repository with `--upstream-checkout`. CI runs the same command with `--check` and tests the vendored crate against a standalone lockfile seeded from the Host lockfile.
++
++During an aionrs upgrade, carry over the hunks and shared-reader code still needed by the new tag. Reconcile the Cargo patch, lockfile, source/license pin in `scripts/release/license-sources.json`, and root NOTICE. Verify that Cargo resolves a single `aion-mcp` for both Host and `aion-agent`.
+diff --git a/aion-mcp-v0.2.11/src/manager.rs b/aion-mcp-host/src/manager.rs
+index f2b10532cfe9591e1178b418b58bfa4bd3de1943..b4b87a1ab4fdfc32d23e02c3b4a7b6d514f2c6a5 100644
+--- a/aion-mcp-v0.2.11/src/manager.rs
++++ b/aion-mcp-host/src/manager.rs
+@@ -245 +245 @@ impl McpManager {
+-            0, // id doesn't matter for stdio, will be used for SSE/HTTP
++            self.next_id.fetch_add(1, Ordering::Relaxed),
+diff --git a/aion-mcp-v0.2.11/src/transport/sse.rs b/aion-mcp-host/src/transport/sse.rs
+index a88ed6e32c4c62fe72bf12abe962bd300c332bb9..4a6ec63f5c1c4754f11e9ccdebc4954e92d41a92 100644
+--- a/aion-mcp-v0.2.11/src/transport/sse.rs
++++ b/aion-mcp-host/src/transport/sse.rs
+@@ -2 +1,0 @@ use std::collections::HashMap;
+-use std::sync::Arc;
+@@ -4,0 +4 @@ use std::sync::atomic::{AtomicU64, Ordering};
++use aionui_mcp_http::{ResponseReadError, SseReader, SseRequestError, SseResponses};
+@@ -7 +6,0 @@ use reqwest::header::{HeaderMap, HeaderValue};
+-use tokio::sync::{Mutex, oneshot};
+@@ -19,2 +18 @@ pub struct SseTransport {
+-    /// Pending request-response channels, keyed by JSON-RPC id
+-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
++    responses: SseResponses<JsonRpcResponse>,
+@@ -25,0 +24,6 @@ pub struct SseTransport {
++impl Drop for SseTransport {
++    fn drop(&mut self) {
++        self._listener.abort();
++    }
++}
++
+@@ -56 +60 @@ impl SseTransport {
+-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> = Arc::new(Mutex::new(HashMap::new()));
++        let responses = SseResponses::default();
+@@ -58,2 +62 @@ impl SseTransport {
+-        // Parse the SSE stream to find the endpoint URL
+-        // The server sends an "endpoint" event with the POST URL
++        // The server sends an "endpoint" event with the POST URL.
+@@ -61,30 +64,13 @@ impl SseTransport {
+-        let mut bytes_stream = response.bytes_stream();
+-        let mut buffer = String::new();
+-        let mut post_url: Option<String> = None;
+-
+-        use futures::StreamExt;
+-        // Read initial events to get the endpoint URL
+-        while let Some(chunk) = bytes_stream.next().await {
+-            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e)))?;
+-            // Normalize CRLF to LF: Python `fastmcp` / MCP SDK servers emit
+-            // `\r\n` separators (via `sse-starlette`), so event boundaries are
+-            // `\r\n\r\n` and would not match a `\n\n` search otherwise.
+-            buffer.push_str(&String::from_utf8_lossy(&chunk).replace('\r', ""));
+-
+-            // Parse SSE events from buffer
+-            while let Some(event_end) = buffer.find("\n\n") {
+-                let event_block = buffer[..event_end].to_string();
+-                buffer = buffer[event_end + 2..].to_string();
+-
+-                let (event_type, event_data) = parse_sse_event(&event_block);
+-
+-                if event_type == "endpoint" {
+-                    // The endpoint might be relative or absolute
+-                    let endpoint = if event_data.starts_with("http") {
+-                        event_data.clone()
+-                    } else {
+-                        format!("{}{}", base_url, event_data)
+-                    };
+-                    post_url = Some(endpoint);
+-                    break;
+-                }
++        let mut reader = SseReader::for_rpc(response);
++        let post_url = loop {
++            let frame = reader
++                .next_frame()
++                .await?
++                .ok_or_else(|| McpError::Transport("No endpoint event received from SSE".into()))?;
++            let (event_type, event_data) = parse_sse_event(&String::from_utf8_lossy(frame));
++            if event_type == "endpoint" {
++                break if event_data.starts_with("http") {
++                    event_data
++                } else {
++                    format!("{base_url}{event_data}")
++                };
+@@ -91,0 +78 @@ impl SseTransport {
++        };
+@@ -93,9 +80,3 @@ impl SseTransport {
+-            if post_url.is_some() {
+-                break;
+-            }
+-        }
+-
+-        let post_url = post_url.ok_or_else(|| McpError::Transport("No endpoint event received from SSE".into()))?;
+-
+-        // Spawn background task to listen for SSE responses
+-        let pending_clone = pending.clone();
++        // Continue with any buffered events following the endpoint in the same chunk.
++        reader.finish_response();
++        let listener_responses = responses.clone();
+@@ -103,21 +84,12 @@ impl SseTransport {
+-            let mut buf = buffer; // carry over remaining buffer
+-            while let Some(chunk) = bytes_stream.next().await {
+-                let Ok(chunk) = chunk else { break };
+-                buf.push_str(&String::from_utf8_lossy(&chunk).replace('\r', ""));
+-
+-                while let Some(event_end) = buf.find("\n\n") {
+-                    let event_block = buf[..event_end].to_string();
+-                    buf = buf[event_end + 2..].to_string();
+-
+-                    let (event_type, event_data) = parse_sse_event(&event_block);
+-
+-                    if (event_type == "message" || event_type.is_empty())
+-                        && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
+-                        && let Some(id) = response.id
+-                    {
+-                        let mut map: tokio::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<JsonRpcResponse>>> =
+-                            pending_clone.lock().await;
+-                        if let Some(sender) = map.remove(&id) {
+-                            let _ = sender.send(response);
+-                        }
+-                    }
++            let error = loop {
++                let frame = match reader.next_frame_with(|bytes| listener_responses.charge(bytes)).await {
++                    Ok(Some(frame)) => frame,
++                    Ok(None) => break ResponseReadError::ReadFailed,
++                    Err(error) => break error,
++                };
++                let (event_type, event_data) = parse_sse_event(&String::from_utf8_lossy(frame));
++                if (event_type == "message" || event_type.is_empty())
++                    && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
++                    && let Some(id) = response.id
++                {
++                    listener_responses.deliver(id, response);
+@@ -125 +97,2 @@ impl SseTransport {
+-            }
++            };
++            listener_responses.close(error);
+@@ -132 +105 @@ impl SseTransport {
+-            pending,
++            responses,
+@@ -150,13 +123,2 @@ impl McpTransport for SseTransport {
+-        // Set up response channel before sending
+-        let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
+-        {
+-            let mut map: tokio::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<JsonRpcResponse>>> =
+-                self.pending.lock().await;
+-            map.insert(req_id, tx);
+-        }
+-
+-        // POST the request
+-        let body =
+-            serde_json::to_string(req).map_err(|e| McpError::Transport(format!("JSON serialize error: {}", e)))?;
+-
+-        let response = self
++        let body = serde_json::to_string(req).map_err(|e| McpError::Transport(format!("JSON serialize error: {e}")))?;
++        let request = self
+@@ -167,18 +129,25 @@ impl McpTransport for SseTransport {
+-            .body(body)
+-            .send()
+-            .await
+-            .map_err(|e| McpError::Transport(format!("POST request failed: {}", e)))?;
+-
+-        if !response.status().is_success() {
+-            // Clean up pending
+-            self.pending.lock().await.remove(&req_id);
+-            return Err(McpError::Transport(format!(
+-                "POST returned status: {}",
+-                response.status()
+-            )));
+-        }
+-
+-        // Wait for response from SSE stream
+-        let rpc_response = rx
+-            .await
+-            .map_err(|_| McpError::Transport("Response channel closed unexpectedly".into()))?;
++            .body(body);
++        let mut waiting = self.responses.start(req_id).map_err(|error| match error {
++            SseRequestError::Closed(error) => McpError::from(error),
++            SseRequestError::DuplicateId => McpError::Transport(error.to_string()),
++        })?;
++
++        // A receive-side failure can win before the companion POST is acknowledged.
++        let post = async {
++            let response = request
++                .send()
++                .await
++                .map_err(|e| McpError::Transport(format!("POST request failed: {e}")))?;
++            if !response.status().is_success() {
++                return Err(McpError::Transport(format!(
++                    "POST returned status: {}",
++                    response.status()
++                )));
++            }
++            Ok(())
++        };
++        let (rpc_response, ()) = tokio::try_join!(
++            biased;
++            async { waiting.receive().await.map_err(McpError::from) },
++            post,
++        )?;
+@@ -213,0 +183 @@ impl McpTransport for SseTransport {
++        self.responses.close(ResponseReadError::ReadFailed);
+@@ -244,0 +215,38 @@ fn extract_base_url(url: &str) -> String {
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn pending_post_does_not_hide_sse_limit_error() {
++        let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let transport = SseTransport {
++            client: reqwest::Client::builder().no_proxy().build().unwrap(),
++            post_url: format!("http://{}/messages", peer.local_addr().unwrap()),
++            headers: HeaderMap::new(),
++            responses: SseResponses::default(),
++            next_id: AtomicU64::new(1),
++            _listener: tokio::spawn(std::future::pending()),
++        };
++        let rpc = JsonRpcRequest::new(1, "tools/list", None);
++        let call = transport.request(&rpc);
++        tokio::pin!(call);
++        let (_socket, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
++            tokio::select! {
++                result = &mut call => panic!("request completed before its response: {result:?}"),
++                socket = peer.accept() => socket.unwrap(),
++            }
++        })
++        .await
++        .unwrap();
++
++        transport.responses.close(ResponseReadError::SseEventTooLarge);
++        assert!(matches!(
++            tokio::time::timeout(std::time::Duration::from_secs(5), call)
++                .await
++                .unwrap()
++                .unwrap_err(),
++            McpError::ResponseRead(ResponseReadError::SseEventTooLarge)
++        ));
++    }
++}
+diff --git a/aion-mcp-v0.2.11/src/transport/streamable_http.rs b/aion-mcp-host/src/transport/streamable_http.rs
+index 609ec1bd5bb68e6a6550c02f43c714cd12cf6baa..f9b715203c2d62ce92a166e996fcbac87c4fb904 100644
+--- a/aion-mcp-v0.2.11/src/transport/streamable_http.rs
++++ b/aion-mcp-host/src/transport/streamable_http.rs
+@@ -0,0 +1 @@
++use aionui_mcp_http::{MAX_RESPONSE_BYTES, SseReader, read_body};
+@@ -83,6 +84,4 @@ impl StreamableHttpTransport {
+-            let text = response
+-                .text()
+-                .await
+-                .map_err(|e| McpError::Transport(format!("Read response body failed: {}", e)))?;
+-            serde_json::from_str(&text)
+-                .map_err(|e| McpError::Transport(format!("Parse JSON response failed: {} — raw: {}", e, text)))
++            let body = read_body(response, MAX_RESPONSE_BYTES).await?;
++            let text = String::from_utf8_lossy(&body);
++            serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
++                .map_err(|e| McpError::Transport(format!("Parse JSON response failed: {e}")))
+@@ -94,10 +93,3 @@ impl StreamableHttpTransport {
+-        use futures::StreamExt;
+-
+-        let mut stream = response.bytes_stream();
+-        let mut buffer = String::new();
+-
+-        while let Some(chunk) = stream.next().await {
+-            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e)))?;
+-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+-
+-            if let Some(rpc_response) = extract_jsonrpc_from_sse_buffer(&buffer) {
++        let mut reader = SseReader::for_rpc(response);
++        while let Some(frame) = reader.next_frame().await? {
++            if let Some(rpc_response) = extract_jsonrpc_from_sse_buffer(&String::from_utf8_lossy(frame)) {
+diff --git a/aion-mcp-v0.2.11/src/transport/types.rs b/aion-mcp-host/src/transport/types.rs
+index c3134d675ff1a79b5a3585d196bba25512fe69cd..87970096b46eb3931d8ea974ad418639d8f7f811 100644
+--- a/aion-mcp-v0.2.11/src/transport/types.rs
++++ b/aion-mcp-host/src/transport/types.rs
+@@ -3,0 +4 @@ use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
++use aionui_mcp_http::ResponseReadError;
+@@ -23,0 +25,3 @@ pub enum McpError {
++    #[error(transparent)]
++    ResponseRead(#[from] ResponseReadError),
++

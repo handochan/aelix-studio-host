@@ -123,25 +123,40 @@ def decode_original(item):
     return data.decode('utf-8', errors='replace')
 
 
+def vendored_package(package, supplements):
+    return next((item for item in supplements.get('vendoredPackages', [])
+                 if (item['crate'], item['version']) == (package['name'], package['version'])), None)
+
+
+def vendored_source(vendor):
+    return 'vendored ' + str(Path(vendor['manifest']).parent.as_posix()) + ' from ' + vendor['upstreamSource']
+
+
 def check_required_originals(package, originals, supplements):
     for required in supplements.get('apacheAudit', {}).get('requiredNotices', []):
         if (required['crate'], required['version']) == (package['name'], package['version']):
             if not any(item['path'] == 'upstream/' + required['path'] and item['sha256'] == required['sha256']
                        for item in originals):
                 raise ValueError('Missing audited upstream NOTICE: ' + package['name'])
-    if (package.get('source') or '').startswith('git+'):
-        pins = [p for p in supplements.get('gitRootLicenses', []) if p['source'] == package['source']]
+    vendor = vendored_package(package, supplements)
+    source = vendor['upstreamSource'] if vendor else (package.get('source') or '')
+    if source.startswith('git+'):
+        pins = [p for p in supplements.get('gitRootLicenses', []) if p['source'] == source]
         if not pins:
             raise ValueError('Git dependency root license has not been audited: ' + package['name'])
         for pin in pins:
-            if not any(item['path'] == 'repository-root/' + pin['path'] and item['sha256'] == pin['sha256']
-                       for item in originals):
+            path = pin['path'] if vendor else 'repository-root/' + pin['path']
+            if not any(item['path'] == path and item['sha256'] == pin['sha256'] for item in originals):
                 raise ValueError('Missing or changed git root license: ' + package['name'])
 
 
 def package_originals(package, supplements):
-    root = Path(package['manifest_path']).parent
-    if 'Apache-2.0' in (package.get('license') or '') and not (package.get('source') or '').startswith('git+'):
+    manifest = Path(package['manifest_path'])
+    root = manifest.parent
+    vendor = vendored_package(package, supplements)
+    if vendor and (package.get('source') is not None or manifest.resolve() != (ROOT / vendor['manifest']).resolve()):
+        raise ValueError('Vendored package source differs from audit: ' + package['name'])
+    if not vendor and 'Apache-2.0' in (package.get('license') or '') and not (package.get('source') or '').startswith('git+'):
         if package['name'] + '@' + package['version'] not in supplements['apacheAudit']['packageVersions']:
             raise ValueError('Apache NOTICE audit is missing for package/version: ' + package['name'])
     originals = []
@@ -303,6 +318,9 @@ def generate(rust_target, cargo, archive, output, build_log=None, *, label=None,
         check_crate(package, selected.get(key, set()), policy)
         originals = package_originals(package, supplements)
         item = {k: package[k] for k in ('name', 'version', 'source', 'authors', 'license')}
+        vendor = vendored_package(package, supplements)
+        if vendor:
+            item['source'] = vendored_source(vendor)
         item.update(selectedLicenses=sorted(selected[key]),
                     licenseTexts={k: sorted(set(v)) for k, v in sorted(texts[key].items())}, originals=originals)
         bundle['crates'].append(item)
@@ -332,6 +350,9 @@ def generate(rust_target, cargo, archive, output, build_log=None, *, label=None,
             package = packages[message['package_id']]
             if package['id'] not in included and package.get('source') and package.get('publish') != []:
                 raise ValueError('Compiled third-party package missing from license graph: ' + package['name'])
+    for vendor in supplements.get('vendoredPackages', []):
+        if not any(item['source'] == vendored_source(vendor) for item in bundle['crates']):
+            raise ValueError('Vendored package missing from license graph: ' + vendor['crate'])
     bundle['crates'].sort(key=lambda x: (x['name'], x['version']))
     bundle['nativeSources'].sort(key=lambda x: x['crate'])
     lgpl_components = lgpl_notice.required_components(bundle['nativeSources'], native_policy)
@@ -408,6 +429,10 @@ def validate_bundle(text_bytes, json_bytes, result, rust_target, *, label=None, 
         for item in package['originals']:
             decode_original(item)
         check_required_originals(package, package['originals'], supplements)
+    for vendor in supplements.get('vendoredPackages', []):
+        if not any((item['name'], item['version'], item['source'])
+                   == (vendor['crate'], vendor['version'], vendored_source(vendor)) for item in bundle['crates']):
+            raise ValueError('Vendored package missing from notice bundle: ' + vendor['crate'])
     for package in bundle.get('privatePackages', []):
         if not package['originals']:
             raise ValueError('Private third-party package is missing its original notices')

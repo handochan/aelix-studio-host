@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+aionui-mcp-http.workspace = true
 aionui-runtime.workspace = true
 aionui-common.workspace = true
 aionui-db.workspace = true
@@ -27,6 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+aion-mcp.workspace = true
 axum.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

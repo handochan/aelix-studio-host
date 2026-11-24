@@ -30,6 +30,15 @@ def fixture_bundle(target, *, label='host-v0.2.2-aelix.2', commit='a' * 40):
                     'originals': [notices.original('LICENSE', b'Copyright fixture\nFixture license text\n')]}],
         'nativeSources': [], 'apacheNoticeFiles': [], 'missingNotices': [],
     }
+    supplements = notices.load('license-sources.json')
+    for vendor in supplements['vendoredPackages']:
+        package = {'name': vendor['crate'], 'version': vendor['version'], 'source': None,
+                   'license': 'Apache-2.0', 'manifest_path': str(notices.ROOT / vendor['manifest'])}
+        originals = notices.package_originals(package, supplements)
+        bundle['crates'].append({'name': package['name'], 'version': package['version'],
+                                 'source': notices.vendored_source(vendor), 'authors': [],
+                                 'license': 'Apache-2.0', 'selectedLicenses': ['Apache-2.0'],
+                                 'licenseTexts': {'Apache-2.0': ['Fixture license text']}, 'originals': originals})
     text, raw = notices.render(bundle), canonical(bundle)
     version, spec = notices.tool_spec(target)
     result = {'status': 'passed', 'rustTarget': target, 'exitCode': 0, 'errorDiagnostics': 0,
@@ -38,7 +47,7 @@ def fixture_bundle(target, *, label='host-v0.2.2-aelix.2', commit='a' * 40):
               'helperSha256': {p: sha256((HERE / p).read_bytes()) for p in notices.HELPERS},
               'sourceRelease': bundle['sourceRelease'], 'lgplComponents': [],
               'policySha256': bundle['policySha256'], 'denySha256': bundle['denySha256'],
-              'crateCount': 1, 'nativePackageCount': 0, 'missingNotices': [],
+              'crateCount': len(bundle['crates']), 'nativePackageCount': 0, 'missingNotices': [],
               'files': {name: sha256(data) for name, data in zip(notices.FILES, (text, raw))}}
     return text, raw, result
 
@@ -415,6 +424,17 @@ class BundleValidationTests(unittest.TestCase):
             elif case == 'missing-notice': result['missingNotices'] = ['COPYING']
             with self.subTest(case), self.assertRaises(ValueError):
                 notices.validate_bundle(text, raw, result, target)
+
+    def test_cannot_omit_vendored_crate_even_with_rewritten_hashes(self):
+        target = 'x86_64-unknown-linux-gnu'
+        _, raw, result = fixture_bundle(target)
+        bundle = json.loads(raw)
+        bundle['crates'].pop()
+        result['crateCount'] = len(bundle['crates'])
+        text, raw = notices.render(bundle), canonical(bundle)
+        result['files'] = {p: sha256(data) for p, data in zip(notices.FILES, (text, raw))}
+        with self.assertRaisesRegex(ValueError, 'Vendored package missing from notice bundle: aion-mcp'):
+            notices.validate_bundle(text, raw, result, target)
 
     def test_hash_rewrite_does_not_allow_disallowed_license_or_missing_original(self):
         target = 'x86_64-unknown-linux-gnu'
