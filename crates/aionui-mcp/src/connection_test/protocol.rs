@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use aion_mcp::transport::response_limits::{MAX_RESPONSE_BYTES, ResponseReadError, SseReader, read_body};
 use aionui_api_types::{McpAuthMethod, McpConnectionTestErrorCode, McpConnectionTestResult, McpToolResponse};
+use aionui_mcp_http::{MAX_RESPONSE_BYTES, ResponseReadError, SseReader, read_body};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;

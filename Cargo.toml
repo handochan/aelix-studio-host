@@ -28,8 +28,9 @@ members = [
     "crates/aionui-cron",
     "crates/aionui-assistant",
     "crates/aionui-app",
-    "vendor/aion-mcp",
+    "crates/aionui-mcp-http",
 ]
+exclude = ["vendor/aion-mcp"]
 
 [workspace.package]
 version = "0.2.2"
@@ -55,6 +56,7 @@ aionui-office = { path = "crates/aionui-office" }
 aionui-shell = { path = "crates/aionui-shell" }
 aionui-ai-agent = { path = "crates/aionui-ai-agent" }
 aionui-mcp = { path = "crates/aionui-mcp" }
+aionui-mcp-http = { path = "crates/aionui-mcp-http" }
 aionui-conversation = { path = "crates/aionui-conversation" }
 aionui-extension = { path = "crates/aionui-extension" }
 aionui-channel = { path = "crates/aionui-channel" }

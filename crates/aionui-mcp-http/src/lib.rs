@@ -1,4 +1,4 @@
-// Added by Aelix Studio Host to bound MCP HTTP response buffering.
+//! Bounded readers shared by the Host MCP probe and the patched session transports.
 
 use bytes::{Buf, Bytes};
 use reqwest::Response;
@@ -128,7 +128,7 @@ impl SseReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt as _;
+    use futures_util::StreamExt as _;
 
     #[test]
     fn buffer_never_reserves_for_overflow_and_accepts_exact_limit() {
@@ -148,13 +148,13 @@ mod tests {
         }
     }
 
-    fn streaming_response(chunks: impl futures::Stream<Item = Bytes> + Send + 'static) -> Response {
+    fn streaming_response(chunks: impl futures_util::Stream<Item = Bytes> + Send + 'static) -> Response {
         http::Response::new(reqwest::Body::wrap_stream(chunks.map(Ok::<_, std::io::Error>))).into()
     }
 
     #[tokio::test]
     async fn reads_exact_chunked_body_and_rejects_overflow_without_waiting_for_eof() {
-        use futures::stream;
+        use futures_util::stream;
 
         let response = streaming_response(stream::iter([Bytes::from_static(b"abc"), Bytes::from_static(b"def")]));
         assert_eq!(response.content_length(), None);
@@ -185,7 +185,7 @@ mod tests {
             Bytes::from_static(b"\n\r"),
             Bytes::from_static(b"\ny\n\n"),
         ];
-        let mut reader = SseReader::new(streaming_response(futures::stream::iter(chunks)));
+        let mut reader = SseReader::new(streaming_response(futures_util::stream::iter(chunks)));
         reader.frame = LimitedBuffer::new(5);
 
         assert_eq!(reader.next_frame().await.unwrap().unwrap(), b"x\r\n\r\n");
@@ -196,7 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn drip_of_unterminated_frame_never_grows_buffer_past_limit() {
-        let chunks = futures::stream::repeat_with(|| Bytes::from_static(b"x")).then(|byte| async {
+        let chunks = futures_util::stream::repeat_with(|| Bytes::from_static(b"x")).then(|byte| async {
             tokio::task::yield_now().await;
             byte
         });
@@ -213,7 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn finite_sse_response_stops_after_many_small_frames() {
-        let chunks = futures::stream::repeat_with(|| Bytes::from_static(b": ping\n\n"));
+        let chunks = futures_util::stream::repeat_with(|| Bytes::from_static(b": ping\n\n"));
         let mut reader = SseReader::for_rpc(streaming_response(chunks));
         reader.remaining_response = Some(2 * b": ping\n\n".len());
 

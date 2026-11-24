@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
-use super::response_limits::ResponseReadError;
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use aionui_mcp_http::ResponseReadError;
 
 /// Transport abstraction for MCP communication
 #[async_trait]

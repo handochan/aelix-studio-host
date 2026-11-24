@@ -1,4 +1,4 @@
-use super::response_limits::{ResponseReadError, SseReader};
+use aionui_mcp_http::{ResponseReadError, SseReader};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

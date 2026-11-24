@@ -1,4 +1,4 @@
-use super::response_limits::{MAX_RESPONSE_BYTES, SseReader, read_body};
+use aionui_mcp_http::{MAX_RESPONSE_BYTES, SseReader, read_body};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 

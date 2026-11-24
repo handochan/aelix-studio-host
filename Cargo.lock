@@ -201,11 +201,10 @@ dependencies = [
  "aion-protocol",
  "aion-tools",
  "aion-types",
+ "aionui-mcp-http",
  "anyhow",
  "async-trait",
- "bytes",
  "futures",
- "http",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -745,6 +744,7 @@ dependencies = [
  "aionui-auth",
  "aionui-common",
  "aionui-db",
+ "aionui-mcp-http",
  "aionui-realtime",
  "aionui-runtime",
  "aionui-system",
@@ -763,6 +763,18 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "aionui-mcp-http"
+version = "0.2.2"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "reqwest 0.12.28",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

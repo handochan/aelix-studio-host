@@ -4,10 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aion_mcp::transport::response_limits::{MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, ResponseReadError, read_body};
 use aionui_api_types::{OAuthLoginResponse, OAuthStatusResponse};
 use aionui_common::{TimestampMs, now_ms};
 use aionui_db::{IOAuthTokenRepository, UpsertOAuthTokenParams};
+use aionui_mcp_http::{MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, ResponseReadError, read_body};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
