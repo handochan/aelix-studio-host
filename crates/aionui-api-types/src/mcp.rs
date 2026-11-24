@@ -183,6 +183,10 @@ pub enum McpConnectionTestErrorCode {
     Timeout,
     RpcError,
     ProtocolError,
+    #[serde(rename = "MCP_RESPONSE_BODY_TOO_LARGE")]
+    ResponseBodyTooLarge,
+    #[serde(rename = "MCP_SSE_EVENT_TOO_LARGE")]
+    SseEventTooLarge,
 }
 
 impl McpConnectionTestErrorCode {
@@ -196,6 +200,8 @@ impl McpConnectionTestErrorCode {
             Self::Timeout => "MCP_TIMEOUT",
             Self::RpcError => "MCP_RPC_ERROR",
             Self::ProtocolError => "MCP_PROTOCOL_ERROR",
+            Self::ResponseBodyTooLarge => "MCP_RESPONSE_BODY_TOO_LARGE",
+            Self::SseEventTooLarge => "MCP_SSE_EVENT_TOO_LARGE",
         }
     }
 }

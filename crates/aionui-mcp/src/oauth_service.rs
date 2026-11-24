@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aion_mcp::transport::response_limits::{MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, ResponseReadError, read_body};
 use aionui_api_types::{OAuthLoginResponse, OAuthStatusResponse};
 use aionui_common::{TimestampMs, now_ms};
 use aionui_db::{IOAuthTokenRepository, UpsertOAuthTokenParams};
@@ -30,6 +33,50 @@ const DEFAULT_CLIENT_ID: &str = "aionui";
 
 /// Token expiry safety margin (refresh 5 minutes before expiration).
 const EXPIRY_MARGIN_MS: i64 = 5 * 60 * 1000;
+
+/// Preserve the OAuth library's HTTP adapter semantics with a bounded body read.
+struct BoundedTokenClient(reqwest::Client);
+
+impl<'c> oauth2::AsyncHttpClient<'c> for BoundedTokenClient {
+    type Error = McpError;
+    type Future = Pin<Box<dyn Future<Output = Result<oauth2::HttpResponse, McpError>> + Send + 'c>>;
+
+    fn call(&'c self, request: oauth2::HttpRequest) -> Self::Future {
+        Box::pin(async move {
+            let request = request
+                .try_into()
+                .map_err(|_| McpError::OAuth("Invalid token HTTP request".into()))?;
+            let response = self
+                .0
+                .execute(request)
+                .await
+                .map_err(|_| McpError::OAuth("Token HTTP request failed".into()))?;
+            let status = response.status();
+            let mut builder = axum::http::Response::builder()
+                .status(status)
+                .version(response.version());
+            for (name, value) in response.headers() {
+                builder = builder.header(name, value);
+            }
+            let limit = if status.is_success() {
+                MAX_RESPONSE_BYTES
+            } else {
+                MAX_ERROR_BYTES
+            };
+            let body = read_body(response, limit).await.map_err(oauth_read_error)?;
+            builder
+                .body(body)
+                .map_err(|_| McpError::OAuth("Invalid token HTTP response".into()))
+        })
+    }
+}
+
+fn oauth_read_error(error: ResponseReadError) -> McpError {
+    match error {
+        ResponseReadError::BodyTooLarge => McpError::ResponseBodyTooLarge,
+        other => McpError::OAuth(other.to_string()),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Discovery response
@@ -130,6 +177,9 @@ impl McpOAuthService {
             }),
             Err(e) => {
                 self.clear_pending_for_user(user_id).await;
+                if matches!(e, McpError::ResponseBodyTooLarge) {
+                    return Err(e);
+                }
                 Ok(OAuthLoginResponse {
                     success: false,
                     error: Some(e.to_string()),
@@ -277,15 +327,23 @@ impl McpOAuthService {
         let base = server_url.trim_end_matches('/');
 
         let well_known_url = format!("{base}/.well-known/oauth-authorization-server");
-        if let Ok(metadata) = self.fetch_metadata(&well_known_url).await {
-            debug!(server_url, "Discovered OAuth metadata via RFC 8414");
-            return Ok(metadata);
+        match self.fetch_metadata(&well_known_url).await {
+            Ok(metadata) => {
+                debug!(server_url, "Discovered OAuth metadata via RFC 8414");
+                return Ok(metadata);
+            }
+            Err(McpError::ResponseBodyTooLarge) => return Err(McpError::ResponseBodyTooLarge),
+            Err(_) => {}
         }
 
         let oidc_url = format!("{base}/.well-known/openid-configuration");
-        if let Ok(metadata) = self.fetch_metadata(&oidc_url).await {
-            debug!(server_url, "Discovered OAuth metadata via OIDC");
-            return Ok(metadata);
+        match self.fetch_metadata(&oidc_url).await {
+            Ok(metadata) => {
+                debug!(server_url, "Discovered OAuth metadata via OIDC");
+                return Ok(metadata);
+            }
+            Err(McpError::ResponseBodyTooLarge) => return Err(McpError::ResponseBodyTooLarge),
+            Err(_) => {}
         }
 
         Err(McpError::OAuth(format!(
@@ -308,9 +366,8 @@ impl McpOAuthService {
             return Err(McpError::OAuth(format!("Metadata endpoint returned {}", resp.status())));
         }
 
-        resp.json()
-            .await
-            .map_err(|e| McpError::OAuth(format!("Failed to parse metadata: {e}")))
+        let body = read_body(resp, MAX_RESPONSE_BYTES).await.map_err(oauth_read_error)?;
+        serde_json::from_slice(&body).map_err(|e| McpError::OAuth(format!("Failed to parse metadata: {e}")))
     }
 
     /// Wait for the OAuth callback redirect on the given listener.
@@ -415,14 +472,17 @@ impl McpOAuthService {
             .set_token_uri(token_url)
             .set_redirect_uri(redirect);
 
-        let http_client = Self::build_no_redirect_client()?;
+        let http_client = BoundedTokenClient(Self::build_no_redirect_client()?);
 
         let token_result = client
             .exchange_code(AuthorizationCode::new(code))
             .set_pkce_verifier(pkce_verifier)
             .request_async(&http_client)
             .await
-            .map_err(|e| McpError::OAuth(format!("Token exchange failed: {e}")))?;
+            .map_err(|e| match e {
+                oauth2::RequestTokenError::Request(error) => error,
+                other => McpError::OAuth(format!("Token exchange failed: {other}")),
+            })?;
 
         self.persist_token(user_id, server_url, &token_result).await?;
         debug!(server_url, "OAuth tokens stored successfully");
@@ -442,14 +502,17 @@ impl McpOAuthService {
 
         let client = BasicClient::new(ClientId::new(DEFAULT_CLIENT_ID.to_string())).set_token_uri(token_url);
 
-        let http_client = Self::build_no_redirect_client()?;
+        let http_client = BoundedTokenClient(Self::build_no_redirect_client()?);
 
         let refresh_token = RefreshToken::new(refresh_token_value.to_string());
         let token_result = client
             .exchange_refresh_token(&refresh_token)
             .request_async(&http_client)
             .await
-            .map_err(|e| McpError::OAuth(format!("Token refresh failed: {e}")))?;
+            .map_err(|e| match e {
+                oauth2::RequestTokenError::Request(error) => error,
+                other => McpError::OAuth(format!("Token refresh failed: {other}")),
+            })?;
 
         let new_access_token = token_result.access_token().secret().clone();
 

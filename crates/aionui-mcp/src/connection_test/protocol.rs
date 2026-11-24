@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use aion_mcp::transport::response_limits::{MAX_RESPONSE_BYTES, ResponseReadError, SseReader, read_body};
 use aionui_api_types::{McpAuthMethod, McpConnectionTestErrorCode, McpConnectionTestResult, McpToolResponse};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -179,34 +180,40 @@ async fn read_jsonrpc_response(reader: &mut BufReader<tokio::process::ChildStdou
 // SSE helpers
 // ---------------------------------------------------------------------------
 
-/// Read SSE events from a streaming HTTP response and forward via channel.
-pub(super) async fn read_sse_events(mut resp: reqwest::Response, tx: mpsc::Sender<SseEvent>) {
-    let mut buffer = String::new();
-    loop {
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                // Normalize line endings for consistent parsing
-                let text = String::from_utf8_lossy(&chunk);
-                buffer.push_str(&text.replace("\r\n", "\n"));
-                while let Some(event) = parse_next_sse_event(&mut buffer) {
-                    if tx.send(event).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            Ok(None) | Err(_) => return,
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ProbeResponseError {
+    #[error(transparent)]
+    Read(#[from] ResponseReadError),
+    #[error("{0}")]
+    Protocol(String),
+}
+
+impl ProbeResponseError {
+    pub(super) fn code(&self) -> McpConnectionTestErrorCode {
+        match self {
+            Self::Read(ResponseReadError::BodyTooLarge) => McpConnectionTestErrorCode::ResponseBodyTooLarge,
+            Self::Read(ResponseReadError::SseEventTooLarge) => McpConnectionTestErrorCode::SseEventTooLarge,
+            _ => McpConnectionTestErrorCode::ProtocolError,
         }
     }
 }
 
-/// Parse the next complete SSE event from the buffer.
-///
-/// An SSE event is terminated by a blank line (`\n\n`).
-/// Returns `None` if no complete event is available yet.
-fn parse_next_sse_event(buffer: &mut String) -> Option<SseEvent> {
-    let end = buffer.find("\n\n")?;
-    let event_text: String = buffer.drain(..end + 2).collect();
+/// Forward one bounded frame at a time.
+pub(super) async fn read_sse_events(
+    resp: reqwest::Response,
+    tx: mpsc::Sender<SseEvent>,
+) -> Result<(), ResponseReadError> {
+    let mut reader = SseReader::new(resp);
+    while let Some(frame) = reader.next_frame().await? {
+        let event = parse_sse_event(&String::from_utf8_lossy(frame));
+        if tx.send(event).await.is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
 
+fn parse_sse_event(event_text: &str) -> SseEvent {
     let mut event_type = String::new();
     let mut data_parts: Vec<&str> = Vec::new();
 
@@ -219,45 +226,41 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<SseEvent> {
         }
     }
 
-    Some(SseEvent {
+    SseEvent {
         event_type,
         data: data_parts.join("\n"),
-    })
+    }
 }
 
 /// Wait for an `endpoint` event from the SSE stream and resolve the URL.
 pub(super) async fn wait_for_endpoint(
     event_rx: &mut mpsc::Receiver<SseEvent>,
     base_url: &str,
-) -> Result<String, String> {
-    loop {
-        match event_rx.recv().await {
-            Some(event) if event.event_type == "endpoint" => {
-                return resolve_endpoint_url(base_url, &event.data);
-            }
-            Some(_) => continue,
-            None => return Err("SSE stream closed before endpoint event".into()),
+) -> Result<String, ProbeResponseError> {
+    while let Some(event) = event_rx.recv().await {
+        if event.event_type == "endpoint" {
+            return resolve_endpoint_url(base_url, &event.data).map_err(ProbeResponseError::Protocol);
         }
     }
+    Err(ProbeResponseError::Protocol(
+        "SSE stream closed before endpoint event".into(),
+    ))
 }
 
 /// Wait for the next JSON-RPC response from the SSE stream.
 pub(super) async fn wait_for_jsonrpc_response(
     event_rx: &mut mpsc::Receiver<SseEvent>,
-) -> Result<JsonRpcResponse, String> {
-    loop {
-        match event_rx.recv().await {
-            Some(event) if event.event_type == "message" => {
-                let resp: JsonRpcResponse =
-                    serde_json::from_str(&event.data).map_err(|e| format!("Invalid JSON-RPC in SSE: {e}"))?;
-                if resp.id.is_some() {
-                    return Ok(resp);
-                }
+) -> Result<JsonRpcResponse, ProbeResponseError> {
+    while let Some(event) = event_rx.recv().await {
+        if event.event_type == "message" {
+            let resp: JsonRpcResponse = serde_json::from_str(&event.data)
+                .map_err(|e| ProbeResponseError::Protocol(format!("Invalid JSON-RPC in SSE: {e}")))?;
+            if resp.id.is_some() {
+                return Ok(resp);
             }
-            Some(_) => continue,
-            None => return Err("SSE stream closed before response".into()),
         }
     }
+    Err(ProbeResponseError::Protocol("SSE stream closed before response".into()))
 }
 
 /// Resolve a potentially relative endpoint URL against a base URL.
@@ -290,19 +293,27 @@ pub(super) fn build_http_headers(headers: &HashMap<String, String>) -> reqwest::
 ///
 /// Handles both `application/json` and `text/event-stream` content types
 /// (Streamable HTTP servers may respond with either).
-pub(super) async fn parse_http_response(resp: reqwest::Response) -> Result<JsonRpcResponse, String> {
+pub(super) async fn parse_http_response(resp: reqwest::Response) -> Result<JsonRpcResponse, ProbeResponseError> {
     let is_sse = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
-    let body = resp.text().await.map_err(|e| format!("Failed to read response: {e}"))?;
-
     if is_sse {
-        extract_jsonrpc_from_sse(&body)
+        let mut reader = SseReader::for_rpc(resp);
+        while let Some(frame) = reader.next_frame().await? {
+            if let Ok(rpc) = extract_jsonrpc_from_sse(&String::from_utf8_lossy(frame)) {
+                return Ok(rpc);
+            }
+        }
+        extract_jsonrpc_from_sse(&String::from_utf8_lossy(reader.unfinished_frame()))
+            .map_err(ProbeResponseError::Protocol)
     } else {
-        serde_json::from_str(&body).map_err(|e| format!("Invalid JSON-RPC response: {e}"))
+        let body = read_body(resp, MAX_RESPONSE_BYTES).await?;
+        let text = String::from_utf8_lossy(&body);
+        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
+            .map_err(|e| ProbeResponseError::Protocol(format!("Invalid JSON-RPC response: {e}")))
     }
 }
 
@@ -540,61 +551,62 @@ fn detect_auth_method(www_authenticate: &str) -> McpAuthMethod {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn http_probe_reports_fixed_body_limit_code() {
+        let body = vec![b' '; MAX_RESPONSE_BYTES + 1];
+        let response = axum::http::Response::new(body).into();
+        let error = parse_http_response(response).await.unwrap_err();
+        assert_eq!(error.code().as_str(), "MCP_RESPONSE_BODY_TOO_LARGE");
+    }
+
+    #[tokio::test]
+    async fn sse_probe_reports_fixed_event_limit_code_for_both_transports() {
+        fn response() -> reqwest::Response {
+            axum::http::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(vec![b'a'; MAX_RESPONSE_BYTES + 1])
+                .unwrap()
+                .into()
+        }
+
+        let error = parse_http_response(response()).await.unwrap_err();
+        assert_eq!(error.code().as_str(), "MCP_SSE_EVENT_TOO_LARGE");
+
+        let (tx, _rx) = mpsc::channel(1);
+        let error = ProbeResponseError::from(read_sse_events(response(), tx).await.unwrap_err());
+        assert_eq!(error.code().as_str(), "MCP_SSE_EVENT_TOO_LARGE");
+    }
+
     // -- SSE event parsing ------------------------------------------------
 
     #[test]
     fn parse_sse_event_basic() {
-        let mut buf = "event: endpoint\ndata: /messages\n\n".to_string();
-        let event = parse_next_sse_event(&mut buf).unwrap();
+        let frame = "event: endpoint\ndata: /messages\n\n";
+        let event = parse_sse_event(frame);
         assert_eq!(event.event_type, "endpoint");
         assert_eq!(event.data, "/messages");
-        assert!(buf.is_empty());
     }
 
     #[test]
     fn parse_sse_event_with_json_data() {
-        let mut buf = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n".to_string();
-        let event = parse_next_sse_event(&mut buf).unwrap();
+        let frame = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        let event = parse_sse_event(frame);
         assert_eq!(event.event_type, "message");
         assert!(event.data.contains("jsonrpc"));
     }
 
     #[test]
     fn parse_sse_event_multiline_data() {
-        let mut buf = "event: message\ndata: line1\ndata: line2\n\n".to_string();
-        let event = parse_next_sse_event(&mut buf).unwrap();
+        let frame = "event: message\ndata: line1\ndata: line2\n\n";
+        let event = parse_sse_event(frame);
         assert_eq!(event.data, "line1\nline2");
     }
 
     #[test]
     fn parse_sse_event_no_leading_space() {
-        let mut buf = "event: test\ndata:no-space\n\n".to_string();
-        let event = parse_next_sse_event(&mut buf).unwrap();
+        let frame = "event: test\ndata:no-space\n\n";
+        let event = parse_sse_event(frame);
         assert_eq!(event.data, "no-space");
-    }
-
-    #[test]
-    fn parse_sse_event_incomplete_returns_none() {
-        let mut buf = "event: endpoint\ndata: /msg".to_string();
-        assert!(parse_next_sse_event(&mut buf).is_none());
-        assert_eq!(buf, "event: endpoint\ndata: /msg");
-    }
-
-    #[test]
-    fn parse_sse_event_empty_buffer() {
-        let mut buf = String::new();
-        assert!(parse_next_sse_event(&mut buf).is_none());
-    }
-
-    #[test]
-    fn parse_sse_event_multiple_in_buffer() {
-        let mut buf = "event: a\ndata: 1\n\nevent: b\ndata: 2\n\n".to_string();
-        let first = parse_next_sse_event(&mut buf).unwrap();
-        assert_eq!(first.event_type, "a");
-        assert_eq!(first.data, "1");
-        let second = parse_next_sse_event(&mut buf).unwrap();
-        assert_eq!(second.event_type, "b");
-        assert_eq!(second.data, "2");
     }
 
     // -- URL resolution ---------------------------------------------------

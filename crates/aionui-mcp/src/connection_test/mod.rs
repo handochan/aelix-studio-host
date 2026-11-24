@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use crate::types::McpServerTransport;
 use protocol::{
-    JsonRpcRequest, JsonRpcResponse, SseEvent, build_http_headers, build_initialize_request,
+    JsonRpcRequest, JsonRpcResponse, ProbeResponseError, SseEvent, build_http_headers, build_initialize_request,
     build_initialized_notification, build_tools_list_request, error_result, read_sse_events, rpc_error_result,
     run_stdio_protocol, spawn_error_result, success_result, timeout_result, wait_for_endpoint,
     wait_for_jsonrpc_response,
@@ -263,8 +263,8 @@ impl McpConnectionTestService {
 
         let rpc = protocol::parse_http_response(resp).await.map_err(|error| {
             error_result(
-                McpConnectionTestErrorCode::ProtocolError,
-                error,
+                error.code(),
+                error.to_string(),
                 Some(serde_json::json!({ "transport": "http" })),
             )
         })?;
@@ -312,18 +312,26 @@ impl McpConnectionTestService {
             );
         }
 
-        // 2. Start SSE reader task
-        let (event_tx, mut event_rx) = mpsc::channel::<SseEvent>(16);
-        let reader_handle = tokio::spawn(read_sse_events(resp, event_tx));
+        // 2. Poll the SSE reader alongside the handshake.
+        let (event_tx, mut event_rx) = mpsc::channel(1);
 
         req_headers.insert(
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().expect("valid header"),
         );
 
-        let result = self.run_sse_protocol(url, &req_headers, &mut event_rx).await;
-        reader_handle.abort();
-        result
+        let handshake = self.run_sse_protocol(url, &req_headers, &mut event_rx);
+        tokio::pin!(handshake);
+        tokio::select! {
+            result = &mut handshake => result,
+            result = read_sse_events(resp, event_tx) => match result {
+                Ok(()) => handshake.await,
+                Err(error) => {
+                    let error = ProbeResponseError::from(error);
+                    error_result(error.code(), error.to_string(), Some(serde_json::json!({ "transport": "sse" })))
+                }
+            },
+        }
     }
 
     async fn run_sse_protocol(
@@ -337,8 +345,8 @@ impl McpConnectionTestService {
             Ok(ep) => ep,
             Err(e) => {
                 return error_result(
-                    McpConnectionTestErrorCode::ProtocolError,
-                    e,
+                    e.code(),
+                    e.to_string(),
                     Some(serde_json::json!({ "transport": "sse", "stage": "endpoint" })),
                 );
             }
@@ -356,7 +364,7 @@ impl McpConnectionTestService {
             Ok(r) => r,
             Err(e) => {
                 return error_result(
-                    McpConnectionTestErrorCode::ProtocolError,
+                    e.code(),
                     format!("initialize response: {e}"),
                     Some(serde_json::json!({ "transport": "sse", "stage": "initialize_response" })),
                 );
@@ -383,7 +391,7 @@ impl McpConnectionTestService {
             Ok(r) => r,
             Err(e) => {
                 return error_result(
-                    McpConnectionTestErrorCode::ProtocolError,
+                    e.code(),
                     format!("tools/list response: {e}"),
                     Some(serde_json::json!({ "transport": "sse", "stage": "tools_list_response" })),
                 );
@@ -527,7 +535,10 @@ fn classify_mcp_error_code(code: McpConnectionTestErrorCode) -> &'static str {
         McpConnectionTestErrorCode::CommandNotFound => "command_not_found",
         McpConnectionTestErrorCode::CommandPermissionDenied => "permission_denied",
         McpConnectionTestErrorCode::Timeout => "timeout",
-        McpConnectionTestErrorCode::ProtocolError | McpConnectionTestErrorCode::RpcError => "schema_error",
+        McpConnectionTestErrorCode::ProtocolError
+        | McpConnectionTestErrorCode::RpcError
+        | McpConnectionTestErrorCode::ResponseBodyTooLarge
+        | McpConnectionTestErrorCode::SseEventTooLarge => "schema_error",
         McpConnectionTestErrorCode::ConnectionFailed | McpConnectionTestErrorCode::HttpError => "network",
         McpConnectionTestErrorCode::CommandStartFailed => "unknown",
     }

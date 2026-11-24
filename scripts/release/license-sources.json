@@ -1677,6 +1677,14 @@
       ]
     }
   },
+  "vendoredPackages": [
+    {
+      "crate": "aion-mcp",
+      "version": "0.2.11",
+      "manifest": "vendor/aion-mcp/Cargo.toml",
+      "upstreamSource": "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
+    }
+  ],
   "gitRootLicenses": [
     {
       "source": "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75",

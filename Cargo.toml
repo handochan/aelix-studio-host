@@ -28,6 +28,7 @@ members = [
     "crates/aionui-cron",
     "crates/aionui-assistant",
     "crates/aionui-app",
+    "vendor/aion-mcp",
 ]
 
 [workspace.package]
@@ -223,3 +224,6 @@ debug = "line-tables-only"
 split-debuginfo = "unpacked"
 incremental = false
 
+# Host #29: carry response limits for the pinned aionrs MCP client.
+[patch."https://github.com/iOfficeAI/aionrs.git"]
+aion-mcp = { path = "vendor/aion-mcp" }

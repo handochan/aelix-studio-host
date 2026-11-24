@@ -22,6 +22,9 @@ pub enum McpError {
     #[error("Connection test failed: {0}")]
     ConnectionFailed(String),
 
+    #[error("HTTP response body exceeds its size limit")]
+    ResponseBodyTooLarge,
+
     #[error("OAuth error: {0}")]
     OAuth(String),
 

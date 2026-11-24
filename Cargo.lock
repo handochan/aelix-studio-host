@@ -196,7 +196,6 @@ dependencies = [
 [[package]]
 name = "aion-mcp"
 version = "0.2.11"
-source = "git+https://github.com/iOfficeAI/aionrs.git?tag=v0.2.11#8e61a90329fa9f67c4fdf7e97fe02c24dba33f75"
 dependencies = [
  "aion-config",
  "aion-protocol",
@@ -204,7 +203,9 @@ dependencies = [
  "aion-types",
  "anyhow",
  "async-trait",
+ "bytes",
  "futures",
+ "http",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -739,6 +740,7 @@ dependencies = [
 name = "aionui-mcp"
 version = "0.2.2"
 dependencies = [
+ "aion-mcp",
  "aionui-api-types",
  "aionui-auth",
  "aionui-common",

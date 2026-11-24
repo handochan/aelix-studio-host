@@ -32,6 +32,12 @@ impl From<McpError> for ApiError {
             McpError::AgentNotInstalled(msg) => ApiError::BadRequest(msg),
             McpError::AgentOperationFailed(msg) => ApiError::Internal(msg),
             McpError::ConnectionFailed(msg) => ApiError::BadGateway(msg),
+            McpError::ResponseBodyTooLarge => ApiError::coded(
+                StatusCode::BAD_GATEWAY,
+                McpConnectionTestErrorCode::ResponseBodyTooLarge.as_str(),
+                err.to_string(),
+                None,
+            ),
             McpError::OAuth(msg) => ApiError::Internal(format!("OAuth error: {msg}")),
             McpError::Database(db_err) => ApiError::Internal(db_err.to_string()),
             McpError::Json(e) => ApiError::Internal(format!("JSON error: {e}")),
@@ -249,7 +255,9 @@ fn connection_test_failure_status(code: McpConnectionTestErrorCode) -> StatusCod
         McpConnectionTestErrorCode::ConnectionFailed
         | McpConnectionTestErrorCode::HttpError
         | McpConnectionTestErrorCode::RpcError
-        | McpConnectionTestErrorCode::ProtocolError => StatusCode::BAD_GATEWAY,
+        | McpConnectionTestErrorCode::ProtocolError
+        | McpConnectionTestErrorCode::ResponseBodyTooLarge
+        | McpConnectionTestErrorCode::SseEventTooLarge => StatusCode::BAD_GATEWAY,
     }
 }
 
