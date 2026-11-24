@@ -6,10 +6,9 @@
 use std::collections::HashMap;
 
 use aionui_api_types::{McpAuthMethod, McpConnectionTestErrorCode, McpConnectionTestResult, McpToolResponse};
-use aionui_mcp_http::{MAX_RESPONSE_BYTES, ResponseReadError, SseReader, read_body};
+use aionui_mcp_http::{MAX_RESPONSE_BYTES, ResponseReadError, SseReader, SseRequestError, SseResponses, read_body};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
 
 use std::time::Duration;
 
@@ -198,19 +197,31 @@ impl ProbeResponseError {
     }
 }
 
-/// Forward one bounded frame at a time.
+/// Deliver only matching RPC responses. Ignored frames never occupy a channel.
 pub(super) async fn read_sse_events(
-    resp: reqwest::Response,
-    tx: mpsc::Sender<SseEvent>,
+    mut reader: SseReader,
+    responses: &SseResponses<JsonRpcResponse>,
 ) -> Result<(), ResponseReadError> {
-    let mut reader = SseReader::new(resp);
-    while let Some(frame) = reader.next_frame().await? {
+    while let Some(frame) = reader.next_frame_with(|bytes| responses.charge(bytes)).await? {
         let event = parse_sse_event(&String::from_utf8_lossy(frame));
-        if tx.send(event).await.is_err() {
-            break;
+        if event.event_type == "message"
+            && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event.data)
+            && let Some(id) = response.id
+        {
+            responses.deliver(id, response);
         }
     }
+    responses.close(ResponseReadError::ReadFailed);
     Ok(())
+}
+
+impl From<SseRequestError> for ProbeResponseError {
+    fn from(error: SseRequestError) -> Self {
+        match error {
+            SseRequestError::Closed(error) => error.into(),
+            SseRequestError::DuplicateId => Self::Protocol(error.to_string()),
+        }
+    }
 }
 
 fn parse_sse_event(event_text: &str) -> SseEvent {
@@ -232,35 +243,18 @@ fn parse_sse_event(event_text: &str) -> SseEvent {
     }
 }
 
-/// Wait for an `endpoint` event from the SSE stream and resolve the URL.
-pub(super) async fn wait_for_endpoint(
-    event_rx: &mut mpsc::Receiver<SseEvent>,
-    base_url: &str,
-) -> Result<String, ProbeResponseError> {
-    while let Some(event) = event_rx.recv().await {
+/// Wait for an endpoint under the same cumulative limit as an RPC response.
+pub(super) async fn wait_for_endpoint(reader: &mut SseReader, base_url: &str) -> Result<String, ProbeResponseError> {
+    while let Some(frame) = reader.next_frame().await? {
+        let event = parse_sse_event(&String::from_utf8_lossy(frame));
         if event.event_type == "endpoint" {
+            reader.finish_response();
             return resolve_endpoint_url(base_url, &event.data).map_err(ProbeResponseError::Protocol);
         }
     }
     Err(ProbeResponseError::Protocol(
         "SSE stream closed before endpoint event".into(),
     ))
-}
-
-/// Wait for the next JSON-RPC response from the SSE stream.
-pub(super) async fn wait_for_jsonrpc_response(
-    event_rx: &mut mpsc::Receiver<SseEvent>,
-) -> Result<JsonRpcResponse, ProbeResponseError> {
-    while let Some(event) = event_rx.recv().await {
-        if event.event_type == "message" {
-            let resp: JsonRpcResponse = serde_json::from_str(&event.data)
-                .map_err(|e| ProbeResponseError::Protocol(format!("Invalid JSON-RPC in SSE: {e}")))?;
-            if resp.id.is_some() {
-                return Ok(resp);
-            }
-        }
-    }
-    Err(ProbeResponseError::Protocol("SSE stream closed before response".into()))
 }
 
 /// Resolve a potentially relative endpoint URL against a base URL.
@@ -572,8 +566,9 @@ mod tests {
         let error = parse_http_response(response()).await.unwrap_err();
         assert_eq!(error.code().as_str(), "MCP_SSE_EVENT_TOO_LARGE");
 
-        let (tx, _rx) = mpsc::channel(1);
-        let error = ProbeResponseError::from(read_sse_events(response(), tx).await.unwrap_err());
+        let error = wait_for_endpoint(&mut SseReader::for_rpc(response()), "http://localhost")
+            .await
+            .unwrap_err();
         assert_eq!(error.code().as_str(), "MCP_SSE_EVENT_TOO_LARGE");
     }
 

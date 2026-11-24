@@ -8,6 +8,7 @@ publish = false
 bytes = "1"
 reqwest.workspace = true
 thiserror.workspace = true
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 futures-util.workspace = true

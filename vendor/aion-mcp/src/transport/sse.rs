@@ -1,11 +1,9 @@
-use aionui_mcp_http::{ResponseReadError, SseReader};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use aionui_mcp_http::{ResponseReadError, SseReader, SseRequestError, SseResponses};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
-use tokio::sync::{Mutex, oneshot};
 
 use super::{McpError, McpTransport};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
@@ -17,17 +15,10 @@ pub struct SseTransport {
     /// The POST endpoint URL (received from the SSE stream's "endpoint" event)
     post_url: String,
     headers: HeaderMap,
-    /// Pending request-response channels, keyed by JSON-RPC id
-    pending: Arc<Mutex<Responses>>,
+    responses: SseResponses<JsonRpcResponse>,
     next_id: AtomicU64,
     /// Handle to the background SSE listener task
     _listener: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Default)]
-struct Responses {
-    pending: HashMap<u64, oneshot::Sender<Result<JsonRpcResponse, ResponseReadError>>>,
-    read_error: Option<ResponseReadError>,
 }
 
 impl Drop for SseTransport {
@@ -66,11 +57,11 @@ impl SseTransport {
             )));
         }
 
-        let pending = Arc::new(Mutex::new(Responses::default()));
+        let responses = SseResponses::default();
 
         // The server sends an "endpoint" event with the POST URL.
         let base_url = extract_base_url(url);
-        let mut reader = SseReader::new(response);
+        let mut reader = SseReader::for_rpc(response);
         let post_url = loop {
             let frame = reader
                 .next_frame()
@@ -87,10 +78,11 @@ impl SseTransport {
         };
 
         // Continue with any buffered events following the endpoint in the same chunk.
-        let pending_clone = pending.clone();
+        reader.finish_response();
+        let listener_responses = responses.clone();
         let listener = tokio::spawn(async move {
             let error = loop {
-                let frame = match reader.next_frame().await {
+                let frame = match reader.next_frame_with(|bytes| listener_responses.charge(bytes)).await {
                     Ok(Some(frame)) => frame,
                     Ok(None) => break ResponseReadError::ReadFailed,
                     Err(error) => break error,
@@ -99,23 +91,18 @@ impl SseTransport {
                 if (event_type == "message" || event_type.is_empty())
                     && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event_data)
                     && let Some(id) = response.id
-                    && let Some(sender) = pending_clone.lock().await.pending.remove(&id)
                 {
-                    let _ = sender.send(Ok(response));
+                    listener_responses.deliver(id, response);
                 }
             };
-            let mut responses = pending_clone.lock().await;
-            responses.read_error = Some(error);
-            for (_, sender) in responses.pending.drain() {
-                let _ = sender.send(Err(error));
-            }
+            listener_responses.close(error);
         });
 
         Ok(Self {
             client,
             post_url,
             headers: header_map,
-            pending,
+            responses,
             next_id: AtomicU64::new(1),
             _listener: listener,
         })
@@ -133,54 +120,37 @@ impl McpTransport for SseTransport {
             .id
             .ok_or_else(|| McpError::Transport("Request must have an id".into()))?;
 
-        // Set up response channel before sending
-        let (tx, mut rx) = oneshot::channel();
-        {
-            let mut responses = self.pending.lock().await;
-            if let Some(error) = responses.read_error {
-                return Err(error.into());
-            }
-            responses.pending.insert(req_id, tx);
-        }
-
-        // POST the request
-        let body =
-            serde_json::to_string(req).map_err(|e| McpError::Transport(format!("JSON serialize error: {}", e)))?;
-
-        let post = self
+        let body = serde_json::to_string(req).map_err(|e| McpError::Transport(format!("JSON serialize error: {e}")))?;
+        let request = self
             .client
             .post(&self.post_url)
             .headers(self.headers.clone())
             .header("Content-Type", "application/json")
-            .body(body)
-            .send();
-        tokio::pin!(post);
+            .body(body);
+        let mut waiting = self.responses.start(req_id).map_err(|error| match error {
+            SseRequestError::Closed(error) => McpError::from(error),
+            SseRequestError::DuplicateId => McpError::Transport(error.to_string()),
+        })?;
 
-        // A receive-side size failure must reach the caller even while the POST
-        // is waiting for its HTTP acknowledgement.
-        let channel_closed = |_| McpError::Transport("Response channel closed unexpectedly".into());
-        let (response, early_rpc) = tokio::select! {
+        // A receive-side failure can win before the companion POST is acknowledged.
+        let post = async {
+            let response = request
+                .send()
+                .await
+                .map_err(|e| McpError::Transport(format!("POST request failed: {e}")))?;
+            if !response.status().is_success() {
+                return Err(McpError::Transport(format!(
+                    "POST returned status: {}",
+                    response.status()
+                )));
+            }
+            Ok(())
+        };
+        let (rpc_response, ()) = tokio::try_join!(
             biased;
-            rpc = &mut rx => {
-                let rpc = rpc.map_err(channel_closed)??;
-                (post.await, Some(rpc))
-            },
-            response = &mut post => (response, None),
-        };
-        let status = match response {
-            Ok(response) if response.status().is_success() => None,
-            Ok(response) => Some(format!("POST returned status: {}", response.status())),
-            Err(error) => Some(format!("POST request failed: {error}")),
-        };
-        if let Some(error) = status {
-            self.pending.lock().await.pending.remove(&req_id);
-            return Err(McpError::Transport(error));
-        }
-
-        let rpc_response = match early_rpc {
-            Some(rpc) => rpc,
-            None => rx.await.map_err(channel_closed)??,
-        };
+            async { waiting.receive().await.map_err(McpError::from) },
+            post,
+        )?;
 
         if let Some(err) = &rpc_response.error {
             return Err(McpError::JsonRpc {
@@ -210,6 +180,7 @@ impl McpTransport for SseTransport {
 
     async fn close(&self) -> Result<(), McpError> {
         self._listener.abort();
+        self.responses.close(ResponseReadError::ReadFailed);
         Ok(())
     }
 }
@@ -253,22 +224,28 @@ mod tests {
             client: reqwest::Client::builder().no_proxy().build().unwrap(),
             post_url: format!("http://{}/messages", peer.local_addr().unwrap()),
             headers: HeaderMap::new(),
-            pending: Arc::new(Mutex::new(Responses::default())),
+            responses: SseResponses::default(),
             next_id: AtomicU64::new(1),
             _listener: tokio::spawn(std::future::pending()),
         };
         let rpc = JsonRpcRequest::new(1, "tools/list", None);
         let call = transport.request(&rpc);
         tokio::pin!(call);
-        let (_socket, _) = tokio::select! {
-            result = &mut call => panic!("request completed before its response: {result:?}"),
-            socket = peer.accept() => socket.unwrap(),
-        };
+        let (_socket, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut call => panic!("request completed before its response: {result:?}"),
+                socket = peer.accept() => socket.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
 
-        let pending = transport.pending.lock().await.pending.remove(&1).unwrap();
-        pending.send(Err(ResponseReadError::SseEventTooLarge)).unwrap();
+        transport.responses.close(ResponseReadError::SseEventTooLarge);
         assert!(matches!(
-            call.await.unwrap_err(),
+            tokio::time::timeout(std::time::Duration::from_secs(5), call)
+                .await
+                .unwrap()
+                .unwrap_err(),
             McpError::ResponseRead(ResponseReadError::SseEventTooLarge)
         ));
     }

@@ -3,8 +3,13 @@
 use bytes::{Buf, Bytes};
 use reqwest::Response;
 
+mod sse_responses;
+pub use sse_responses::{SseRequestError, SseResponse, SseResponses};
+
 /// Match rmcp 3.9's default JSON and SSE event limits.
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Limit one RPC or legacy SSE endpoint negotiation including intervening frames.
+pub const MAX_SSE_RESPONSE_BYTES: usize = 2 * MAX_RESPONSE_BYTES;
 /// Match rmcp 3.9's default for error bodies that callers actually read.
 pub const MAX_ERROR_BYTES: usize = 64 * 1024;
 
@@ -82,12 +87,24 @@ impl SseReader {
     /// A POST awaits one RPC response. Bound its total input as well as each frame.
     pub fn for_rpc(response: Response) -> Self {
         let mut reader = Self::new(response);
-        reader.remaining_response = Some(2 * MAX_RESPONSE_BYTES);
+        reader.remaining_response = Some(MAX_SSE_RESPONSE_BYTES);
         reader
     }
 
-    /// Read one frame, preserving any subsequent data from the same HTTP chunk.
+    /// End endpoint negotiation and keep any bytes from the next frame.
+    pub fn finish_response(&mut self) {
+        self.remaining_response = None;
+    }
+
     pub async fn next_frame(&mut self) -> Result<Option<&[u8]>, ResponseReadError> {
+        self.next_frame_with(|_| Ok(())).await
+    }
+
+    /// Read one frame, charging all segments to the caller's active wait windows.
+    pub async fn next_frame_with(
+        &mut self,
+        mut charge: impl FnMut(usize) -> Result<(), ResponseReadError>,
+    ) -> Result<Option<&[u8]>, ResponseReadError> {
         self.frame.bytes.clear();
         let mut line_start = 0;
 
@@ -106,6 +123,7 @@ impl SseReader {
             if let Some(remaining) = &mut self.remaining_response {
                 *remaining = remaining.checked_sub(length).ok_or(ResponseReadError::BodyTooLarge)?;
             }
+            charge(length)?;
             self.chunk.advance(length);
 
             if line_end.is_some() {

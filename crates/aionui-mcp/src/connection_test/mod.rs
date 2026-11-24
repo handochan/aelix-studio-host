@@ -9,21 +9,20 @@ use aionui_api_types::{
     McpConnectionTestErrorCode, McpConnectionTestResult, RuntimeFailureKind, RuntimeResourceKind, RuntimeStatusPayload,
     RuntimeStatusPhase, RuntimeStatusScope, RuntimeStatusScopeKind, WebSocketMessage,
 };
+use aionui_mcp_http::{SseReader, SseResponses};
 use aionui_realtime::EventBroadcaster;
 use aionui_runtime::{
     Builder as CmdBuilder, NodeRuntimeFailureKind, NodeRuntimeProgress, NodeRuntimeProgressReporter,
     RuntimeCommandProbe, kill_process_tree, probe_runtime_command, resolve_command_path,
 };
 use serde::Serialize;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::types::McpServerTransport;
 use protocol::{
-    JsonRpcRequest, JsonRpcResponse, ProbeResponseError, SseEvent, build_http_headers, build_initialize_request,
+    JsonRpcRequest, JsonRpcResponse, ProbeResponseError, build_http_headers, build_initialize_request,
     build_initialized_notification, build_tools_list_request, error_result, read_sse_events, rpc_error_result,
     run_stdio_protocol, spawn_error_result, success_result, timeout_result, wait_for_endpoint,
-    wait_for_jsonrpc_response,
 };
 
 // ---------------------------------------------------------------------------
@@ -312,96 +311,82 @@ impl McpConnectionTestService {
             );
         }
 
-        // 2. Poll the SSE reader alongside the handshake.
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-
+        let mut reader = SseReader::for_rpc(resp);
+        let endpoint = match wait_for_endpoint(&mut reader, url).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => return sse_probe_failure(error, "endpoint"),
+        };
         req_headers.insert(
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().expect("valid header"),
         );
 
-        let handshake = self.run_sse_protocol(url, &req_headers, &mut event_rx);
+        let responses = SseResponses::default();
+        let handshake = self.run_sse_protocol(&endpoint, &req_headers, &responses);
         tokio::pin!(handshake);
         tokio::select! {
-            result = &mut handshake => result,
-            result = read_sse_events(resp, event_tx) => match result {
+            biased;
+            result = read_sse_events(reader, &responses) => match result {
                 Ok(()) => handshake.await,
-                Err(error) => {
-                    let error = ProbeResponseError::from(error);
-                    error_result(error.code(), error.to_string(), Some(serde_json::json!({ "transport": "sse" })))
-                }
+                Err(error) => sse_probe_failure(error.into(), "stream"),
             },
+            result = &mut handshake => result,
         }
     }
 
     async fn run_sse_protocol(
         &self,
-        base_url: &str,
+        endpoint: &str,
         headers: &reqwest::header::HeaderMap,
-        event_rx: &mut mpsc::Receiver<SseEvent>,
+        responses: &SseResponses<JsonRpcResponse>,
     ) -> McpConnectionTestResult {
-        // 3. Wait for endpoint event
-        let endpoint = match wait_for_endpoint(event_rx, base_url).await {
-            Ok(ep) => ep,
-            Err(e) => {
-                return error_result(
-                    e.code(),
-                    e.to_string(),
-                    Some(serde_json::json!({ "transport": "sse", "stage": "endpoint" })),
-                );
-            }
+        let init_resp = match self
+            .sse_request(endpoint, headers, &build_initialize_request(1), responses)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return sse_probe_failure(error, "initialize"),
         };
-
-        // 4. initialize
-        if let Err(e) = self.sse_post(&endpoint, headers, &build_initialize_request(1)).await {
-            return error_result(
-                McpConnectionTestErrorCode::ProtocolError,
-                format!("Failed to send initialize: {e}"),
-                Some(serde_json::json!({ "transport": "sse", "stage": "initialize_send" })),
-            );
-        }
-        let init_resp = match wait_for_jsonrpc_response(event_rx).await {
-            Ok(r) => r,
-            Err(e) => {
-                return error_result(
-                    e.code(),
-                    format!("initialize response: {e}"),
-                    Some(serde_json::json!({ "transport": "sse", "stage": "initialize_response" })),
-                );
-            }
-        };
-        if let Some(err) = init_resp.error {
-            return rpc_error_result("initialize", &err);
+        if let Some(error) = init_resp.error {
+            return rpc_error_result("initialize", &error);
         }
 
-        // 5. initialized notification
         let _ = self
-            .sse_post(&endpoint, headers, &build_initialized_notification())
+            .sse_post(endpoint, headers, &build_initialized_notification())
             .await;
 
-        // 6. tools/list
-        if let Err(e) = self.sse_post(&endpoint, headers, &build_tools_list_request(2)).await {
-            return error_result(
-                McpConnectionTestErrorCode::ProtocolError,
-                format!("Failed to send tools/list: {e}"),
-                Some(serde_json::json!({ "transport": "sse", "stage": "tools_list_send" })),
-            );
-        }
-        let tools_resp = match wait_for_jsonrpc_response(event_rx).await {
-            Ok(r) => r,
-            Err(e) => {
-                return error_result(
-                    e.code(),
-                    format!("tools/list response: {e}"),
-                    Some(serde_json::json!({ "transport": "sse", "stage": "tools_list_response" })),
-                );
-            }
+        let tools_resp = match self
+            .sse_request(endpoint, headers, &build_tools_list_request(2), responses)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return sse_probe_failure(error, "tools/list"),
         };
-        if let Some(err) = tools_resp.error {
-            return rpc_error_result("tools/list", &err);
+        if let Some(error) = tools_resp.error {
+            return rpc_error_result("tools/list", &error);
         }
 
         success_result(tools_resp.result)
+    }
+
+    async fn sse_request(
+        &self,
+        endpoint: &str,
+        headers: &reqwest::header::HeaderMap,
+        request: &JsonRpcRequest,
+        responses: &SseResponses<JsonRpcResponse>,
+    ) -> Result<JsonRpcResponse, ProbeResponseError> {
+        let mut waiting = responses.start(request.id)?;
+        let (response, ()) = tokio::try_join!(
+            biased;
+            async { waiting.receive().await.map_err(ProbeResponseError::from) },
+            async {
+                self.sse_post(endpoint, headers, request)
+                    .await
+                    .map_err(ProbeResponseError::Protocol)
+            },
+        )?;
+        Ok(response)
     }
 
     /// POST a JSON-RPC message to an SSE endpoint (fire-and-forget semantics).
@@ -420,6 +405,14 @@ impl McpConnectionTestService {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn sse_probe_failure(error: ProbeResponseError, stage: &str) -> McpConnectionTestResult {
+    error_result(
+        error.code(),
+        error.to_string(),
+        Some(serde_json::json!({ "transport": "sse", "stage": stage })),
+    )
 }
 
 impl McpConnectionTestService {

@@ -1,11 +1,19 @@
 //! Integration coverage for runtime MCP handshake, tool discovery, and calls.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use aion_mcp::config::{McpServerConfig, TransportType};
 use aion_mcp::manager::McpManager;
+use aion_mcp::protocol::JsonRpcRequest;
+use aion_mcp::transport::{McpError, McpTransport, sse::SseTransport, streamable_http::StreamableHttpTransport};
+use aionui_api_types::McpConnectionTestErrorCode;
+use aionui_mcp::{McpConnectionTestService, McpServerTransport};
+use aionui_mcp_http::{MAX_RESPONSE_BYTES, MAX_SSE_RESPONSE_BYTES, ResponseReadError};
+use aionui_realtime::BroadcastEventBus;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 /// Build an HTTP response containing one CRLF-delimited SSE event.
 fn sse_response(json_rpc: &str, session_id: Option<&str>) -> Vec<u8> {
@@ -56,6 +64,13 @@ async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+fn rpc_id(request: &str) -> u64 {
+    let (_, body) = request.split_once("\r\n\r\n").unwrap();
+    serde_json::from_str::<serde_json::Value>(body).unwrap()["id"]
+        .as_u64()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn stateful_fastmcp_style_server_exposes_tools() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -81,7 +96,11 @@ async fn stateful_fastmcp_style_server_exposes_tools() {
                 )
             } else if request.contains("\"tools/call\"") {
                 sse_response(
-                    r#"{"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"fixture result"}]}}"#,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0", "id": rpc_id(&request),
+                        "result": {"content": [{"type":"text", "text":"fixture result"}]}
+                    })
+                    .to_string(),
                     Some("session-abc-123"),
                 )
             } else {
@@ -158,6 +177,8 @@ async fn legacy_sse_connects_lists_and_calls_tools() {
             assert!(request.contains(&format!("\"{method}\"")));
             post.write_all(&accepted_204()).await.unwrap();
             if !reply.is_empty() {
+                let mut reply: serde_json::Value = serde_json::from_str(reply).unwrap();
+                reply["id"] = rpc_id(&request).into();
                 events
                     .write_all(format!("event: message\r\ndata: {reply}\r\n\r\n").as_bytes())
                     .await
@@ -190,4 +211,245 @@ async fn legacy_sse_connects_lists_and_calls_tools() {
     .unwrap();
     assert_eq!(result, "fixture result");
     peer.await.unwrap();
+}
+
+const PEER_DEADLINE: Duration = Duration::from_secs(10);
+const SSE_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+const ENDPOINT: &[u8] = b"event: endpoint\ndata: /messages\n\n";
+const INIT_REPLY: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+const LIST_REPLY: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n";
+
+async fn accept_stream(peer: &TcpListener) -> TcpStream {
+    let (mut stream, _) = peer.accept().await.unwrap();
+    assert!(read_http_request(&mut stream).await.starts_with("GET /sse "));
+    stream.write_all(SSE_HEADERS).await.unwrap();
+    stream
+}
+
+async fn accept_rpc(peer: &TcpListener, method: &str) -> TcpStream {
+    let (mut post, _) = peer.accept().await.unwrap();
+    let request = read_http_request(&mut post).await;
+    assert!(request.starts_with("POST /messages "));
+    assert!(request.contains(&format!("\"{method}\"")));
+    post
+}
+
+async fn write_repeated(stream: &mut TcpStream, block: &[u8], bytes: usize) -> std::io::Result<()> {
+    for _ in 0..bytes.div_ceil(block.len()) {
+        stream.write_all(block).await?;
+    }
+    Ok(())
+}
+
+async fn write_keepalives(stream: &mut TcpStream, bytes: usize) -> std::io::Result<()> {
+    let mut frame = [b'x'; 4096];
+    frame[0] = b':';
+    frame[4094..].copy_from_slice(b"\n\n");
+    write_repeated(stream, &frame, bytes).await
+}
+
+async fn run_probe(transport: McpServerTransport) -> aionui_api_types::McpConnectionTestResult {
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let service = McpConnectionTestService::new(client, Arc::new(BroadcastEventBus::new(4)));
+    service.test_connection("probe", &transport).await
+}
+
+async fn probe_sse(url: String) -> aionui_api_types::McpConnectionTestResult {
+    run_probe(McpServerTransport::Sse {
+        url,
+        headers: HashMap::new(),
+    })
+    .await
+}
+
+fn assert_runtime_limit<T>(result: Result<T, McpError>, expected: ResponseReadError) {
+    match result {
+        Err(McpError::ResponseRead(error)) => assert_eq!(error, expected),
+        Err(error) => panic!("unexpected runtime error: {error}"),
+        Ok(_) => panic!("runtime accepted an oversized response"),
+    };
+}
+
+#[tokio::test]
+async fn streamable_http_body_fails_probe_and_runtime_before_eof() {
+    for probe in [true, false] {
+        let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", peer.local_addr().unwrap());
+        let writer = tokio::spawn(async move {
+            let (mut stream, _) = peer.accept().await.unwrap();
+            assert!(read_http_request(&mut stream).await.contains("\"initialize\""));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = write_repeated(&mut stream, &[b' '; 4096], MAX_RESPONSE_BYTES + 1).await;
+            std::future::pending::<()>().await;
+        });
+
+        tokio::time::timeout(PEER_DEADLINE, async {
+            if probe {
+                let result = run_probe(McpServerTransport::Http {
+                    url,
+                    headers: HashMap::new(),
+                })
+                .await;
+                assert_eq!(result.code, Some(McpConnectionTestErrorCode::ResponseBodyTooLarge));
+            } else {
+                let transport = StreamableHttpTransport::connect(&url, &HashMap::new()).await.unwrap();
+                let result = transport.request(&JsonRpcRequest::new(1, "initialize", None)).await;
+                assert_runtime_limit(result, ResponseReadError::BodyTooLarge);
+            }
+        })
+        .await
+        .expect("JSON body must fail on bytes, before EOF");
+        assert!(!writer.is_finished());
+        writer.abort();
+    }
+}
+
+#[tokio::test]
+async fn persistent_sse_endpoint_budget_applies_to_probe_and_runtime() {
+    for probe in [true, false] {
+        let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sse", peer.local_addr().unwrap());
+        let writer = tokio::spawn(async move {
+            let mut stream = accept_stream(&peer).await;
+            let _ = write_keepalives(&mut stream, MAX_SSE_RESPONSE_BYTES + 1).await;
+            // Keep the length-less body open until the client returns its error.
+            std::future::pending::<()>().await;
+        });
+
+        tokio::time::timeout(PEER_DEADLINE, async {
+            if probe {
+                let result = probe_sse(url).await;
+                assert_eq!(result.code, Some(McpConnectionTestErrorCode::ResponseBodyTooLarge));
+            } else {
+                let result = SseTransport::connect(&url, &HashMap::new()).await;
+                assert_runtime_limit(result, ResponseReadError::BodyTooLarge);
+            }
+        })
+        .await
+        .expect("endpoint must fail on bytes, before stream EOF");
+        assert!(!writer.is_finished());
+        writer.abort();
+    }
+}
+
+#[tokio::test]
+async fn persistent_sse_budget_fails_waiting_probe_and_runtime_before_post_ack() {
+    assert_sse_limit_before_post_ack(
+        ResponseReadError::BodyTooLarge,
+        McpConnectionTestErrorCode::ResponseBodyTooLarge,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn persistent_sse_frame_limit_fails_waiting_probe_and_runtime_before_post_ack() {
+    assert_sse_limit_before_post_ack(
+        ResponseReadError::SseEventTooLarge,
+        McpConnectionTestErrorCode::SseEventTooLarge,
+    )
+    .await;
+}
+
+async fn assert_sse_limit_before_post_ack(expected: ResponseReadError, probe_code: McpConnectionTestErrorCode) {
+    for probe in [true, false] {
+        let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sse", peer.local_addr().unwrap());
+        let writer = tokio::spawn(async move {
+            let mut stream = accept_stream(&peer).await;
+            stream.write_all(ENDPOINT).await.unwrap();
+            let _post = accept_rpc(&peer, "initialize").await;
+            // This response is for another ID. The companion POST remains unacknowledged.
+            stream
+                .write_all(b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n")
+                .await
+                .unwrap();
+            if expected == ResponseReadError::BodyTooLarge {
+                let _ = write_keepalives(&mut stream, MAX_SSE_RESPONSE_BYTES + 1).await;
+            } else {
+                stream.write_all(b"event: message\ndata: ").await.unwrap();
+                let _ = write_repeated(&mut stream, &[b'x'; 4096], MAX_RESPONSE_BYTES + 1).await;
+            }
+            std::future::pending::<()>().await;
+        });
+
+        tokio::time::timeout(PEER_DEADLINE, async {
+            if probe {
+                let result = probe_sse(url).await;
+                assert_eq!(result.code, Some(probe_code));
+            } else {
+                let transport = SseTransport::connect(&url, &HashMap::new()).await.unwrap();
+                let result = transport.request(&JsonRpcRequest::new(1, "initialize", None)).await;
+                assert_runtime_limit(result, expected);
+                assert_runtime_limit(
+                    transport.request(&JsonRpcRequest::new(2, "tools/list", None)).await,
+                    expected,
+                );
+            }
+        })
+        .await
+        .expect("RPC must fail on bytes, before POST ACK or stream EOF");
+        assert!(!writer.is_finished());
+        writer.abort();
+    }
+}
+
+#[tokio::test]
+async fn persistent_sse_passes_idle_keepalive_between_rpc_windows() {
+    for probe in [true, false] {
+        let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/sse", peer.local_addr().unwrap());
+        let writer = tokio::spawn(async move {
+            let mut stream = accept_stream(&peer).await;
+            stream.write_all(ENDPOINT).await.unwrap();
+
+            let mut init = accept_rpc(&peer, "initialize").await;
+            init.write_all(&accepted_204()).await.unwrap();
+            write_keepalives(&mut stream, MAX_SSE_RESPONSE_BYTES / 2 + 4096)
+                .await
+                .unwrap();
+            stream.write_all(INIT_REPLY).await.unwrap();
+
+            let mut notify = accept_rpc(&peer, "notifications/initialized").await;
+            // The notification has no outstanding RPC. Send more than one window's quota.
+            write_keepalives(&mut stream, MAX_SSE_RESPONSE_BYTES + 8 * 1024 * 1024)
+                .await
+                .unwrap();
+            notify.write_all(&accepted_204()).await.unwrap();
+
+            let mut list = accept_rpc(&peer, "tools/list").await;
+            list.write_all(&accepted_204()).await.unwrap();
+            write_keepalives(&mut stream, MAX_SSE_RESPONSE_BYTES / 2 + 4096)
+                .await
+                .unwrap();
+            stream.write_all(LIST_REPLY).await.unwrap();
+        });
+
+        tokio::time::timeout(PEER_DEADLINE, async {
+            if probe {
+                let result = probe_sse(url).await;
+                assert!(result.success, "{:?}", result.error);
+            } else {
+                let transport = SseTransport::connect(&url, &HashMap::new()).await.unwrap();
+                transport
+                    .request(&JsonRpcRequest::new(1, "initialize", None))
+                    .await
+                    .unwrap();
+                transport
+                    .notify(&JsonRpcRequest::notification("notifications/initialized", None))
+                    .await
+                    .unwrap();
+                let reply = transport
+                    .request(&JsonRpcRequest::new(2, "tools/list", None))
+                    .await
+                    .unwrap();
+                assert_eq!(reply.id, Some(2));
+            }
+            writer.await.unwrap();
+        })
+        .await
+        .expect("the second RPC must complete after idle keepalive");
+    }
 }

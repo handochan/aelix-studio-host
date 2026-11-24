@@ -242,7 +242,7 @@ impl McpManager {
             .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;
 
         let request = JsonRpcRequest::new(
-            0, // id doesn't matter for stdio, will be used for SSE/HTTP
+            self.next_id.fetch_add(1, Ordering::Relaxed),
             "tools/call",
             Some(json!({
                 "name": tool_name,
