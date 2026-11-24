@@ -328,7 +328,7 @@ impl McpConnectionTestService {
             biased;
             result = read_sse_events(reader, &responses) => match result {
                 Ok(()) => handshake.await,
-                Err(error) => sse_probe_failure(error.into(), "stream"),
+                Err(error) => sse_probe_failure(error, "stream"),
             },
             result = &mut handshake => result,
         }

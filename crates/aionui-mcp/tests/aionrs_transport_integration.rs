@@ -218,6 +218,7 @@ const SSE_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\
 const ENDPOINT: &[u8] = b"event: endpoint\ndata: /messages\n\n";
 const INIT_REPLY: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
 const LIST_REPLY: &[u8] = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n";
+const MALFORMED_REPLY: &[u8] = b"event: message\ndata: {broken\n\n";
 
 async fn accept_stream(peer: &TcpListener) -> TcpStream {
     let (mut stream, _) = peer.accept().await.unwrap();
@@ -248,10 +249,13 @@ async fn write_keepalives(stream: &mut TcpStream, bytes: usize) -> std::io::Resu
     write_repeated(stream, &frame, bytes).await
 }
 
-async fn run_probe(transport: McpServerTransport) -> aionui_api_types::McpConnectionTestResult {
+fn probe_service() -> McpConnectionTestService {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    let service = McpConnectionTestService::new(client, Arc::new(BroadcastEventBus::new(4)));
-    service.test_connection("probe", &transport).await
+    McpConnectionTestService::new(client, Arc::new(BroadcastEventBus::new(4)))
+}
+
+async fn run_probe(transport: McpServerTransport) -> aionui_api_types::McpConnectionTestResult {
+    probe_service().test_connection("probe", &transport).await
 }
 
 async fn probe_sse(url: String) -> aionui_api_types::McpConnectionTestResult {
@@ -397,6 +401,46 @@ async fn assert_sse_limit_before_post_ack(expected: ResponseReadError, probe_cod
 }
 
 #[tokio::test]
+async fn persistent_sse_probe_reports_malformed_rpc_reply_before_eof() {
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = McpServerTransport::Sse {
+        url: format!("http://{}/sse", peer.local_addr().unwrap()),
+        headers: HashMap::new(),
+    };
+    let writer = tokio::spawn(async move {
+        let mut stream = accept_stream(&peer).await;
+        stream.write_all(ENDPOINT).await.unwrap();
+        let mut post = accept_rpc(&peer, "initialize").await;
+        post.write_all(&accepted_204()).await.unwrap();
+        stream
+            .write_all(
+                b": keepalive\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n\n",
+            )
+            .await
+            .unwrap();
+        stream
+            .write_all(b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n")
+            .await
+            .unwrap();
+        stream.write_all(MALFORMED_REPLY).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let service = probe_service().with_timeout(Duration::from_secs(2));
+    let result = tokio::time::timeout(PEER_DEADLINE, service.test_connection("probe", &transport))
+        .await
+        .expect("the probe must complete before the stream ends");
+    assert_eq!(result.code, Some(McpConnectionTestErrorCode::ProtocolError));
+    let error = result.error.unwrap();
+    assert!(
+        error.contains("Invalid JSON-RPC in SSE: key must be a string"),
+        "{error}"
+    );
+    assert!(!writer.is_finished());
+    writer.abort();
+}
+
+#[tokio::test]
 async fn persistent_sse_passes_idle_keepalive_between_rpc_windows() {
     for probe in [true, false] {
         let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -414,6 +458,7 @@ async fn persistent_sse_passes_idle_keepalive_between_rpc_windows() {
 
             let mut notify = accept_rpc(&peer, "notifications/initialized").await;
             // The notification has no outstanding RPC. Send more than one window's quota.
+            stream.write_all(MALFORMED_REPLY).await.unwrap();
             write_keepalives(&mut stream, MAX_SSE_RESPONSE_BYTES + 8 * 1024 * 1024)
                 .await
                 .unwrap();

@@ -201,13 +201,15 @@ impl ProbeResponseError {
 pub(super) async fn read_sse_events(
     mut reader: SseReader,
     responses: &SseResponses<JsonRpcResponse>,
-) -> Result<(), ResponseReadError> {
+) -> Result<(), ProbeResponseError> {
     while let Some(frame) = reader.next_frame_with(|bytes| responses.charge(bytes)).await? {
         let event = parse_sse_event(&String::from_utf8_lossy(frame));
-        if event.event_type == "message"
-            && let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&event.data)
-            && let Some(id) = response.id
-        {
+        if event.event_type != "message" || !responses.has_waiters() {
+            continue;
+        }
+        let response: JsonRpcResponse = serde_json::from_str(&event.data)
+            .map_err(|error| ProbeResponseError::Protocol(format!("Invalid JSON-RPC in SSE: {error}")))?;
+        if let Some(id) = response.id {
             responses.deliver(id, response);
         }
     }

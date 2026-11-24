@@ -60,6 +60,11 @@ impl<T> SseResponses<T> {
         })
     }
 
+    /// Whether an RPC's reply is still outstanding.
+    pub fn has_waiters(&self) -> bool {
+        self.0.lock().unwrap().pending.values().any(Option::is_some)
+    }
+
     /// Charge wire bytes before dispatch, including fragments and unmatched events.
     pub fn charge(&self, bytes: usize) -> Result<(), ResponseReadError> {
         for pending in self.0.lock().unwrap().pending.values_mut().flatten() {
