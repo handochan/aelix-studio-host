@@ -57,6 +57,10 @@ for raw in sys.stdin:
                               'data': {'kind': 'socket_path_too_long', 'limitBytes': 104,
                                        'path': '/PRIVATE/HOST72_SENTINEL/socket', 'token': 'fixture-secret',
                                        'stderr': '/PRIVATE/HOST72_SENTINEL/stderr'}}
+        elif (here / 'session-lock-check').is_file():
+            reply['error'] = {'code': -33001, 'message': 'Session lock held by native peer',
+                              'data': {'kind': 'session_locked', 'sessionId': 'fixture-locked-session',
+                                       'lockedBy': 'native', 'holder': None, 'retryable': False}}
         elif fail:
             reply['error'] = {'code': -32603, 'message': '/PRIVATE/HOST67_SENTINEL/runtime/worker.py',
                               'data': {'code': 'FIXTURE_FAILURE', 'detail': '/PRIVATE/HOST67_SENTINEL/runtime/worker.py'}}
@@ -299,7 +303,8 @@ async fn aelix_private_probe_omits_peer_path_from_http_database_and_diagnostics(
 }
 
 #[tokio::test]
-async fn acp_socket_path_error_is_structured_on_runtime_ensure_and_custom_registration() {
+async fn acp_socket_path_error_exposes_structured_details_and_human_readable_hint() {
+    let hint = "ACP could not start: the temporary directory path is too long. Set a shorter TMPDIR.";
     let dir = tempfile::tempdir().unwrap();
     let (peer, descriptor) = runtime(dir.path(), "socket path failure", false);
     std::fs::write(peer.join("socket-path-check"), "").unwrap();
@@ -329,7 +334,7 @@ async fn acp_socket_path_error_is_structured_on_runtime_ensure_and_custom_regist
     assert_eq!(
         runtime_body,
         json!({
-            "success":false, "code":"BAD_GATEWAY", "error":"ACP runtime initialization failed.",
+            "success":false, "code":"BAD_GATEWAY", "error":hint,
             "details":{"kind":"socket_path_too_long","limitBytes":104}
         })
     );
@@ -337,8 +342,63 @@ async fn acp_socket_path_error_is_structured_on_runtime_ensure_and_custom_regist
     assert_eq!(
         registration_body,
         json!({
-            "success":false, "code":"BAD_REQUEST", "error":"acp_init_failed: ACP initialization failed",
+            "success":false, "code":"BAD_REQUEST", "error":format!("acp_init_failed: {hint}"),
             "details":{"kind":"socket_path_too_long","limitBytes":104}
+        })
+    );
+    let (manual_status, manual_body) = host
+        .call(
+            Method::POST,
+            "/api/agents/custom/try-connect",
+            json!({"command":"python3","acp_args":[peer.join("launch.py")]}),
+            None,
+        )
+        .await;
+    assert_eq!(manual_status, StatusCode::OK, "{manual_body}");
+    assert_eq!(
+        manual_body,
+        json!({"success":true,"data":{"step":"fail_acp","error":hint}})
+    );
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn runtime_ensure_session_locked_matches_base_response_without_host_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (peer, descriptor) = runtime(dir.path(), "locked session", false);
+    // This fixture replies to initialize without advertising hostBytes.
+    std::fs::write(peer.join("session-lock-check"), "").unwrap();
+    let host = Host::start(dir.path(), &descriptor, true).await;
+    let conversation = host.conversation(ENTRY, dir.path()).await;
+    let (status, body) = host
+        .call(
+            Method::POST,
+            &format!("/api/conversations/{conversation}/runtime/ensure"),
+            Value::Null,
+            None,
+        )
+        .await;
+
+    let message = "The Agent session is open in another process";
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    // Run this same fixture against the base Host with HOST67_REVIEW_BASELINE.
+    assert_eq!(
+        body,
+        json!({
+            "success": false, "code": "USER_AGENT_SESSION_LOCKED", "error": message,
+            "details": {
+                "code": "USER_AGENT_SESSION_LOCKED",
+                "message": message,
+                "detail": "Session lock held by native peer",
+                "protocol_code": -33001,
+                "ownership": "user_agent",
+                "retryable": false,
+                "feedback_recommended": false,
+                "data": {
+                    "kind": "session_locked", "sessionId": "fixture-locked-session",
+                    "lockedBy": "native", "holder": null, "retryable": false
+                }
+            }
         })
     );
     host.stop().await;

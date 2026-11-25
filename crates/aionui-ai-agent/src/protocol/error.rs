@@ -315,7 +315,7 @@ impl AcpError {
     /// at the Host error boundary. HTTP, WS and diagnostics share this error.
     pub fn without_remote_detail(mut self, method: &str) -> Self {
         const DETAIL: &str = "ACP request failed";
-        let startup_details = self.public_startup_details();
+        let startup_details = self.public_startup_diagnostic().map(|(_, details)| details);
         match &mut self {
             Self::SessionNotFound { session_id } => *session_id = method.to_owned(),
             Self::ProtocolParseError { message }
@@ -342,12 +342,12 @@ impl AcpError {
         self
     }
 
-    /// Allowlisted details for HTTP startup failures.
-    pub fn public_startup_details(&self) -> Option<serde_json::Value> {
+    /// Host-authored guidance and allowlisted details for ACP startup failures.
+    pub fn public_startup_diagnostic(&self) -> Option<(&'static str, serde_json::Value)> {
         match self {
-            Self::ApplicationError { data, .. } => safe_startup_details(data.as_ref()),
+            Self::ApplicationError { data, .. } => safe_startup_diagnostic(data.as_ref()),
             Self::OtherProtocolError { code, data, .. } if matches!(ErrorCode::from(*code), ErrorCode::Other(_)) => {
-                safe_startup_details(data.as_ref())
+                safe_startup_diagnostic(data.as_ref())
             }
             _ => None,
         }
@@ -428,7 +428,7 @@ impl AcpError {
                         session_id: context.to_owned(),
                     }
                 } else if matches!(err.code, ErrorCode::Other(_))
-                    && let Some(details) = safe_startup_details(err.data.as_ref())
+                    && let Some((_, details)) = safe_startup_diagnostic(err.data.as_ref())
                 {
                     // Classify the structured startup error before inspecting
                     // agent prose for legacy stale-session signals.
@@ -453,7 +453,7 @@ impl AcpError {
 
 /// Project a startup diagnostic from the ACP data object. Verified adapter
 /// example: aelix-acp@7a2ca0e/src/aelix_acp/session.py and src/aelix_acp/wire/errors.py.
-fn safe_startup_details(data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+fn safe_startup_diagnostic(data: Option<&serde_json::Value>) -> Option<(&'static str, serde_json::Value)> {
     use serde_json::{Value, json};
 
     let data = data?;
@@ -469,7 +469,10 @@ fn safe_startup_details(data: Option<&serde_json::Value>) -> Option<serde_json::
     {
         details["limitBytes"] = json!(limit);
     }
-    Some(details)
+    Some((
+        "ACP could not start: the temporary directory path is too long. Set a shorter TMPDIR.",
+        details,
+    ))
 }
 
 /// Retain the allowlisted diagnostics consumed by Studio.
@@ -564,15 +567,18 @@ mod tests {
             .data(serde_json::json!({"kind":"socket_path_too_long","limitBytes":104}));
         let error = AcpError::from_sdk(known, "session/new").without_remote_detail("session/new");
         assert_eq!(
-            error.public_startup_details(),
-            Some(serde_json::json!({"kind":"socket_path_too_long","limitBytes":104}))
+            error.public_startup_diagnostic(),
+            Some((
+                "ACP could not start: the temporary directory path is too long. Set a shorter TMPDIR.",
+                serde_json::json!({"kind":"socket_path_too_long","limitBytes":104})
+            ))
         );
 
         let kind_only =
             SdkError::new(-33005, "private message").data(serde_json::json!({"kind":"socket_path_too_long"}));
         let error = AcpError::from_sdk(kind_only, "session/new");
         assert_eq!(
-            error.public_startup_details(),
+            error.public_startup_diagnostic().map(|(_, details)| details),
             Some(serde_json::json!({"kind":"socket_path_too_long"}))
         );
     }
@@ -586,7 +592,10 @@ mod tests {
             .data(serde_json::json!({"kind":"socket_path_too_long","limitBytes":104}));
         let cancelled = SdkError::new(-32800, "cancelled").data(serde_json::json!({"kind":"socket_path_too_long"}));
         for reply in [unknown, missing, unrelated, cancelled] {
-            assert_eq!(AcpError::from_sdk(reply, "session/new").public_startup_details(), None);
+            assert_eq!(
+                AcpError::from_sdk(reply, "session/new").public_startup_diagnostic(),
+                None
+            );
         }
     }
 
@@ -610,7 +619,7 @@ mod tests {
             }));
             let error = AcpError::from_sdk(reply, "session/new");
             assert_eq!(
-                error.public_startup_details(),
+                error.public_startup_diagnostic().map(|(_, details)| details),
                 Some(json!({"kind":"socket_path_too_long"}))
             );
             assert!(!error.to_string().contains("/private/"));

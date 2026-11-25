@@ -15,10 +15,11 @@ and [src/aelix_acp/wire/errors.py](https://github.com/handochan/aelix-acp/blob/1
 
 The public error payload includes `code` (host locale code), `protocol_code`
 (original numeric code), optional `data` (structured ACP data), and
-`retryable: false`. Runtime ensure and private-peer handling filter `data` to
-approved diagnostics. Other responses preserve keys such as `lockedBy`,
-`sessionId`, and an explicit `holder: null` when present. The host reads these
-reasons from structured fields.
+`retryable: false`. For peers without negotiated `aelix/hostBytes`, the
+existing application error responses preserve keys such as `lockedBy`,
+`sessionId`, and an explicit `holder: null` when present. Negotiated private-peer
+handling filters `data` to approved diagnostics. The host reads these reasons
+from structured fields.
 
 - HTTP runtime/config errors retain status 502, expose the host code at the
   top level, and carry the public error payload in `details`.
@@ -46,15 +47,18 @@ which Aelix ACP returns with code `-33004`. The Host includes `details.limitByte
 when ACP supplies a positive integer up to 65535. Startup diagnostics contain
 only these approved fields. Unknown kinds, peer messages, paths, credentials,
 stderr, and other ACP data are omitted. True upstream unavailability retains
-the generic `BAD_GATEWAY` response without startup details. Registration failures
-retain the `acp_init_failed:` message prefix.
+the generic `BAD_GATEWAY` response without startup details. For an allowlisted
+kind, runtime ensure and registration put a Host-authored remedy in the
+top-level `error` string. Registration retains the `acp_init_failed:` prefix.
+The manual probe at `POST /api/agents/custom/try-connect` returns the same remedy
+in `data.error` with `data.step = "fail_acp"` in its HTTP 200 response.
 
 Example runtime ensure response
 
 ```json
 {
   "success": false,
-  "error": "ACP runtime initialization failed.",
+  "error": "ACP could not start: the temporary directory path is too long. Set a shorter TMPDIR.",
   "code": "BAD_GATEWAY",
   "details": {
     "kind": "socket_path_too_long",

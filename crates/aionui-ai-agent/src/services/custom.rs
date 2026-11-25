@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::error::AgentError;
+use crate::error::{ACP_INITIALIZATION_FAILED, AgentError};
 use aionui_api_types::{
     AgentMetadata, CustomAgentUpsertRequest, TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
 };
@@ -258,10 +258,14 @@ async fn probe_or_reject(req: &CustomAgentUpsertRequest) -> Result<Option<serde_
             Ok(None)
         }
         ProbeOutcome::CliUnavailable(_) => Err(AgentError::bad_request("cli_not_found: Agent command unavailable")),
-        ProbeOutcome::Fail(_) => Err(AgentError::AcpInitialization { details: None }),
-        ProbeOutcome::RpcFailure { error, .. } => Err(AgentError::AcpInitialization {
-            details: error.public_startup_details(),
-        }),
+        ProbeOutcome::Fail(_) => Err(AgentError::bad_request(ACP_INITIALIZATION_FAILED)),
+        ProbeOutcome::RpcFailure { error, .. } => match error.public_startup_diagnostic() {
+            Some((hint, details)) => Err(AgentError::AcpInitialization {
+                message: format!("acp_init_failed: {hint}"),
+                details,
+            }),
+            None => Err(AgentError::bad_request(ACP_INITIALIZATION_FAILED)),
+        },
     }
 }
 

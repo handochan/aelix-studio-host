@@ -222,7 +222,9 @@ impl ProbeOutcome {
             Self::CliUnavailable(error) => TryConnectCustomAgentResponse::FailCli { error },
             Self::Fail(error) => TryConnectCustomAgentResponse::FailAcp { error },
             Self::RpcFailure { method, error } => TryConnectCustomAgentResponse::FailAcp {
-                error: format!("ACP {method} failed: {error}"),
+                error: error
+                    .public_startup_diagnostic()
+                    .map_or_else(|| format!("ACP {method} failed: {error}"), |(hint, _)| hint.to_owned()),
             },
         };
         (response, None)

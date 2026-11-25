@@ -453,17 +453,11 @@ fn runtime_ensure_error(error: ConversationError) -> ApiError {
     let ConversationError::Acp(error) = error else {
         return error.into();
     };
-    let error = error.without_remote_detail("runtime/ensure");
-    if let Some(details) = error.public_startup_details() {
-        let code = aionui_ai_agent::AgentSendError::from(error)
+    if let Some((hint, details)) = error.public_startup_diagnostic() {
+        let code = aionui_ai_agent::AgentSendError::from(error.without_remote_detail("runtime/ensure"))
             .protocol_error_code()
             .unwrap_or("BAD_GATEWAY");
-        return ApiError::coded(
-            StatusCode::BAD_GATEWAY,
-            code,
-            "ACP runtime initialization failed.",
-            Some(details),
-        );
+        return ApiError::coded(StatusCode::BAD_GATEWAY, code, hint, Some(details));
     }
     ConversationError::Acp(error).into()
 }
@@ -677,18 +671,18 @@ mod error_mapping_tests {
     }
 
     #[test]
-    fn acp_startup_existing_protocol_code_omits_unrecognized_detail() {
-        let app = runtime_ensure_error(ConversationError::Acp(aionui_ai_agent::AcpError::ApplicationError {
+    fn acp_startup_keeps_the_existing_operation_refused_mapping() {
+        let protocol_error = aionui_ai_agent::AcpError::ApplicationError {
             code: -32004,
-            message: "/private/error".into(),
-            data: Some(serde_json::json!({"kind":"unknown","token":"fixture-secret"})),
-        }));
-        assert_eq!(app.status_code(), StatusCode::BAD_GATEWAY);
+            message: "The requested profile is unavailable".into(),
+            data: Some(serde_json::json!({"kind":"profile_unavailable","profile":"fixture-profile"})),
+        };
+        let base = ApiError::from(ConversationError::Acp(protocol_error.clone()));
+        let app = runtime_ensure_error(ConversationError::Acp(protocol_error));
+        assert_eq!(app.status_code(), base.status_code());
         assert_eq!(app.error_code(), "USER_AGENT_OPERATION_REFUSED");
-        let details = app.error_details().unwrap();
-        assert_eq!(details["protocol_code"], -32004);
-        assert!(details.get("data").is_none());
-        assert!(!details.to_string().contains("/private/"));
+        assert_eq!(app.public_message(), base.public_message());
+        assert_eq!(app.error_details(), base.error_details());
     }
 
     #[test]
