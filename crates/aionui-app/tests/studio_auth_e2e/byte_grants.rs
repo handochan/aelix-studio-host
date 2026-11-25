@@ -559,3 +559,97 @@ async fn byte_grant_rpc_refusals_preserve_safe_studio_recovery_context() {
         host.tasks.kill_and_wait(&id, None).await;
     }
 }
+
+#[tokio::test]
+async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+    let refusal = json!({
+        "kind": "model_selection_required", "configId": "model", "availableModels": 2, "retryable": false,
+    });
+    std::fs::write(dir.join("relay-calls.prompt-refusal"), refusal.to_string()).unwrap();
+    let host = start_relay_host(dir, fixture(dir).await).await;
+    let id = create(&host, dir, "builtin-aelix").await;
+    let root = format!("{}/api/conversations/{id}", host.url);
+    ensure_and_discover(&host, &root).await;
+
+    let mut upgrade = host.upgrade();
+    upgrade
+        .headers_mut()
+        .insert(PRIVATE_HEADER, FIXTURE_TOKEN.parse().unwrap());
+    let (mut websocket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    let accepted = read(
+        host.client
+            .post(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"content": "Choose a model first"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let turn_id = accepted["data"]["turn_id"].as_str().unwrap();
+    let expected = json!({
+        "message": "The Agent cannot perform this operation",
+        "protocol_code": -32004,
+        "data": refusal,
+        "code": "USER_AGENT_OPERATION_REFUSED",
+        "ownership": "user_agent",
+        "detail": "ACP request failed",
+        "retryable": false,
+        "feedback_recommended": false,
+    });
+    let live_error = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = websocket.next().await.unwrap().unwrap();
+            if let Ok(text) = frame.to_text() {
+                let event: Value = serde_json::from_str(text).unwrap();
+                if event["name"] == "message.stream"
+                    && event["data"]["conversation_id"] == id
+                    && event["data"]["turn_id"] == turn_id
+                    && event["data"]["type"] == "error"
+                {
+                    break event;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(live_error["data"]["data"], expected);
+
+    let tip = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let history = read(
+                host.client
+                    .get(format!("{root}/messages"))
+                    .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                    .send()
+                    .await
+                    .unwrap(),
+                StatusCode::OK,
+            )
+            .await;
+            if let Some(tip) = history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["type"] == "tips")
+            {
+                break tip["content"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tip,
+        json!({"type": "error", "content": expected["message"], "error": expected}),
+    );
+
+    drop(websocket);
+    host.tasks.kill_and_wait(&id, None).await;
+}

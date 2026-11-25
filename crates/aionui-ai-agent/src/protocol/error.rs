@@ -358,10 +358,22 @@ impl AcpError {
         // aelix-acp@16d6555/src/aelix_acp/server.py (initialize and dispatch).
         // Preserve standard authentication behavior for every other agent.
         if agent_name == Some("aelix-acp") && matches!(code, -33001 | -33002 | -32000 | -32004) {
+            let data = if code == -32004
+                && err
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(MODEL_SELECTION_REQUIRED)
+            {
+                safe_application_data(code, err.data.as_ref())
+            } else {
+                err.data
+            };
             return AcpError::ApplicationError {
                 code,
                 message: err.message,
-                data: err.data,
+                data,
             };
         }
         match err.code {
@@ -425,6 +437,8 @@ impl AcpError {
     }
 }
 
+const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
+
 /// Retain the fixed discriminants consumed by Studio's lock and refusal UI.
 fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     use serde_json::{Value, json};
@@ -441,6 +455,18 @@ fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<
         }
         (-33002, "turn_failed_after_dispatch") => Some(json!({"kind":kind,"retryable":false})),
         (-32000, "session_changing") => Some(json!({"kind":kind})),
+        (-32004, MODEL_SELECTION_REQUIRED) => {
+            // aelix-acp@a6545f0b/src/aelix_acp/wire/errors.py defines this refusal.
+            if data.as_object()?.len() != 4
+                || data.get("configId")?.as_str() != Some("model")
+                || data.get("retryable")?.as_bool() != Some(false)
+            {
+                return None;
+            }
+            // A u32 count is exactly representable by Studio's JavaScript numbers.
+            let available_models = u32::try_from(data.get("availableModels")?.as_u64()?).ok()?;
+            Some(json!({"kind":kind,"configId":"model","availableModels":available_models,"retryable":false}))
+        }
         (-32004, "studio_extension_management_required") => {
             let action = data.get("action").and_then(Value::as_str)?;
             matches!(action, "install" | "update" | "remove").then(|| json!({"kind":kind,"action":action}))
@@ -724,6 +750,74 @@ mod tests {
                 json!({"kind":"restrictions_unenforceable","methods":[]})
             );
         }
+    }
+
+    #[test]
+    fn model_selection_refusal_preserves_exact_fields_through_sdk_and_protected_relay() {
+        use serde_json::json;
+
+        for available in [0, 2, u32::MAX] {
+            let input = json!({
+                "kind": "model_selection_required", "configId": "model",
+                "availableModels": available, "retryable": false,
+            });
+            let error = AcpError::from_sdk_for_agent(
+                SdkError::new(-32004, "private peer message").data(input.clone()),
+                "session/prompt",
+                Some("aelix-acp"),
+            );
+            assert!(matches!(&error, AcpError::ApplicationError { data: Some(data), .. } if *data == input));
+            assert!(matches!(
+                error.without_remote_detail("session/prompt"),
+                AcpError::ApplicationError { code: -32004, message, data: Some(data) }
+                    if message == "ACP request failed" && data == input
+            ));
+        }
+    }
+
+    #[test]
+    fn model_selection_refusal_drops_extra_missing_and_invalid_fields() {
+        use serde_json::json;
+
+        let valid = json!({
+            "kind": "model_selection_required", "configId": "model",
+            "availableModels": 2, "retryable": false,
+        });
+        for (field, value) in [
+            ("extra", json!("private peer data")),
+            ("configId", json!("other")),
+            ("configId", json!(false)),
+            ("availableModels", json!(-1)),
+            ("availableModels", json!(2.0)),
+            ("availableModels", json!(2.5)),
+            ("availableModels", json!("2")),
+            ("availableModels", json!(true)),
+            ("availableModels", json!(u64::from(u32::MAX) + 1)),
+            ("retryable", json!(true)),
+            ("retryable", json!("false")),
+            ("retryable", json!(null)),
+            ("kind", json!("different_kind")),
+            ("kind", json!(1)),
+        ] {
+            let mut input = valid.clone();
+            input[field] = value;
+            assert_eq!(safe_application_data(-32004, Some(&input)), None, "{input}");
+            if field != "kind" {
+                let error = AcpError::from_sdk_for_agent(
+                    SdkError::new(-32004, "refused").data(input),
+                    "session/prompt",
+                    Some("aelix-acp"),
+                );
+                assert!(matches!(error, AcpError::ApplicationError { data: None, .. }));
+            }
+        }
+        for field in ["kind", "configId", "availableModels", "retryable"] {
+            let mut input = valid.clone();
+            input.as_object_mut().unwrap().remove(field);
+            assert_eq!(safe_application_data(-32004, Some(&input)), None, "{input}");
+        }
+        assert_eq!(safe_application_data(-32000, Some(&valid)), None);
+        assert_eq!(safe_application_data(-32004, Some(&json!([valid]))), None);
     }
 
     #[test]
