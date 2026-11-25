@@ -180,6 +180,8 @@ while True:
             out.setdefault("_meta", {})["fixtureDiagnostic"] = [raw_marker, escaped_marker]
         result(rpc_id, out)
     elif method == "session/prompt":
+        with counter.with_suffix(".prompt-requests").open("a", encoding="utf-8") as requests:
+            requests.write(f"{os.getpid()}\n")
         refusal = counter.with_suffix(".prompt-refusal")
         if refusal.exists():
             send({"id": rpc_id, "error": {"code": -32004,

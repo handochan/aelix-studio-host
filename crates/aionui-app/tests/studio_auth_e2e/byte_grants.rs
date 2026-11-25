@@ -571,7 +571,25 @@ async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_histor
     let id = create(&host, dir, "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     ensure_and_discover(&host, &root).await;
+    let discovery = read(
+        host.client
+            .get(format!("{root}/acp-extensions"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(discovery["data"]["hostBytes"], true);
     assert_model_selection_refusal(&host, &id, refusal).await;
+    // The fixture appends before each reply, including in a replacement worker.
+    let requests = std::fs::read_to_string(dir.join("relay-calls.prompt-requests")).unwrap();
+    assert_eq!(
+        requests.lines().count(),
+        1,
+        "prompt requests across workers: {requests}"
+    );
     host.tasks.kill_and_wait(&id, None).await;
 }
 
@@ -643,17 +661,22 @@ async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Va
         "retryable": false,
         "feedback_recommended": false,
     });
-    let live_error = tokio::time::timeout(Duration::from_secs(10), async {
+    let live_error = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut refusal = None;
         loop {
             let frame = websocket.next().await.unwrap().unwrap();
             if let Ok(text) = frame.to_text() {
+                assert!(!text.contains("private-h1-standard"), "peer text reached the stream");
                 let event: Value = serde_json::from_str(text).unwrap();
-                if event["name"] == "message.stream"
-                    && event["data"]["conversation_id"] == id
-                    && event["data"]["turn_id"] == turn_id
-                    && event["data"]["type"] == "error"
-                {
-                    break event;
+                if event["data"]["conversation_id"] != id || event["data"]["turn_id"] != turn_id {
+                    continue;
+                }
+                match event["name"].as_str() {
+                    Some("message.stream") if event["data"]["type"] == "error" => {
+                        refusal = Some(event["data"]["data"].clone());
+                    }
+                    Some("turn.completed") => break refusal.expect("turn completed without an error frame"),
+                    _ => {}
                 }
             }
         }
@@ -661,38 +684,29 @@ async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Va
     .await
     .unwrap();
 
-    let tip = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let history = read(
-                host.client
-                    .get(format!("{root}/messages"))
-                    .header(PRIVATE_HEADER, FIXTURE_TOKEN)
-                    .send()
-                    .await
-                    .unwrap(),
-                StatusCode::OK,
-            )
-            .await;
-            assert!(
-                !history.to_string().contains("private-h1-standard"),
-                "peer text reached history"
-            );
-            if let Some(tip) = history["data"]["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|row| row["type"] == "tips")
-            {
-                break tip["content"].clone();
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(live_error["data"]["data"], expected);
+    let history = read(
+        host.client
+            .get(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(
+        !history.to_string().contains("private-h1-standard"),
+        "peer text reached history"
+    );
+    let tip = history["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["type"] == "tips")
+        .expect("the completed refusal must be in history");
+    assert_eq!(live_error, expected);
     assert_eq!(
-        tip,
+        tip["content"],
         json!({"type": "error", "content": expected["message"], "error": expected}),
     );
 }
