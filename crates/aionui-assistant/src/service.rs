@@ -601,7 +601,20 @@ impl AssistantService {
             })
             .cloned();
         let is_missing = existing_definition.is_none();
-        let assistant_id = format!("bare:{}", row.id);
+        let mut assistant_id = format!("bare:{}", row.id);
+        // Migration 046 rekeys a legacy agent's binding but preserves the
+        // assistant key used by saved selections and on-disk rules.
+        if row.id == "builtin-aelix"
+            && existing_definition.is_none()
+            && self
+                .definition_repo
+                .get_by_assistant_id_including_deleted_for_user(user_id, &assistant_id)
+                .await
+                .map_err(|e| AssistantError::Internal(format!("get assistant definition by key: {e}")))?
+                .is_some_and(|existing| existing.agent_id != row.id || existing.source != "generated")
+        {
+            assistant_id = format!("{assistant_id}:{}", generate_prefixed_id("asst"));
+        }
         let (definition_id, assistant_id) = self
             .resolve_definition_identity_for_user(user_id, "generated", Some(&row.id), &assistant_id)
             .await?;
@@ -4294,6 +4307,37 @@ mod tests {
         let list = fx.service.list().await.unwrap();
         let generated = list.iter().find(|assistant| assistant.id == "bare:claude").unwrap();
         assert_eq!(generated.source, AssistantSource::Generated);
+    }
+
+    #[tokio::test]
+    async fn builtin_aelix_generation_preserves_the_rekeyed_legacy_assistant() {
+        let status = aionui_api_types::AgentManagementStatus::Online;
+        let fx = fixture().await;
+        insert_generated_definition(&fx, "old-definition", "bare:builtin-aelix", "legacy-aelix-rekeyed").await;
+        *fx.agent_rows.lock().unwrap() = vec![
+            mk_agent_row("builtin-aelix", "aelix", status),
+            mk_agent_row("legacy-aelix-rekeyed", "aelix", status),
+        ];
+
+        let list = fx.service.list().await.unwrap();
+        let legacy = list
+            .iter()
+            .find(|assistant| assistant.id == "bare:builtin-aelix")
+            .unwrap();
+        assert_eq!(legacy.agent_id, "legacy-aelix-rekeyed");
+        let builtin = list
+            .iter()
+            .find(|assistant| assistant.agent_id == "builtin-aelix")
+            .unwrap();
+        assert_ne!(legacy.id, builtin.id);
+        assert!(
+            fx.service
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .any(|assistant| assistant.id == builtin.id)
+        );
     }
 
     #[tokio::test]

@@ -35,6 +35,10 @@ impl StudioHost {
     }
 
     async fn start_with_db(dir: &Path, db: aionui_db::Database, seed: bool) -> Self {
+        Self::start_with_db_and_launch(dir, db, seed, None).await
+    }
+
+    async fn start_with_db_and_launch(dir: &Path, db: aionui_db::Database, seed: bool, launch: Option<&str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let config = AppConfig {
@@ -44,7 +48,10 @@ impl StudioHost {
             work_dir: dir.into(),
             ..Default::default()
         };
-        let services = AppServices::from_config(db, &config).await.unwrap();
+        let auth = StudioAuth::new(port, FIXTURE_TOKEN.as_bytes().try_into().unwrap());
+        let services = AppServices::from_config_with_studio_auth(db, &config, &auth, launch)
+            .await
+            .unwrap();
         if seed {
             services
                 .user_repo
@@ -64,10 +71,7 @@ impl StudioHost {
                 [RuntimeTokenScope::ConversationHelper],
             )
             .token;
-        let secret = FIXTURE_TOKEN.as_bytes().try_into().unwrap();
-        let (router, _runtime) = create_studio_router(&services, StudioAuth::new(port, secret))
-            .await
-            .unwrap();
+        let (router, _runtime) = create_studio_router(&services, auth).await.unwrap();
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });

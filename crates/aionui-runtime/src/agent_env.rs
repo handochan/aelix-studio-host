@@ -61,6 +61,7 @@ fn build_agent_process_env(
 
 fn clean_agent_env(env: &mut BTreeMap<OsString, OsString>) {
     for key in [
+        crate::STUDIO_AELIX_LAUNCH_ENV,
         "NODE_OPTIONS",
         "NODE_INSPECT",
         "NODE_DEBUG",

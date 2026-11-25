@@ -153,6 +153,31 @@ impl AppServices {
         config: &AppConfig,
         backend_binary_path: PathBuf,
     ) -> anyhow::Result<Self> {
+        Self::assemble(database, config, backend_binary_path, None).await
+    }
+
+    pub async fn from_config_with_studio_auth(
+        database: Database,
+        config: &AppConfig,
+        auth: &crate::StudioAuth,
+        launch: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let backend_binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aelix-studio-host"));
+        Self::assemble(
+            database,
+            config,
+            backend_binary_path,
+            Some((auth.operator_id(), launch)),
+        )
+        .await
+    }
+
+    async fn assemble(
+        database: Database,
+        config: &AppConfig,
+        backend_binary_path: PathBuf,
+        studio: Option<(&str, Option<&str>)>,
+    ) -> anyhow::Result<Self> {
         // `dunce`, not `std::fs`: this path is embedded into agent-facing config
         // files (e.g. antigravity's `.agents/hooks.json` command line, executed
         // through cmd.exe on Windows), and `std::fs::canonicalize` on Windows
@@ -259,7 +284,10 @@ impl AppServices {
 
         let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
             Arc::new(SqliteAgentMetadataRepository::new(database.pool().clone()));
-        let agent_registry = AgentRegistry::new(agent_metadata_repo);
+        let agent_registry = match studio {
+            Some((operator, launch)) => AgentRegistry::new_for_studio(agent_metadata_repo, operator.to_owned(), launch),
+            None => AgentRegistry::new(agent_metadata_repo),
+        };
         agent_registry
             .hydrate()
             .await

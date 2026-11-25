@@ -235,10 +235,11 @@ async fn spawn_and_connect_acp_once(
     params: &AcpSessionParams,
     runtime: &AgentRuntime,
 ) -> Result<AcpStartupConnection, AcpStartupConnectError> {
-    let relay_candidate = crate::protocol::acp_relay::is_builtin_aelix(&params.metadata);
+    let relay_candidate = crate::protocol::acp_relay::is_builtin_aelix(&params.metadata, params.studio_launch);
+    let studio_launch = params.studio_launch;
     // Extension content must not reach raw stderr logs or crash diagnostics.
     let process = Arc::new(
-        CliAgentProcess::spawn_sdk(params.command_spec.clone(), relay_candidate)
+        CliAgentProcess::spawn_sdk(params.command_spec.clone(), relay_candidate, studio_launch)
             .await
             .map_err(AcpStartupConnectError::Agent)?,
     );
@@ -248,11 +249,13 @@ async fn spawn_and_connect_acp_once(
         params.conversation_id.clone(),
         AgentType::Acp,
         params.metadata.backend.clone(),
-        Some(format!(
-            "{} {}",
-            params.command_spec.command.display(),
-            params.command_spec.args.join(" ")
-        )),
+        (!studio_launch).then(|| {
+            format!(
+                "{} {}",
+                params.command_spec.command.display(),
+                params.command_spec.args.join(" ")
+            )
+        }),
     )
     .map_err(AcpStartupConnectError::Agent)?;
     let (stdin, stdout) = process.take_stdio().await.ok_or_else(|| {
@@ -281,6 +284,7 @@ async fn spawn_and_connect_acp_once(
         crate::protocol::acp_init_budget::init_budget(&params.command_spec),
         relay_candidate,
         params.team_permission_mode.is_none(),
+        studio_launch,
     );
     tokio::pin!(connect_fut);
     let protocol = tokio::select! {

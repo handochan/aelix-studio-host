@@ -22,6 +22,10 @@ use tracing::{info, warn};
 
 use crate::runtime_status::conversation_runtime_reporter;
 
+#[cfg(all(test, unix))]
+#[path = "acp_studio_aelix_tests.rs"]
+mod studio_aelix_tests;
+
 /// Where a conversation that arrived on the ACP factory actually has to run.
 ///
 /// Conversations reach this factory by their *family*, not by how their agent
@@ -172,6 +176,7 @@ pub(super) async fn build(
     }
 
     let mut command_spec = resolve_agent_command_spec(
+        &deps.agent_registry,
         &meta,
         &ctx.user_id,
         &ctx.workspace,
@@ -179,6 +184,7 @@ pub(super) async fn build(
         deps.broadcaster.clone(),
     )
     .await?;
+    let studio_launch = crate::studio_aelix::is_catalog_entry(&meta) && !meta.has_command_override;
     apply_acp_launch_policy(
         &mut command_spec,
         AcpLaunchPolicyInput {
@@ -294,6 +300,7 @@ pub(super) async fn build(
         deps.dump_prompts,
     )
     .await;
+    params.studio_launch = studio_launch;
     params.team_permission_mode = build_context.team.as_ref().map(|team| {
         if team.runtime_seed.selected_permission_mode.as_deref() == Some("yolo") {
             "yolo"
@@ -369,12 +376,25 @@ pub(super) async fn resolve_catalog_metadata(
 }
 
 async fn resolve_agent_command_spec(
+    registry: &AgentRegistry,
     meta: &aionui_api_types::AgentMetadata,
     user_id: &str,
     workspace: &str,
     conversation_id: &str,
     broadcaster: Arc<dyn aionui_realtime::EventBroadcaster>,
 ) -> Result<CommandSpec, AgentError> {
+    if crate::studio_aelix::is_catalog_entry(meta) {
+        registry.authorize_studio_aelix(user_id, &meta.id)?;
+        if !meta.enabled {
+            return Err(AgentError::bad_request(crate::studio_aelix::AGENT_DISABLED));
+        }
+        if !meta.has_command_override {
+            return registry
+                .studio_aelix_launch(user_id)
+                .and_then(|launch| launch.command_spec(meta, workspace.to_owned()))
+                .ok_or_else(|| AgentError::bad_request(crate::studio_aelix::RUNTIME_UNAVAILABLE));
+        }
+    }
     let command = meta
         .command
         .as_deref()
@@ -970,6 +990,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn resolve_agent_command_spec_flattens_bare_npx_command() {
+        let registry = AgentRegistry::new(Arc::new(SqliteAgentMetadataRepository::new(
+            init_database_memory().await.unwrap().pool().clone(),
+        )));
         let _lock = path_test_lock().lock().await;
         let runtime = install_fake_bundled_runtime();
         let _runtime_data_dir = test_runtime_data_dir();
@@ -1018,6 +1041,7 @@ mod tests {
         };
 
         let spec = resolve_agent_command_spec(
+            &registry,
             &meta,
             "user-acp",
             "/tmp/workspace",
@@ -1045,6 +1069,7 @@ mod tests {
         meta.agent_source_info.bridge_binary = Some("npx".into());
         meta.args = vec!["-y".into(), "pi-acp".into()];
         let spec = resolve_agent_command_spec(
+            &registry,
             &meta,
             "user-acp",
             "/tmp/workspace",

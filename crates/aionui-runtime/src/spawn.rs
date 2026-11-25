@@ -211,11 +211,13 @@ impl Builder {
 
     /// Spawn the process and return the standard `tokio::process::Child`.
     pub fn spawn(mut self) -> io::Result<Child> {
+        self.inner.env_remove(crate::STUDIO_AELIX_LAUNCH_ENV);
         self.inner.spawn()
     }
 
     /// Run to completion and collect stdout/stderr.
     pub async fn output(mut self) -> io::Result<std::process::Output> {
+        self.inner.env_remove(crate::STUDIO_AELIX_LAUNCH_ENV);
         self.inner.output().await
     }
 }

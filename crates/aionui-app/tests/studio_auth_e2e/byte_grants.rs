@@ -34,8 +34,8 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
     std::fs::write(dir.join("relay-calls.diagnostic-fixture"), "").unwrap();
     let database = fixture(dir).await;
     let pool = database.pool().clone();
-    let host = StudioHost::start_with_db(dir, database, true).await;
-    let id = create(&host, dir, "fixture-aelix").await;
+    let host = start_relay_host(dir, database).await;
+    let id = create(&host, dir, "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     let endpoint = format!("{root}/byte-grants");
     let file_name = "private-h1-file-文-quote.dat";
@@ -435,11 +435,11 @@ async fn byte_grant_sdk_trace_and_protected_wire() {
 async fn byte_grant_resolves_project_upload_and_local_as_one_ordered_batch() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("relay-calls.host-bytes-enabled"), "").unwrap();
-    let host = StudioHost::start_with_db(dir.path(), fixture(dir.path()).await, true).await;
+    let host = start_relay_host(dir.path(), fixture(dir.path()).await).await;
     let root = format!(
         "{}/api/conversations/{}",
         host.url,
-        create(&host, dir.path(), "fixture-aelix").await
+        create(&host, dir.path(), "builtin-aelix").await
     );
     let binding = ensure_and_discover(&host, &root).await;
     let workspace = tempfile::tempdir().unwrap();
@@ -519,7 +519,7 @@ async fn byte_grant_rpc_refusals_preserve_safe_studio_recovery_context() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();
     std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
-    let host = StudioHost::start_with_db(dir, fixture(dir).await, true).await;
+    let host = start_relay_host(dir, fixture(dir).await).await;
     let sensitive = r#"private-h1-"/operator/private-extension.py""#;
 
     for (mut input, expected) in [
@@ -540,7 +540,7 @@ async fn byte_grant_rpc_refusals_preserve_safe_studio_recovery_context() {
     ] {
         input["privateExtra"] = json!(sensitive);
         std::fs::write(dir.join("relay-calls.recovery-fixture"), input.to_string()).unwrap();
-        let id = create(&host, dir, "fixture-aelix").await;
+        let id = create(&host, dir, "builtin-aelix").await;
         let rejection = read(
             host.client
                 .post(format!("{}/api/conversations/{id}/runtime/ensure", host.url))

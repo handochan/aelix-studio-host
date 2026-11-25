@@ -120,6 +120,7 @@ impl AgentService {
         id: &str,
         req: aionui_api_types::SetAgentOverridesRequest,
     ) -> Result<AgentManagementRow, AgentError> {
+        self.registry.authorize_studio_aelix(user_id, id)?;
         let repo = self.registry.repo_handle();
         let row = repo
             .get_for_user(user_id, id)
@@ -165,6 +166,14 @@ impl AgentService {
             .await
             .map_err(|e| AgentError::internal(format!("repo.update_agent_overrides_for_user: {e}")))?;
 
+        self.registry.reset_studio_health(user_id, id);
+        if !row.enabled && id == crate::studio_aelix::AGENT_ID {
+            return self
+                .registry
+                .management_row_by_id_for_user(user_id, id)
+                .await?
+                .ok_or_else(|| AgentError::not_found(format!("Agent '{id}' not found")));
+        }
         self.availability.run_manual_health_check(user_id, id).await
     }
 
@@ -173,6 +182,7 @@ impl AgentService {
         user_id: &str,
         id: &str,
     ) -> Result<aionui_api_types::AgentOverridesResponse, AgentError> {
+        self.registry.authorize_studio_aelix(user_id, id)?;
         let row = self
             .registry
             .repo_handle()

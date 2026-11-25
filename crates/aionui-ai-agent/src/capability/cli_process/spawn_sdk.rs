@@ -21,10 +21,14 @@ impl CliAgentProcess {
     /// - stderr buffering
     /// - Process exit monitoring
     pub async fn spawn_for_sdk(config: CommandSpec) -> Result<Self, AgentError> {
-        Self::spawn_sdk(config, false).await
+        Self::spawn_sdk(config, false, false).await
     }
 
-    pub(crate) async fn spawn_sdk(config: CommandSpec, relay_candidate: bool) -> Result<Self, AgentError> {
+    pub(crate) async fn spawn_sdk(
+        config: CommandSpec,
+        relay_candidate: bool,
+        redact_launch: bool,
+    ) -> Result<Self, AgentError> {
         let mut cmd = CmdBuilder::new(&config.command);
         let agent_env = aionui_runtime::agent_process_env().await;
         cmd.args(&config.args)
@@ -33,7 +37,7 @@ impl CliAgentProcess {
             .envs(config.env.iter().map(|e| (&e.name, &e.value)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(if relay_candidate {
+            .stderr(if relay_candidate || redact_launch {
                 std::process::Stdio::null()
             } else {
                 std::process::Stdio::piped()
@@ -62,7 +66,11 @@ impl CliAgentProcess {
         if let Some(ref cwd) = config.cwd {
             cmd.current_dir(prepare_command_cwd(cwd)?);
         }
-        let preview = Self::sdk_spawn_preview(&config);
+        let preview = if redact_launch {
+            "Studio Aelix runtime".to_owned()
+        } else {
+            Self::sdk_spawn_preview(&config)
+        };
         info!(command = %preview, "Spawning CLI process (SDK mode)");
         let mut child: Child = cmd.spawn().map_err(|e| {
             error!(command = %preview, error = %ErrorChain(&e), "Failed to spawn CLI process");
