@@ -40,6 +40,20 @@ pub struct AcpToolCallEventData {
     pub meta: Option<SdkMeta>,
 }
 
+impl AcpToolCallEventData {
+    /// The stored card payload and message status shared by live and replay.
+    pub fn message_fields(&self) -> (Value, &'static str) {
+        let status = match self.update.status {
+            Some(AcpToolCallStatus::Completed) => "finish",
+            Some(AcpToolCallStatus::Failed) => "error",
+            Some(AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress) | None => "work",
+        };
+        let mut value = serde_json::to_value(self).unwrap_or_default();
+        aionui_common::normalize_keys_to_snake_case(&mut value);
+        (value, status)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpToolCallUpdateData {
     #[serde(rename = "sessionUpdate")]

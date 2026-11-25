@@ -1,6 +1,7 @@
 use aionui_common::{PaginatedResult, TimestampMs};
 use serde::{Deserialize, Serialize};
 
+use super::acp_transcript::{AcpTranscriptApply, AcpTranscriptInputGuard, AcpTranscriptRow, NativeMessageKey};
 use crate::error::DbError;
 use crate::models::{
     ConversationArtifactRow, ConversationAssistantSnapshotRow, ConversationRow, MessageRow,
@@ -181,6 +182,33 @@ pub trait IConversationRepository: Send + Sync {
         _message_id: &str,
     ) -> Result<Option<MessageRow>, DbError> {
         Ok(None)
+    }
+
+    /// Keep an in-flight composer echo out of a completed replay replacement.
+    fn protect_acp_transcript_input(&self, _message_id: &str) -> Option<AcpTranscriptInputGuard> {
+        None
+    }
+
+    /// Record a verified native storage receipt on the submitted hidden row.
+    async fn bind_acp_hidden_input(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _message_id: &str,
+        _native: &NativeMessageKey,
+    ) -> Result<(), DbError> {
+        Err(DbError::Init("ACP transcript storage is unavailable".into()))
+    }
+
+    /// Replace only the replay-owned display history using a complete projection.
+    async fn apply_acp_transcript(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _session_id: &str,
+        _rows: Vec<AcpTranscriptRow>,
+    ) -> Result<AcpTranscriptApply, DbError> {
+        Err(DbError::Init("ACP transcript storage is unavailable".into()))
     }
 
     /// Inserts a new message row.

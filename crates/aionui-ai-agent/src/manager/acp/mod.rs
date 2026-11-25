@@ -24,3 +24,5 @@ pub use permission_router::PermissionRouter;
 pub use session::AcpSession;
 
 pub(crate) use agent::sdk_to_snake_value;
+
+mod transcript_display;

@@ -2,6 +2,9 @@ use sqlx::{Row, SqlitePool};
 
 use aionui_common::{PaginatedResult, TimestampMs};
 
+use super::acp_transcript::{
+    self, AcpTranscriptApply, AcpTranscriptInputGuard, AcpTranscriptRow, ActiveInputs, NativeMessageKey,
+};
 use crate::error::DbError;
 use crate::models::{
     ConversationArtifactRow, ConversationAssistantSnapshotRow, ConversationRow, MessageRow,
@@ -33,11 +36,15 @@ pub(super) const PUBLISHED_FORK_OR_CONVERSATION: &str = "(json_type(CASE WHEN js
 #[derive(Clone, Debug)]
 pub struct SqliteConversationRepository {
     pool: SqlitePool,
+    acp_transcript_inputs: ActiveInputs,
 }
 
 impl SqliteConversationRepository {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            acp_transcript_inputs: ActiveInputs::default(),
+        }
     }
 
     async fn conversation_exists_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError> {
@@ -302,6 +309,38 @@ impl super::conversation::AcpRelayWriteLock for sqlx::Transaction<'static, sqlx:
 
 #[async_trait::async_trait]
 impl IConversationRepository for SqliteConversationRepository {
+    fn protect_acp_transcript_input(&self, message_id: &str) -> Option<AcpTranscriptInputGuard> {
+        Some(AcpTranscriptInputGuard::new(&self.acp_transcript_inputs, message_id))
+    }
+
+    async fn bind_acp_hidden_input(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        message_id: &str,
+        native: &NativeMessageKey,
+    ) -> Result<(), DbError> {
+        acp_transcript::bind_hidden_input(&self.pool, user_id, conversation_id, message_id, native).await
+    }
+
+    async fn apply_acp_transcript(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        session_id: &str,
+        rows: Vec<AcpTranscriptRow>,
+    ) -> Result<AcpTranscriptApply, DbError> {
+        acp_transcript::apply(
+            &self.pool,
+            &self.acp_transcript_inputs,
+            user_id,
+            conversation_id,
+            session_id,
+            rows,
+        )
+        .await
+    }
+
     // ── Conversation CRUD ───────────────────────────────────────────
 
     async fn aionrs_team_permission_mode(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError> {
@@ -1097,19 +1136,33 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn delete_messages_by_conversation(&self, user_id: &str, conv_id: &str) -> Result<(), DbError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
-            "DELETE FROM messages \
-             WHERE conversation_id = ? \
-               AND EXISTS ( \
-                    SELECT 1 FROM conversations c \
-                    WHERE c.id = messages.conversation_id AND c.user_id = ? \
-               )",
+            "INSERT OR IGNORE INTO acp_transcript_display_resets (conversation_id, session_id)
+             SELECT a.conversation_id, a.session_id FROM acp_session a JOIN conversations c ON c.id = a.conversation_id
+             WHERE c.id = ? AND c.user_id = ? AND NULLIF(a.session_id, '') IS NOT NULL",
         )
         .bind(conv_id)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-
+        sqlx::query(
+            "DELETE FROM messages WHERE conversation_id = ?
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = messages.conversation_id AND user_id = ?)",
+        )
+        .bind(conv_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM acp_transcript_display_archive WHERE conversation_id = ?
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = acp_transcript_display_archive.conversation_id AND user_id = ?)",
+        )
+        .bind(conv_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 

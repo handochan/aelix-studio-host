@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use aionui_ai_agent::protocol::events::{
-    ErrorEventData, TipType, TipsEventData,
-    tool_call::{AcpToolCallStatus, ToolCallStatus},
-};
+use aionui_ai_agent::protocol::events::{ErrorEventData, TipType, TipsEventData, tool_call::ToolCallStatus};
 use aionui_api_types::{ConversationRuntimeSummary, WebSocketMessage};
-use aionui_common::{ErrorChain, normalize_keys_to_snake_case, now_ms};
+use aionui_common::{ErrorChain, now_ms};
 use aionui_db::models::MessageRow;
 use aionui_db::{ConversationRowUpdate, DbError, IConversationRepository, MessageRowUpdate};
 use aionui_realtime::EventBroadcaster;
@@ -600,15 +597,7 @@ impl StreamPersistenceAdapter {
             return;
         }
         let tool_call_id = &data.update.tool_call_id;
-        let status = match data.update.status {
-            Some(AcpToolCallStatus::Pending) | None => "work",
-            Some(AcpToolCallStatus::InProgress) => "work",
-            Some(AcpToolCallStatus::Completed) => "finish",
-            Some(AcpToolCallStatus::Failed) => "error",
-        };
-
-        let mut value = serde_json::to_value(data).unwrap_or_default();
-        normalize_keys_to_snake_case(&mut value);
+        let (value, status) = data.message_fields();
         let content = value.to_string();
 
         let row = MessageRow {

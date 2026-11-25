@@ -153,6 +153,7 @@ fn aionrs_final_input_dump_value_contains_raw_split_input_and_context() {
         content: "team wake raw content".to_owned(),
         msg_id: "msg-aionrs-final".to_owned(),
         turn_id: Some("turn-aionrs-final".to_owned()),
+        hidden_input_id: None,
         files: Vec::new(),
         attachments: Vec::new(),
         inject_skills: Vec::new(),

@@ -3786,6 +3786,7 @@ impl ConversationService {
             content: resolved.content.clone(),
             msg_id: user_msg_id.clone(),
             turn_id: Some(active_turn_id.clone()),
+            hidden_input_id: None,
             files: resolved.files.clone(),
             attachments: resolved.attachments.clone(),
             inject_skills,
@@ -4009,7 +4010,7 @@ impl ConversationService {
         // Open a NEW turn: mint the id only on this branch. The mid-turn
         // delivery path above instead reuses the running turn's id — a
         // phantom turn id minted outside an actual claim must never exist.
-        let (turn_id, turn_claim) = {
+        let (turn_id, mut turn_claim) = {
             let turn_id = Self::mint_turn_id();
             let turn_claim = self.runtime_state.try_claim_turn(conversation_id, &turn_id)?;
             (turn_id, turn_claim)
@@ -4023,6 +4024,9 @@ impl ConversationService {
         // message — reuse its id instead of writing a duplicate row.
         let was_fallback = fallback_user_msg.is_some();
         let user_msg_id = fallback_user_msg.unwrap_or_else(Self::mint_msg_id);
+        if row.r#type == "acp" {
+            turn_claim.protect_transcript_input(self.conversation_repo.as_ref(), &user_msg_id);
+        }
         let user_msg = aionui_db::models::MessageRow {
             id: user_msg_id.clone(),
             conversation_id: conversation_id.to_owned(),
@@ -4103,6 +4107,7 @@ impl ConversationService {
             attachments: resolved.attachments,
             inject_skills: req.inject_skills,
             required_runtime_mode: None,
+            hidden_input_id: req.hidden.then_some(user_msg_id),
             build_options: build_opts,
             stored_workspace,
             turn_id: turn_id.clone(),
@@ -4146,9 +4151,14 @@ impl ConversationService {
         reject_deprecated_runtime_row(&row)?;
 
         let turn_id = Self::mint_turn_id();
-        let turn_claim = self.runtime_state.try_claim_turn(&request.conversation_id, &turn_id)?;
+        let mut turn_claim = self.runtime_state.try_claim_turn(&request.conversation_id, &turn_id)?;
+        let mut hidden_input_id = None;
         if request.persist_user_message {
             let user_msg_id = Self::mint_msg_id();
+            if row.r#type == "acp" {
+                turn_claim.protect_transcript_input(self.conversation_repo.as_ref(), &user_msg_id);
+                hidden_input_id = request.user_message_hidden.then(|| user_msg_id.clone());
+            }
             let user_msg = aionui_db::models::MessageRow {
                 id: user_msg_id.clone(),
                 conversation_id: request.conversation_id.clone(),
@@ -4226,6 +4236,7 @@ impl ConversationService {
                 attachments: Vec::new(),
                 inject_skills: request.inject_skills,
                 required_runtime_mode: request.required_runtime_mode,
+                hidden_input_id,
                 build_options: build_opts,
                 stored_workspace,
                 turn_id: turn_id.clone(),

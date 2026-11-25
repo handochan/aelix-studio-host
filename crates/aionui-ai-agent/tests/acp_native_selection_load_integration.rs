@@ -49,6 +49,9 @@ for line in sys.stdin:
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
             'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
         }
+        if load_surface.startswith('transcript-'):
+            assert params['clientCapabilities']['_meta']['aelix/transcript'] == {'version': 1}
+            response['result']['agentCapabilities']['_meta'] = {'aelix/transcript': {'version': 1}}
         if load_surface == 'media-wire':
             response['result']['agentCapabilities']['promptCapabilities'] = {'image': True}
         if load_surface == 'fork-recovery':
@@ -61,6 +64,24 @@ for line in sys.stdin:
         response['result'] = {'sessionId': session_id, 'configOptions': options()}
     elif method == 'session/load' and params['sessionId'] == 'selector-session':
         response['result'] = {'configOptions': options()}
+        if load_surface.startswith('transcript-'):
+            update = {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': 'From CLI'},
+                      '_meta': {'aelix/transcript': {'source': 'replay', 'nativeSessionId': 'native', 'entryId': 'one',
+                                                     'parentEntryId': None, 'sequence': 1, 'role': 'user', 'part': 0}}}
+            print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
+                'sessionId': params['sessionId'], 'update': update}}), flush=True)
+            marker = {'version': 1, 'nativeSessionId': 'native', 'leafId': 'one',
+                      'totalMessages': 2 if load_surface == 'transcript-partial' else 1, 'recovered': False}
+            meta = {}
+            if load_surface != 'transcript-no-session-capability':
+                meta['aelix/transcriptCapability'] = {'version': 1}
+            if load_surface != 'transcript-no-marker':
+                meta['aelix/transcript'] = marker
+            response['result']['_meta'] = meta
+            if load_surface == 'transcript-unavailable':
+                del response['result']
+                response['error'] = {'code': -32603, 'message': 'Native session history is unavailable',
+                                     'data': {'kind': 'native_history_unavailable'}}
         if load_surface == 'legacy':
             model, *remaining = response['result']['configOptions']
             response['result']['configOptions'] = remaining
@@ -237,6 +258,16 @@ async fn assert_selections(
 }
 
 async fn setup() -> (tempfile::TempDir, Arc<AgentRegistry>, Arc<AcpSessionSyncService>) {
+    let (temp, registry, sync, _) = setup_with_db().await;
+    (temp, registry, sync)
+}
+
+async fn setup_with_db() -> (
+    tempfile::TempDir,
+    Arc<AgentRegistry>,
+    Arc<AcpSessionSyncService>,
+    aionui_db::Database,
+) {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("peer.py"), PEER).unwrap();
     let db = init_database_memory().await.unwrap();
@@ -270,7 +301,7 @@ async fn setup() -> (tempfile::TempDir, Arc<AgentRegistry>, Arc<AcpSessionSyncSe
     .await
     .unwrap();
     let sync = AcpSessionSyncService::new(repo);
-    (temp, registry, sync)
+    (temp, registry, sync, db)
 }
 
 async fn check_load(agent_name: &str, expect_native: bool, load_surface: &str) {
@@ -343,6 +374,7 @@ async fn prompt(instance: &AgentInstance, content: &str) -> Result<(), AgentSend
             content: content.into(),
             msg_id: content.into(),
             turn_id: None,
+            hidden_input_id: None,
             files: vec![],
             attachments: Vec::new(),
             inject_skills: vec![],
@@ -859,6 +891,7 @@ async fn first_slash_prompt_with_attachments_consumes_the_prelude_as_ordinary_in
                 content: format!("/extension list\n\n[[AION_FILES]]\n{path}"),
                 msg_id: "attachment".into(),
                 turn_id: None,
+                hidden_input_id: None,
                 files: vec![path.clone()],
                 attachments: Vec::new(),
                 inject_skills: vec![],
@@ -891,5 +924,79 @@ async fn first_slash_prompt_with_attachments_consumes_the_prelude_as_ordinary_in
             "{attachment}"
         );
         agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn transcript_load_applies_only_complete_success_for_a_capable_session() {
+    use aionui_db::{IConversationRepository, SqliteConversationRepository, models::MessageRow};
+
+    for surface in [
+        "transcript-complete",
+        "transcript-no-session-capability",
+        "transcript-no-marker",
+        "transcript-unavailable",
+        "transcript-partial",
+    ] {
+        let (temp, registry, sync, db) = setup_with_db().await;
+        sync.repo()
+            .update_session_id_for_user(USER, CONVERSATION, SESSION)
+            .await
+            .unwrap();
+        let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+        let legacy = MessageRow {
+            id: "existing-host-history".into(),
+            conversation_id: CONVERSATION.into(),
+            msg_id: None,
+            r#type: "text".into(),
+            content: r#"{"content":"Only in Host DB"}"#.into(),
+            position: Some("left".into()),
+            status: Some("finish".into()),
+            hidden: false,
+            created_at: 20,
+            backend_turn_id: None,
+        };
+        repo.insert_message(USER, &legacy).await.unwrap();
+        let (manager, domain_rx) = build_session(temp.path(), &registry, &sync, "aelix-acp", "load.txt", surface).await;
+        let manager = manager.with_conversation_repository(Some(repo.clone()));
+        sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+        let result = manager.warmup_session().await;
+        if surface == "transcript-unavailable" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Native session history is unavailable")
+            );
+        } else {
+            result.unwrap();
+        }
+        if surface == "transcript-complete" {
+            assert!(
+                repo.get_message(USER, CONVERSATION, &legacy.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let content: String = sqlx::query_scalar("SELECT content FROM messages WHERE acp_native_entry_id = 'one'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&content).unwrap()["content"],
+                "From CLI"
+            );
+        } else {
+            assert_eq!(
+                repo.get_message(USER, CONVERSATION, &legacy.id).await.unwrap(),
+                Some(legacy)
+            );
+        }
+        let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM acp_transcript_display_archive")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(surface == "transcript-complete"), "{surface}");
+        AgentInstance::Acp(Arc::new(manager)).kill_and_wait(None).await;
     }
 }
