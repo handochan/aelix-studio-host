@@ -42,6 +42,25 @@ pub(crate) fn is_catalog_entry(meta: &AgentMetadata) -> bool {
 }
 
 impl StudioAelixLaunch {
+    /// Parses the descriptor Studio supplied at startup and logs, without any
+    /// path, why it was not accepted. Otherwise Aelix would only show as missing.
+    pub(crate) fn parse_and_report(raw: &str) -> Option<Self> {
+        let Some(launch) = Self::parse(raw) else {
+            tracing::warn!(
+                reason = "invalid_descriptor",
+                "Studio Aelix launch descriptor was rejected; builtin Aelix is unavailable"
+            );
+            return None;
+        };
+        if launch.resolve_command().is_none() {
+            tracing::warn!(
+                reason = "unsupported_launch",
+                "Studio Aelix launch form, interpreter or launcher file was not accepted; builtin Aelix is unavailable"
+            );
+        }
+        Some(launch)
+    }
+
     pub(crate) fn parse(raw: &str) -> Option<Self> {
         let launch: Self = serde_json::from_str(raw).ok()?;
         (is_absolute_path(&launch.command)
@@ -213,11 +232,9 @@ mod tests {
         )
         .unwrap();
         let launch = StudioAelixLaunch::parse(&input.to_string()).unwrap();
-        let output = aionui_runtime::Builder::new(launch.resolve_command().unwrap())
-            .args(&launch.args)
-            .output()
-            .await
-            .unwrap();
+        let mut builder = aionui_runtime::Builder::new(launch.resolve_command().unwrap());
+        builder.args(&launch.args);
+        let output = builder.output().await.unwrap();
         assert!(output.status.success());
         assert_eq!(
             serde_json::from_slice::<Value>(&output.stdout).unwrap(),

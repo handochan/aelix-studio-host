@@ -149,7 +149,7 @@ impl AgentRegistry {
             ProbePolicy::default(),
             Some(StudioAelixState {
                 operator,
-                launch: descriptor.and_then(crate::studio_aelix::StudioAelixLaunch::parse),
+                launch: descriptor.and_then(crate::studio_aelix::StudioAelixLaunch::parse_and_report),
                 health: std::sync::Mutex::new(None),
             }),
         )
@@ -1390,7 +1390,10 @@ fn derive_management_status(meta: &AgentMetadata, reason: Option<&UnavailableRea
     match meta.last_check_status {
         Some(AgentSnapshotCheckStatus::Offline) => AgentManagementStatus::Offline,
         Some(AgentSnapshotCheckStatus::Online) => AgentManagementStatus::Online,
-        None if crate::studio_aelix::is_catalog_entry(meta) => AgentManagementStatus::Online,
+        // A user command override replaces the Studio launch and has not been checked yet.
+        None if crate::studio_aelix::is_catalog_entry(meta) && !meta.has_command_override => {
+            AgentManagementStatus::Online
+        }
         None => AgentManagementStatus::Unchecked,
     }
 }
@@ -2179,6 +2182,33 @@ mod tests {
         assert!(refreshed.handshake.available_models.is_none());
         assert!(refreshed.handshake.config_options.is_none());
         assert!(refreshed.handshake.available_commands.is_none());
+    }
+
+    /// The Studio launch counts as online before a check, but a user command
+    /// override replaces that launch and stays unchecked until it is probed.
+    #[tokio::test]
+    async fn builtin_aelix_command_override_is_unchecked_before_a_probe() {
+        let reg = registry().await;
+        let snapshot = reg.diagnostic_snapshot().await;
+        let (meta, _) = snapshot
+            .iter()
+            .find(|(meta, _)| meta.id == crate::studio_aelix::AGENT_ID)
+            .expect("the builtin Aelix row is seeded");
+        let mut meta = meta.clone();
+        meta.available = true;
+        meta.last_check_status = None;
+
+        meta.has_command_override = false;
+        assert!(matches!(
+            derive_management_status(&meta, None),
+            AgentManagementStatus::Online
+        ));
+
+        meta.has_command_override = true;
+        assert!(matches!(
+            derive_management_status(&meta, None),
+            AgentManagementStatus::Unchecked
+        ));
     }
 
     /// `diagnostic_snapshot` returns one entry per row, populates a

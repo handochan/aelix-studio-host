@@ -167,6 +167,9 @@ jobs:
       - name: ACP child stdin backpressure and revocation
         run: |
           cargo test --locked -p aionui-ai-agent --lib acp_relay_windows_child_stdin_ -- --test-threads=1
+      - name: Builtin Aelix launch descriptor on Windows
+        run: |
+          cargo test --locked -p aionui-ai-agent --lib studio_aelix::tests:: -- --test-threads=1
 
   release-scripts:
     name: Release scripts
