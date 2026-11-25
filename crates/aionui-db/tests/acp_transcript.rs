@@ -118,7 +118,23 @@ async fn migration_preserves_legacy_hidden_rows_and_display() {
     let repo = SqliteConversationRepository::new(pool.clone());
     create(&repo, "conversation").await;
     let hidden = row("old-hidden", true, "same text");
-    repo.insert_message(OWNER, &hidden).await.unwrap();
+    // Seed the pre-transcript schema before running the current repository.
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, msg_id, type, content, position, status, hidden, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&hidden.id)
+    .bind(&hidden.conversation_id)
+    .bind(&hidden.msg_id)
+    .bind(&hidden.r#type)
+    .bind(&hidden.content)
+    .bind(&hidden.position)
+    .bind(&hidden.status)
+    .bind(hidden.hidden)
+    .bind(hidden.created_at)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     legacy.migrations = migrator.migrations;
     legacy.run(&pool).await.unwrap();
@@ -595,4 +611,82 @@ async fn guarded_fork_keeps_the_display_reset_of_its_native_prefix() {
             .unwrap();
         assert_eq!(active, [recent.content.clone()]);
     }
+}
+
+#[tokio::test]
+async fn live_input_stays_on_latest_page_after_a_five_thousand_row_replay_append() {
+    let (repo, _db) = setup().await;
+    let snapshot = |count| {
+        (1..=count)
+            .map(|n| replay(&format!("replay-{n}"), &format!("entry-{n}"), "history"))
+            .collect()
+    };
+    repo.apply_acp_transcript(OWNER, "conversation", "acp", snapshot(2))
+        .await
+        .unwrap();
+    let prefix = visible_history(&repo).await;
+    assert_eq!(prefix.len(), 2);
+    let wall_time = prefix[1].created_at;
+
+    repo.apply_acp_transcript(OWNER, "conversation", "acp", snapshot(5002))
+        .await
+        .unwrap();
+    for original in &prefix {
+        assert_eq!(
+            repo.get_message(OWNER, "conversation", &original.id)
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(original)
+        );
+    }
+    let tail = repo
+        .get_message(OWNER, "conversation", "replay-5002")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tail.created_at, wall_time + 5000);
+
+    // As in /messages, the caller starts with wall time and publishes the
+    // timestamp actually committed by the repository.
+    let mut live = row("live-input", false, "next Host input");
+    live.created_at = wall_time + 1;
+    let committed = repo.insert_message_returning_created_at(OWNER, &live).await.unwrap();
+    assert_eq!(committed, tail.created_at + 1);
+    let page = visible_history(&repo).await;
+    assert_eq!(&page[page.len() - 2], &tail);
+    assert_eq!(page.last().unwrap().id, "live-input");
+    assert_eq!(page.last().unwrap().created_at, committed);
+
+    // Streaming upserts share the same order and preserve the existing
+    // display slot when the tool updates.
+    let mut tool = row("live-tool", false, "tool progress");
+    tool.r#type = "acp_tool_call".into();
+    tool.position = Some("left".into());
+    tool.created_at = committed;
+    repo.upsert_message(OWNER, &tool).await.unwrap();
+    tool.status = Some("error".into());
+    repo.upsert_message(OWNER, &tool).await.unwrap();
+    let page = visible_history(&repo).await;
+    assert_eq!(page[page.len() - 2].id, "live-input");
+    assert_eq!(page.last().unwrap().id, "live-tool");
+    assert_eq!(page.last().unwrap().created_at, committed + 1);
+    assert_eq!(page.last().unwrap().status.as_deref(), Some("error"));
+
+    // The durable head still governs a fresh insertion when its caller
+    // clock has crossed the replay tail but trails a live tool slot.
+    let mut next = row("next-input", false, "another Host input");
+    next.created_at = committed;
+    repo.insert_message(OWNER, &next).await.unwrap();
+    let page = visible_history(&repo).await;
+    assert_eq!(page[page.len() - 2].id, "live-tool");
+    assert_eq!(page.last().unwrap().id, "next-input");
+    assert_eq!(page.last().unwrap().created_at, committed + 2);
+
+    // Conversation-list recency follows activity time even when a display
+    // time from an upsert stretches well into the future.
+    tool.created_at = aionui_common::now_ms() + 60_000;
+    repo.upsert_message(OWNER, &tool).await.unwrap();
+    let conversation = repo.get(OWNER, "conversation").await.unwrap().unwrap();
+    assert!(conversation.updated_at <= aionui_common::now_ms());
 }

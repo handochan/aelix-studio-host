@@ -1,4 +1,4 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use aionui_common::{PaginatedResult, TimestampMs};
 
@@ -65,7 +65,30 @@ impl SqliteConversationRepository {
         }
     }
 
-    async fn insert_message_once(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError> {
+    /// Replayed conversations share one display clock with live inserts.
+    /// Read and extend the latest committed key under the writer lock, so
+    /// rapid appends can lead wall time without hiding the next live row.
+    async fn live_message_times(
+        connection: &mut SqliteConnection,
+        message: &MessageRow,
+    ) -> Result<(TimestampMs, TimestampMs), DbError> {
+        let head: Option<TimestampMs> = sqlx::query_scalar(
+            "SELECT (SELECT MAX(created_at) FROM messages WHERE conversation_id = ?1)
+             WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?1
+                           AND acp_transcript_source IS NOT NULL)",
+        )
+        .bind(&message.conversation_id)
+        .fetch_optional(connection)
+        .await?
+        .flatten();
+        Ok(match head {
+            // Conversation-list recency stays on the activity clock.
+            Some(tail) => (message.created_at.max(tail.saturating_add(1)), aionui_common::now_ms()),
+            None => (message.created_at, message.created_at),
+        })
+    }
+
+    async fn insert_message_once(&self, user_id: &str, message: &MessageRow) -> Result<TimestampMs, DbError> {
         // BEGIN IMMEDIATE claims the writer lock up front (same pattern as
         // `claim_run`) so concurrent inserters queue on SQLite's busy handler
         // instead of a read-then-write transaction failing with "database is
@@ -73,7 +96,7 @@ impl SqliteConversationRepository {
         let mut connection = self.pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await?;
 
-        let result: Result<(), DbError> = async {
+        let result: Result<TimestampMs, DbError> = async {
             // Ownership check inside the same transaction as the insert +
             // bump, so parent-chain authorization and the write are atomic.
             let exists: i64 =
@@ -88,6 +111,7 @@ impl SqliteConversationRepository {
                     message.conversation_id
                 )));
             }
+            let (created_at, activity_at) = Self::live_message_times(&mut connection, message).await?;
             sqlx::query(
                 "INSERT INTO messages \
                     (id, conversation_id, msg_id, type, content, position, \
@@ -102,7 +126,7 @@ impl SqliteConversationRepository {
             .bind(&message.position)
             .bind(&message.status)
             .bind(message.hidden)
-            .bind(message.created_at)
+            .bind(created_at)
             .bind(&message.backend_turn_id)
             .execute(&mut *connection)
             .await?;
@@ -111,18 +135,18 @@ impl SqliteConversationRepository {
             // the conversation-list sort floats fresh activity to the top;
             // MAX() keeps recency monotonic under out-of-order upserts.
             sqlx::query("UPDATE conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?")
-                .bind(message.created_at)
+                .bind(activity_at)
                 .bind(&message.conversation_id)
                 .execute(&mut *connection)
                 .await?;
-            Ok(())
+            Ok(created_at)
         }
         .await;
 
         match result {
-            Ok(()) => {
+            Ok(created_at) => {
                 sqlx::query("COMMIT").execute(&mut *connection).await?;
-                Ok(())
+                Ok(created_at)
             }
             Err(error) => {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
@@ -137,6 +161,7 @@ impl SqliteConversationRepository {
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await?;
 
         let result: Result<(), DbError> = async {
+            let (created_at, activity_at) = Self::live_message_times(&mut connection, message).await?;
             let result = sqlx::query(
                 "INSERT INTO messages \
                 (id, conversation_id, msg_id, type, content, position, \
@@ -181,7 +206,7 @@ impl SqliteConversationRepository {
             .bind(&message.position)
             .bind(&message.status)
             .bind(message.hidden)
-            .bind(message.created_at)
+            .bind(created_at)
             .bind(&message.backend_turn_id)
             .bind(user_id)
             .execute(&mut *connection)
@@ -198,7 +223,7 @@ impl SqliteConversationRepository {
             }
 
             sqlx::query("UPDATE conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?")
-                .bind(message.created_at)
+                .bind(activity_at)
                 .bind(&message.conversation_id)
                 .execute(&mut *connection)
                 .await?;
@@ -1074,6 +1099,14 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn insert_message(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError> {
+        self.insert_message_once(user_id, message).await.map(|_| ())
+    }
+
+    async fn insert_message_returning_created_at(
+        &self,
+        user_id: &str,
+        message: &MessageRow,
+    ) -> Result<TimestampMs, DbError> {
         self.insert_message_once(user_id, message).await
     }
 

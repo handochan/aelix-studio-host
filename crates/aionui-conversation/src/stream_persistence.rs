@@ -176,7 +176,7 @@ impl StreamPersistenceAdapter {
             return false;
         }
         let id = ConversationService::mint_msg_id();
-        let row = MessageRow {
+        let mut row = MessageRow {
             id: id.clone(),
             conversation_id: self.conversation_id.clone(),
             msg_id: Some(id),
@@ -191,10 +191,13 @@ impl StreamPersistenceAdapter {
             ),
             backend_turn_id: self.current_backend_turn_id(),
         };
-        if self.repo.insert_message(&self.user_id, &row).await.is_err() {
-            error!("Failed to persist consumed ACP user input");
-            return false;
-        }
+        row.created_at = match self.repo.insert_message_returning_created_at(&self.user_id, &row).await {
+            Ok(created_at) => created_at,
+            Err(_) => {
+                error!("Failed to persist consumed ACP user input");
+                return false;
+            }
+        };
         crate::message_persistence::broadcast_finished_user_message(broadcaster, &self.user_id, &row, text);
         true
     }

@@ -1,6 +1,6 @@
 """Host #4 scope 1 probe using real ACP and native processes.
 
-Use ACP 7b485386 and the candidate or pin from ACP's .github/workflows/test.yml.
+Use the candidate or pin from ACP's .github/workflows/test.yml.
 Build each native workspace with uv sync --all-packages --python 3.12 --locked.
 Run with that workspace's Python and an isolated interpreter:
 
@@ -8,8 +8,10 @@ Run with that workspace's Python and an isolated interpreter:
         --host target/debug/aelix-studio-host --acp-source /path/to/acp/src \
         --aelix .venv/bin/aelix --expect transcript --output /tmp/host-4-candidate
 
-Run with --expect legacy for native 83714045. Every run uses a synthetic
-loopback model and fresh HOME, Host data, native state and adapter state.
+Run with --expect legacy for native 83714045. For the review regressions,
+use ACP a3ce941c and native 7ebb6463 with --review-regressions
+--require-frame-count. Every run uses a synthetic loopback model and fresh
+HOME, Host data, native state and adapter state.
 """
 import argparse
 import asyncio
@@ -158,6 +160,7 @@ async def start_review_cases(host, root, parent_route, assistant, parent_history
     for name, text, outcome in (
         ("failed", "FAIL_NOW hidden review", {"code": -33002}),
         ("cancelled", model.hold_text, {"stopReason": "cancelled"}),
+        ("tool_cancelled", model.tool_only_text, {"stopReason": "cancelled"}),
     ):
         created = await host.api("/api/conversations", "POST", {
             "name": f"transcript {name}", "assistant": {"id": assistant["id"]},
@@ -168,10 +171,15 @@ async def start_review_cases(host, root, parent_route, assistant, parent_history
         await host.api(route + "/runtime/ensure", "POST")
         sid = host_session(root, conversation)
         sent = await host.api(route + "/messages", "POST", {"content": text, "hidden": True})
-        if name == "cancelled":
+        if name in ("cancelled", "tool_cancelled"):
+            kind = "tool_call" if name == "tool_cancelled" else "agent_message_chunk"
+            role = "toolResult" if name == "tool_cancelled" else "assistant"
             async with asyncio.timeout(30):
-                while not any(frame["sessionId"] == sid and frame["sessionUpdate"] == "agent_message_chunk"
-                              and (frame["meta"] or {}).get(META, {}).get("source") == "live" for frame in frames(wire)):
+                while not any(
+                    frame["sessionId"] == sid and frame["sessionUpdate"] == kind
+                    and (coords := (frame["meta"] or {}).get(META, {})).get("source") == "live"
+                    and coords.get("role") == role for frame in frames(wire)
+                ):
                     await asyncio.sleep(0.05)
             await host.api(route + "/cancel", "POST", {"turn_id": sent["turn_id"]})
         await host.idle(route)
@@ -181,6 +189,14 @@ async def start_review_cases(host, root, parent_route, assistant, parent_history
                 await asyncio.sleep(0.05)
         if name == "cancelled":
             model.release_requests.set()
+        if name == "tool_cancelled":
+            model.release_tool_requests.set()
+            assert not any(
+                frame["sessionId"] == sid
+                and frame["sessionUpdate"] in ("agent_message_chunk", "agent_thought_chunk")
+                and (frame["meta"] or {}).get(META, {}).get("source") == "live"
+                for frame in frames(wire)
+            ), "the interrupted tool-only turn must have no assistant deltas"
         assert model.count(text) == 1
         hidden, = [row for row in rows(root, conversation) if row["id"] == sent["msg_id"]]
         assert hidden["hidden"] and hidden["acp_native_entry_id"] and hidden["acp_native_session_id"], hidden
@@ -201,13 +217,15 @@ async def verify_review_cases(args, host, root, env, model, cases):
         route = f"/api/conversations/{conversation}"
         await host.api(route + "/runtime/ensure", "POST")
         timeline = rows(root, conversation)
+        page = (await host.api(route + "/messages"))["items"]
         matching = [row for row in timeline if row["acp_native_entry_id"] == inherited_entry]
-        if name == "cancelled" and not matching:
+        if name in ("cancelled", "tool_cancelled") and not matching:
             # Native can withdraw the unanswered input on Stop. The verified
             # live key still belongs to the archived hidden echo.
+            hidden_text = model.tool_only_text if name == "tool_cancelled" else model.hold_text
             echo, = [row for row in archived(root, conversation) if row[3] == inherited_entry]
-            assert echo[2] and model.hold_text in json.loads(echo[1])["content"]
-            assert all(model.hold_text not in row["content"] for row in timeline if not row["hidden"])
+            assert echo[2] and hidden_text in json.loads(echo[1])["content"]
+            assert all(hidden_text not in row["content"] for row in timeline if not row["hidden"])
         else:
             hidden, = matching
             assert hidden["hidden"]
@@ -216,9 +234,15 @@ async def verify_review_cases(args, host, root, env, model, cases):
         for entry in added[name]:
             appended, = [row for row in timeline if row["acp_native_entry_id"] == entry["entryId"]]
             assert not appended["hidden"]
+            item, = [item for item in page if item["id"] == appended["id"]]
+            assert not item["hidden"]
         assert len([row for row in timeline if json.loads(row["content"]).get("content") == DUPLICATE_PROMPT]) == (
             3 if name == "fork" else 2
         )
+        if name == "tool_cancelled":
+            await host.api(route + "/runtime/restart", "POST")
+            assert rows(root, conversation) == timeline
+            assert (await host.api(route + "/messages"))["items"] == page
     assert len(model.requests) == requested
     await host.stop()
 
@@ -229,7 +253,10 @@ async def scenario(args):
         root = Path(directory).resolve()
         for name in ("home", "agent/agents", "workspace", "host"):
             (root / name).mkdir(parents=True)
-        model = Model(hold_text="HOLD_HIDDEN_REVIEW" if args.review_regressions else None)
+        model = Model(
+            hold_text="HOLD_HIDDEN_REVIEW" if args.review_regressions else None,
+            tool_only_text="TOOL_ONLY_HIDDEN_REVIEW" if args.review_regressions else None,
+        )
         port = await model.start()
         (root / "agent/models.json").write_text(json.dumps({"providers": {"fixture": {
             "baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "synthetic-fixture-key",
@@ -361,6 +388,7 @@ async def scenario(args):
         finally:
             await host.stop()
             model.release_requests.set()
+            model.release_tool_requests.set()
             model.server.close()
             await model.server.wait_closed()
             for name in ("host.log", "wire.jsonl", "cli.log"):

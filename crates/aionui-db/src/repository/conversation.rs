@@ -214,6 +214,16 @@ pub trait IConversationRepository: Send + Sync {
     /// Inserts a new message row.
     async fn insert_message(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError>;
 
+    /// Inserts a message and returns its committed display timestamp.
+    async fn insert_message_returning_created_at(
+        &self,
+        user_id: &str,
+        message: &MessageRow,
+    ) -> Result<TimestampMs, DbError> {
+        self.insert_message(user_id, message).await?;
+        Ok(message.created_at)
+    }
+
     /// Inserts a message row, or merges mutable fields into the existing row with the same ID.
     async fn upsert_message(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError> {
         match self.insert_message(user_id, message).await {

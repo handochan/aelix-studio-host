@@ -3748,7 +3748,7 @@ impl ConversationService {
             .runtime_persistence()
             .allows(conversation_id, RuntimeWriteKind::UserMessage);
         if persisted {
-            let user_msg = aionui_db::models::MessageRow {
+            let mut user_msg = aionui_db::models::MessageRow {
                 id: user_msg_id.clone(),
                 conversation_id: conversation_id.to_owned(),
                 msg_id: Some(user_msg_id.clone()),
@@ -3760,10 +3760,17 @@ impl ConversationService {
                 created_at: self.runtime_persistence().message_time(conversation_id, false),
                 backend_turn_id: None,
             };
-            if let Err(e) = self.conversation_repo.insert_message(user_id, &user_msg).await {
-                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert mid-turn user message");
-                return Err(e.into());
-            }
+            user_msg.created_at = match self
+                .conversation_repo
+                .insert_message_returning_created_at(user_id, &user_msg)
+                .await
+            {
+                Ok(created_at) => created_at,
+                Err(e) => {
+                    warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert mid-turn user message");
+                    return Err(e.into());
+                }
+            };
             info!(msg_id = %user_msg_id, "Mid-turn user message persisted");
             self.broadcaster.broadcast(WebSocketMessage::new(
                 "message.userCreated",
@@ -4027,7 +4034,7 @@ impl ConversationService {
         if row.r#type == "acp" {
             turn_claim.protect_transcript_input(self.conversation_repo.as_ref(), &user_msg_id);
         }
-        let user_msg = aionui_db::models::MessageRow {
+        let mut user_msg = aionui_db::models::MessageRow {
             id: user_msg_id.clone(),
             conversation_id: conversation_id.to_owned(),
             msg_id: Some(user_msg_id.clone()),
@@ -4053,10 +4060,17 @@ impl ConversationService {
         // (with the statusChanged flip) — doing it again would duplicate the
         // row and the live-view bubble.
         if !was_fallback {
-            if let Err(e) = self.conversation_repo.insert_message(user_id, &user_msg).await {
-                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
-                return Err(e.into());
-            }
+            user_msg.created_at = match self
+                .conversation_repo
+                .insert_message_returning_created_at(user_id, &user_msg)
+                .await
+            {
+                Ok(created_at) => created_at,
+                Err(e) => {
+                    warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
+                    return Err(e.into());
+                }
+            };
 
             info!(msg_id = %user_msg_id, "User message persisted");
 

@@ -270,7 +270,7 @@ pub(crate) struct HiddenInputStage {
     chunks: Option<LiveEntry>,
     receipt: Option<NativeMessageKey>,
     ambiguous: bool,
-    streamed_assistant: bool,
+    native_progress: bool,
 }
 
 impl HiddenInputStage {
@@ -321,28 +321,32 @@ impl HiddenInputStage {
             return;
         }
         let entry = &update["_meta"][META];
-        // Native emits an assistant delta after processing its input loop.
-        // A stored receipt for identical injected text can precede a stopped
-        // input loop. A synthetic assistant settlement cannot prove a stream.
+        // Native processes the initial inputs before running the model/tools.
+        // Verified in aelix-ai@7ebb6463:packages/aelix-agent-core/src/aelix_agent_core/loop.py.
+        // A synthetic assistant settlement or adapter child update alone
+        // cannot distinguish a submitted input from an identical injection.
+        let progressed = match (update["sessionUpdate"].as_str(), entry["role"].as_str()) {
+            (Some("agent_message_chunk" | "agent_thought_chunk"), Some("assistant")) => true,
+            (Some("tool_call" | "tool_call_update"), Some("toolResult")) => {
+                update["toolCallId"].as_str().is_some_and(|id| !id.is_empty())
+            }
+            _ => false,
+        };
         if self.receipt.is_some()
-            && matches!(
-                update["sessionUpdate"].as_str(),
-                Some("agent_message_chunk" | "agent_thought_chunk")
-            )
+            && progressed
             && entry["source"] == "live"
-            && entry["role"] == "assistant"
             && entry["streamId"].as_str().is_some_and(|id| !id.is_empty())
             && self.chunks.as_ref().is_some_and(|user| {
                 entry["bindingId"] == user.binding_id && entry["nativeSessionId"] == user.entry.native_session_id
             })
         {
-            self.streamed_assistant = true;
+            self.native_progress = true;
         }
     }
 
     pub(crate) fn finish(self, completed: bool) -> Option<NativeMessageKey> {
         self.receipt
-            .filter(|_| !self.ambiguous && (completed || self.streamed_assistant))
+            .filter(|_| !self.ambiguous && (completed || self.native_progress))
     }
 }
 
@@ -395,7 +399,7 @@ impl TranscriptCapture {
                 chunks: None,
                 receipt: None,
                 ambiguous: false,
-                streamed_assistant: false,
+                native_progress: false,
             },
         )
     }
@@ -613,5 +617,40 @@ mod tests {
         capture.observe(&receipt.to_string());
         capture.observe(&json!({"jsonrpc":"2.0", "id":9, "result":{"stopReason":"cancelled"}}).to_string());
         assert!(guard.take().unwrap().finish(false).is_none());
+    }
+
+    #[test]
+    fn only_tool_progress_from_the_same_request_session_and_binding_verifies_the_receipt() {
+        let session = SessionId::new("acp");
+        for (sid, native, binding, source, role, expected) in [
+            ("acp", "native", "binding", "live", "toolResult", true),
+            ("other", "native", "binding", "live", "toolResult", false),
+            ("acp", "other", "binding", "live", "toolResult", false),
+            ("acp", "native", "other", "live", "toolResult", false),
+            ("acp", "native", "binding", "adapter", "toolResult", false),
+            ("acp", "native", "binding", "live", "assistant", false),
+        ] {
+            let capture = TranscriptCapture::default();
+            capture.set_session(session.clone(), true);
+            let guard = capture
+                .begin_hidden_prompt(&session, &[ContentBlock::from("hidden")])
+                .unwrap();
+            guard.register(|| (RequestId::Number(9), ()));
+            let receipt = user_receipt("input", "stored");
+            capture.observe(&user_chunk(&receipt, "hidden", 0).to_string());
+            capture.observe(&receipt.to_string());
+            capture.observe(
+                &json!({
+                    "jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": {
+                        "sessionUpdate": "tool_call", "toolCallId": "tool", "title": "agent",
+                        "_meta": {META: {"source": source, "role": role, "nativeSessionId": native,
+                                          "bindingId": binding, "streamId": "execution"}}
+                    }}
+                })
+                .to_string(),
+            );
+            capture.observe(&json!({"jsonrpc": "2.0", "id": 9, "result": {"stopReason": "cancelled"}}).to_string());
+            assert_eq!(guard.take().unwrap().finish(false).is_some(), expected);
+        }
     }
 }
