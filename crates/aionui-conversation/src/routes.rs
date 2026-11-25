@@ -445,8 +445,21 @@ async fn ensure_runtime(
             &state.task_manager,
         )
         .await
-        .map_err(ApiError::from)?;
+        .map_err(runtime_ensure_error)?;
     Ok(Json(ApiResponse::ok(response)))
+}
+
+fn runtime_ensure_error(error: ConversationError) -> ApiError {
+    let ConversationError::Acp(error) = error else {
+        return error.into();
+    };
+    if let Some((hint, details)) = error.public_startup_diagnostic() {
+        let code = aionui_ai_agent::AgentSendError::from(error.without_remote_detail("runtime/ensure"))
+            .protocol_error_code()
+            .unwrap_or("BAD_GATEWAY");
+        return ApiError::coded(StatusCode::BAD_GATEWAY, code, hint, Some(details));
+    }
+    ConversationError::Acp(error).into()
 }
 
 async fn restart_runtime(
@@ -638,6 +651,39 @@ async fn active_count(
 #[cfg(test)]
 mod error_mapping_tests {
     use super::*;
+
+    #[test]
+    fn acp_startup_unknown_kind_and_unavailability_keep_generic_gateway_error() {
+        use aionui_ai_agent::AcpError;
+
+        let unknown = AcpError::OtherProtocolError {
+            code: -33004,
+            message: "/private/error".into(),
+            data: Some(serde_json::json!({"kind":"unknown","limitBytes":104})),
+        };
+        for error in [unknown, AcpError::NotConnected] {
+            let app = runtime_ensure_error(ConversationError::Acp(error));
+            assert_eq!(app.status_code(), StatusCode::BAD_GATEWAY);
+            assert_eq!(app.error_code(), "BAD_GATEWAY");
+            assert_eq!(app.public_message(), "Upstream service unavailable.");
+            assert_eq!(app.error_details(), None);
+        }
+    }
+
+    #[test]
+    fn acp_startup_keeps_the_existing_operation_refused_mapping() {
+        let protocol_error = aionui_ai_agent::AcpError::ApplicationError {
+            code: -32004,
+            message: "The requested profile is unavailable".into(),
+            data: Some(serde_json::json!({"kind":"profile_unavailable","profile":"fixture-profile"})),
+        };
+        let base = ApiError::from(ConversationError::Acp(protocol_error.clone()));
+        let app = runtime_ensure_error(ConversationError::Acp(protocol_error));
+        assert_eq!(app.status_code(), base.status_code());
+        assert_eq!(app.error_code(), "USER_AGENT_OPERATION_REFUSED");
+        assert_eq!(app.public_message(), base.public_message());
+        assert_eq!(app.error_details(), base.error_details());
+    }
 
     #[test]
     fn conversation_not_found_maps_to_app_not_found() {

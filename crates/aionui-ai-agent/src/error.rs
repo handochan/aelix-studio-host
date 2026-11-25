@@ -1,5 +1,7 @@
 use crate::protocol::error::AcpError;
 
+pub(crate) const ACP_INITIALIZATION_FAILED: &str = "acp_init_failed: ACP initialization failed";
+
 /// Crate-owned error model for ai-agent business, runtime, and protocol
 /// orchestration code.
 #[derive(Debug, thiserror::Error)]
@@ -7,6 +9,11 @@ use crate::protocol::error::AcpError;
 pub enum AgentError {
     #[error("Bad request: {0}")]
     BadRequest(String),
+    #[error("{message}")]
+    AcpInitialization {
+        message: String,
+        details: serde_json::Value,
+    },
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
     #[error("Forbidden: {0}")]
@@ -83,7 +90,8 @@ impl AgentError {
             | Self::Timeout(message)
             | Self::ConversationArchived(message)
             | Self::WorkspacePathRuntimeUnavailable(message)
-            | Self::Internal(message) => message.clone(),
+            | Self::Internal(message)
+            | Self::AcpInitialization { message, .. } => message.clone(),
             Self::RateLimited => "Rate limited".to_owned(),
             Self::Acp(err) => err.to_string(),
         }
