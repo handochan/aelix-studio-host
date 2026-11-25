@@ -332,22 +332,21 @@ impl AcpError {
     /// Keep the SDK's classification while discarding free-form peer details
     /// at the Host error boundary. HTTP, WS and diagnostics share this error.
     pub(crate) fn without_remote_detail(mut self, method: &str) -> Self {
-        const DETAIL: &str = "ACP request failed";
         match &mut self {
             Self::SessionNotFound { session_id } => *session_id = method.to_owned(),
             Self::ProtocolParseError { message }
             | Self::InvalidRequest { message }
-            | Self::InvalidParams { message } => *message = DETAIL.into(),
+            | Self::InvalidParams { message } => *message = ACP_REQUEST_FAILED.into(),
             Self::ResourceNotFound { resource, message } => {
                 *resource = None;
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
             }
             Self::ApplicationError { code, message, data } => {
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
                 *data = safe_application_data(*code, data.as_ref());
             }
             Self::AgentInternal { message, data, .. } | Self::OtherProtocolError { message, data, .. } => {
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
                 *data = None;
             }
             _ => {}
@@ -445,6 +444,7 @@ impl AcpError {
     }
 }
 
+pub(super) const ACP_REQUEST_FAILED: &str = "ACP request failed";
 pub(super) const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
 
 fn model_selection_count(data: &serde_json::Value) -> Option<u32> {

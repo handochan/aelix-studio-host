@@ -565,15 +565,57 @@ async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_histor
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();
     std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
-    let refusal = json!({
-        "kind": "model_selection_required", "configId": "model", "availableModels": 2, "retryable": false,
-    });
+    let refusal = model_selection_refusal();
     std::fs::write(dir.join("relay-calls.prompt-refusal"), refusal.to_string()).unwrap();
     let host = start_relay_host(dir, fixture(dir).await).await;
     let id = create(&host, dir, "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     ensure_and_discover(&host, &root).await;
+    assert_model_selection_refusal(&host, &id, refusal).await;
+    host.tasks.kill_and_wait(&id, None).await;
+}
 
+#[tokio::test]
+async fn legacy_prompt_model_selection_refusal_hides_peer_text() {
+    let trace = ByteTrace::default();
+    let capture = trace.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || capture.clone())
+            .finish(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let refusal = model_selection_refusal();
+    std::fs::write(dir.join("relay-calls.prompt-refusal"), refusal.to_string()).unwrap();
+    let host = start_relay_host(dir, fixture(dir).await).await;
+    let id = create(&host, dir, "custom-aelix").await;
+    assert_model_selection_refusal(&host, &id, refusal).await;
+    host.tasks.kill_and_wait(&id, None).await;
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("relay-calls.initialize")).unwrap(),
+        "standard"
+    );
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("Received JSON-RPC message"),
+        "legacy SDK tracing must be exercised"
+    );
+    assert!(
+        !log.contains("private-h1-standard"),
+        "peer refusal text reached host diagnostics"
+    );
+}
+
+fn model_selection_refusal() -> Value {
+    json!({"kind": "model_selection_required", "configId": "model", "availableModels": 2, "retryable": false})
+}
+
+async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Value) {
+    let root = format!("{}/api/conversations/{id}", host.url);
     let mut upgrade = host.upgrade();
     upgrade
         .headers_mut()
@@ -618,7 +660,6 @@ async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_histor
     })
     .await
     .unwrap();
-    assert_eq!(live_error["data"]["data"], expected);
 
     let tip = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -632,6 +673,10 @@ async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_histor
                 StatusCode::OK,
             )
             .await;
+            assert!(
+                !history.to_string().contains("private-h1-standard"),
+                "peer text reached history"
+            );
             if let Some(tip) = history["data"]["items"]
                 .as_array()
                 .unwrap()
@@ -645,11 +690,9 @@ async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_histor
     })
     .await
     .unwrap();
+    assert_eq!(live_error["data"]["data"], expected);
     assert_eq!(
         tip,
         json!({"type": "error", "content": expected["message"], "error": expected}),
     );
-
-    drop(websocket);
-    host.tasks.kill_and_wait(&id, None).await;
 }

@@ -1,9 +1,11 @@
 //! Model-selection refusal validation at the ACP stdio boundary.
 
+use std::{borrow::Cow, collections::BTreeMap};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
-use super::error::MODEL_SELECTION_REQUIRED;
+use super::error::{ACP_REQUEST_FAILED, MODEL_SELECTION_REQUIRED};
 
 #[derive(Deserialize, Serialize)]
 struct WireReply<'a> {
@@ -45,52 +47,98 @@ fn valid_model_selection_refusal(raw: &str) -> bool {
 
 fn appears_to_be_model_selection_refusal(reply: &Value) -> bool {
     reply["error"]["code"].as_i64() == Some(-32004)
+        && reply["error"]["message"].is_string()
         && reply["error"]["data"]["kind"].as_str() == Some(MODEL_SELECTION_REQUIRED)
 }
 
-fn drop_invalid_refusal_data(reply: &mut Value, raw: Option<&str>) -> bool {
-    if !appears_to_be_model_selection_refusal(reply) || raw.is_some_and(valid_model_selection_refusal) {
+fn sanitize_refusal(reply: &mut Value, raw: Option<&str>) -> bool {
+    if !appears_to_be_model_selection_refusal(reply) {
         return false;
     }
-    reply["error"].as_object_mut().unwrap().remove("data");
+    let error = reply["error"].as_object_mut().unwrap();
+    if !raw.is_some_and(valid_model_selection_refusal) {
+        error.remove("data");
+    }
+    error.insert("message".into(), Value::String(ACP_REQUEST_FAILED.into()));
     true
+}
+
+fn recover_undecodable_refusal(line: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Tag {
+        kind: String,
+    }
+
+    // Match the SDK's response boundary. Projecting a hybrid or a
+    // sequence-shaped error into a response would falsely confirm rejection.
+    let envelope: BTreeMap<String, &RawValue> = serde_json::from_str(line).ok()?;
+    if envelope.contains_key("method")
+        || envelope.contains_key("result")
+        || !envelope.get("error")?.get().trim_start().starts_with('{')
+    {
+        return None;
+    }
+    let mut reply = wire_refusal(line)?;
+    // A response with a missing or non-string message is invalid even if the
+    // refusal's code and kind can be read from the raw bytes.
+    serde_json::from_str::<String>(reply.error.message.get()).ok()?;
+    let data = reply.error.data?.get();
+    if !data.trim_start().starts_with('{') || serde_json::from_str::<Tag>(data).ok()?.kind != MODEL_SELECTION_REQUIRED {
+        return None;
+    }
+    let message = serde_json::value::to_raw_value(ACP_REQUEST_FAILED).ok()?;
+    reply.error.message = &message;
+    reply.error.data = None;
+    serde_json::to_string(&reply).ok()
 }
 
 /// The SDK first reads lines as `Value`, which folds duplicate keys and can
 /// coerce special objects into scalars. Use that view to identify anything
 /// the SDK would see as this refusal. Only the original JSON can validate it.
-pub(super) fn drop_invalid_model_refusals(line: String, normalized: Option<Value>) -> String {
-    let Some(mut normalized) = normalized else {
-        // A syntactically valid data object can also fail Value decoding. Keep
-        // a recognizable refusal's RPC code and correlation in that case.
-        #[derive(Deserialize)]
-        struct Tag {
-            kind: String,
+/// Replace peer text here so SDK and host diagnostics see the public detail.
+pub(super) fn sanitize_model_refusals(line: String, normalized: Option<Value>) -> String {
+    if line.trim_start().starts_with('[')
+        && let Ok(raw) = serde_json::from_str::<Vec<&RawValue>>(&line)
+    {
+        // Legacy stdio supports batches. Preserve the raw text of siblings
+        // since reserializing a Value can change how the SDK parses them.
+        let mut changed = false;
+        let entries: Vec<_> = raw
+            .into_iter()
+            .map(|raw| {
+                let raw = raw.get();
+                let rewritten = match serde_json::from_str::<Value>(raw) {
+                    Ok(mut reply) => sanitize_refusal(&mut reply, Some(raw)).then(|| reply.to_string()),
+                    Err(_) => recover_undecodable_refusal(raw),
+                };
+                match rewritten {
+                    Some(entry) => {
+                        changed = true;
+                        Cow::Owned(entry)
+                    }
+                    None => Cow::Borrowed(raw),
+                }
+            })
+            .collect();
+        if changed {
+            return format!("[{}]", entries.join(","));
         }
-        let stripped = (|| {
-            let mut reply = wire_refusal(&line)?;
-            let tag: Tag = serde_json::from_str(reply.error.data?.get()).ok()?;
-            if tag.kind != MODEL_SELECTION_REQUIRED {
-                return None;
-            }
-            reply.error.data = None;
-            serde_json::to_string(&reply).ok()
-        })();
-        return stripped.unwrap_or(line);
+        return line;
+    }
+    let Some(mut normalized) = normalized else {
+        // A syntactically valid data object can also fail Value decoding.
+        return recover_undecodable_refusal(&line).unwrap_or(line);
     };
     let changed = if let Some(entries) = normalized.as_array_mut() {
-        // Legacy connections still use the SDK's batch support.
-        if !entries.iter().any(appears_to_be_model_selection_refusal) {
-            return line;
-        }
-        let raw: Vec<&RawValue> = serde_json::from_str(&line).unwrap_or_default();
+        // The normalized view can expose a batch synthesized from a raw
+        // object. No entry has an original JSON object to validate against.
         let mut changed = false;
-        for (index, reply) in entries.iter_mut().enumerate() {
-            changed |= drop_invalid_refusal_data(reply, raw.get(index).map(|value| value.get()));
+        for reply in entries {
+            changed |= sanitize_refusal(reply, None);
         }
         changed
     } else {
-        drop_invalid_refusal_data(&mut normalized, Some(&line))
+        sanitize_refusal(&mut normalized, Some(&line))
     };
     if changed { normalized.to_string() } else { line }
 }
@@ -111,11 +159,15 @@ mod tests {
             {"jsonrpc":"2.0","id":4,"result":null}
         ]"#;
         let original: Value = serde_json::from_str(line).unwrap();
-        let output = drop_invalid_model_refusals(line.into(), Some(original.clone()));
+        let output = sanitize_model_refusals(line.into(), Some(original.clone()));
         let actual: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(actual[0], original[0]);
+        assert_eq!(actual[0]["id"], 1);
+        assert_eq!(actual[0]["error"]["code"], -32004);
+        assert_eq!(actual[0]["error"]["message"], ACP_REQUEST_FAILED);
+        assert_eq!(actual[0]["error"]["data"], original[0]["error"]["data"]);
         assert_eq!(actual[1]["id"], 2);
         assert_eq!(actual[1]["error"]["code"], -32004);
+        assert_eq!(actual[1]["error"]["message"], ACP_REQUEST_FAILED);
         assert!(actual[1]["error"].get("data").is_none());
         assert_eq!(actual[2], original[2]);
         assert_eq!(actual[3], original[3]);
@@ -127,10 +179,49 @@ mod tests {
             "data":{"kind":"model_selection_required","configId":"model",
                 "availableModels":{"$serde_json::private::RawValue":"invalid numeric content"},"retryable":false}}}"#;
         assert!(serde_json::from_str::<Value>(line).is_err());
-        let output = drop_invalid_model_refusals(line.into(), None);
+        let output = sanitize_model_refusals(line.into(), None);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual["id"], "prompt");
         assert_eq!(actual["error"]["code"], -32004);
+        assert_eq!(actual["error"]["message"], ACP_REQUEST_FAILED);
         assert!(actual["error"].get("data").is_none());
+
+        let sibling = r#"{"jsonrpc":"2.0", "id":2, "result":null}"#;
+        let batch = format!("[{line},{sibling}]");
+        let output = sanitize_model_refusals(batch, None);
+        let actual: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(actual[0]["error"]["code"], -32004);
+        assert!(actual[0]["error"].get("data").is_none());
+        assert_eq!(actual[1]["id"], 2);
+        assert!(output.contains(sibling));
+    }
+
+    #[test]
+    fn recovery_does_not_make_malformed_envelopes_into_error_responses() {
+        let data =
+            r#"{"kind":"model_selection_required","availableModels":{"$serde_json::private::RawValue":"invalid"}}"#;
+        for frame in [
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":null,"error":{{"code":-32004,"message":"raw","data":{data}}}}}"#
+            ),
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":null,"error":{{"code":-32004,"message":"raw","data":{data}}}}}"#
+            ),
+            format!(r#"{{"jsonrpc":"2.0","id":1,"error":[-32004,"raw",{data}]}}"#),
+            format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-32004,"message":null,"data":{data}}}}}"#),
+        ] {
+            assert!(serde_json::from_str::<Value>(&frame).is_err());
+            assert_eq!(sanitize_model_refusals(frame.clone(), None), frame);
+        }
+    }
+
+    #[test]
+    fn sanitization_preserves_a_missing_or_non_string_error_message() {
+        let data = r#"{"kind":"model_selection_required","configId":"model","availableModels":2,"retryable":false}"#;
+        for message in ["", r#""message":null,"#] {
+            let frame = format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{{message}"code":-32004,"data":{data}}}}}"#);
+            let normalized: Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(sanitize_model_refusals(frame.clone(), Some(normalized)), frame);
+        }
     }
 }

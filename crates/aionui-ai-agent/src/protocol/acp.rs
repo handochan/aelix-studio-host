@@ -879,7 +879,7 @@ async fn run_sdk_background(
                             ));
                             None
                         } else {
-                            Some(Ok(super::acp_error_wire::drop_invalid_model_refusals(line, normalized)))
+                            Some(Ok(super::acp_error_wire::sanitize_model_refusals(line, normalized)))
                         }
                     }
                     Err(err) => Some(Err(err)),
