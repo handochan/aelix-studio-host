@@ -284,6 +284,7 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         session_id: &str,
     ) -> Result<bool, DbError> {
         let now = now_ms();
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE acp_session SET session_id = ?1, last_active_at = ?2, \
              session_config = CASE WHEN json_valid(session_config) THEN \
@@ -304,9 +305,21 @@ impl IAcpSessionRepository for SqliteAcpSessionRepository {
         .bind(now)
         .bind(conversation_id)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() > 0)
+        let bound = result.rows_affected() > 0;
+        if bound && !session_id.is_empty() {
+            sqlx::query(
+                "UPDATE acp_transcript_display_resets SET session_id = ?
+                 WHERE conversation_id = ? AND session_id = ''",
+            )
+            .bind(session_id)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(bound)
     }
 
     async fn clear_session_id_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError> {

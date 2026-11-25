@@ -17,6 +17,9 @@ pub struct SendMessageData {
     /// Runtime turn ID for backend logs and tests. Not part of the ACP wire protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Host DB echo for an explicitly hidden ACP prompt. Never sent on the wire.
+    #[serde(skip)]
+    pub hidden_input_id: Option<String>,
     /// File paths attached to the message.
     #[serde(default)]
     pub files: Vec<String>,
@@ -335,6 +338,7 @@ mod tests {
             content: "Hello".into(),
             msg_id: "msg-001".into(),
             turn_id: Some("turn-001".into()),
+            hidden_input_id: None,
             files: vec!["/tmp/a.txt".into()],
             attachments: Vec::new(),
             inject_skills: vec!["review".into()],

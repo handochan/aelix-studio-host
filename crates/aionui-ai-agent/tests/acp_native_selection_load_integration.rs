@@ -36,6 +36,17 @@ def options():
         )
     ]
 
+def notification(sid, update):
+    print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update',
+                      'params': {'sessionId': sid, 'update': update}}), flush=True)
+
+def replay(entry, sequence, text, kind='user_message_chunk', part=0):
+    return {'sessionUpdate': kind, 'content': {'type': 'text', 'text': text},
+            '_meta': {'aelix/transcript': {'source': 'replay', 'nativeSessionId': 'native', 'entryId': entry,
+                                          'parentEntryId': None, 'sequence': sequence,
+                                          'role': 'user' if kind == 'user_message_chunk' else 'assistant',
+                                          'part': part}}}
+
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -50,6 +61,9 @@ for line in sys.stdin:
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
             'agentCapabilities': {'loadSession': load_surface != 'legacy-no-load'}, 'authMethods': [],
         }
+        if load_surface.startswith('transcript-'):
+            assert params['clientCapabilities']['_meta']['aelix/transcript'] == {'version': 1}
+            response['result']['agentCapabilities']['_meta'] = {'aelix/transcript': {'version': 1}}
         if load_surface == 'media-wire':
             response['result']['agentCapabilities']['promptCapabilities'] = {'image': True}
         if load_surface == 'fork-recovery':
@@ -60,8 +74,40 @@ for line in sys.stdin:
         resumed = params.get('_meta', {}).get('claudeCode', {}).get('options', {}).get('resume')
         session_id = 'replacement-session' if resumed == 'selector-session' else 'selector-session'
         response['result'] = {'sessionId': session_id, 'configOptions': options()}
+        if load_surface.startswith('transcript-'):
+            response['result']['_meta'] = {'aelix/transcriptCapability': {'version': 1}}
     elif method == 'session/load' and params['sessionId'] == 'selector-session':
         response['result'] = {'configOptions': options()}
+        if load_surface.startswith('transcript-'):
+            sid = params['sessionId']
+            if load_surface == 'transcript-after-hidden':
+                notification(sid, replay('hidden-live', 1, 'Hidden input'))
+                notification(sid, replay('cli-input', 2, 'From CLI'))
+                notification(sid, replay('cli-answer', 3, 'CLI reply', 'agent_message_chunk'))
+                marker = {'version': 1, 'nativeSessionId': 'native', 'leafId': 'cli-answer',
+                          'totalMessages': 3, 'totalFrames': 3, 'recovered': False}
+            else:
+                notification(sid, replay('one', 1, 'From CLI'))
+                marker = {'version': 1, 'nativeSessionId': 'native', 'leafId': 'one',
+                          'totalMessages': 2 if load_surface == 'transcript-partial' else 1, 'recovered': False}
+                if load_surface == 'transcript-untagged-display':
+                    notification(sid, {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': 'tail'}})
+                if load_surface in ('transcript-count-ok', 'transcript-count-extra'):
+                    notification(sid, replay('one', 1, ' tail', part=1))
+                if load_surface in ('transcript-count-ok', 'transcript-missing-final-part'):
+                    marker['totalFrames'] = 2
+                if load_surface == 'transcript-count-extra':
+                    marker['totalFrames'] = 1
+            meta = {}
+            if load_surface != 'transcript-no-session-capability':
+                meta['aelix/transcriptCapability'] = {'version': 1}
+            if load_surface != 'transcript-no-marker':
+                meta['aelix/transcript'] = marker
+            response['result']['_meta'] = meta
+            if load_surface == 'transcript-unavailable':
+                del response['result']
+                response['error'] = {'code': -32603, 'message': 'Native session history is unavailable',
+                                     'data': {'kind': 'native_history_unavailable'}}
         if load_surface == 'legacy':
             model, *remaining = response['result']['configOptions']
             response['result']['configOptions'] = remaining
@@ -95,7 +141,25 @@ for line in sys.stdin:
             print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
                 'sessionId': params['sessionId'], 'update': {'sessionUpdate': 'agent_message_chunk',
                 'content': {'type': 'text', 'text': 'Already started'}}}}), flush=True)
-        if body in ('Busy before work', 'Report activity then busy'):
+        if load_surface in ('transcript-hidden-failed', 'transcript-hidden-cancelled'):
+            sid = params['sessionId']
+            receipt = {'source': 'live', 'nativeSessionId': 'native', 'bindingId': 'binding', 'streamId': 'stream',
+                     'role': 'user', 'status': 'stored', 'entryId': 'hidden-live', 'parentEntryId': None,
+                     'sequence': 1, 'replaced': False}
+            notification(sid, {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': text},
+                               '_meta': {'aelix/transcript': {**receipt, 'part': 0}}})
+            print(json.dumps({'jsonrpc': '2.0', 'method': '_aelix/transcript/settled',
+                              'params': {'sessionId': sid, **receipt}}), flush=True)
+            notification(sid, {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Partial'},
+                               '_meta': {'aelix/transcript': {'source': 'live', 'nativeSessionId': 'native',
+                                                              'bindingId': 'binding', 'streamId': 'assistant',
+                                                              'role': 'assistant'}}})
+            if load_surface == 'transcript-hidden-failed':
+                response['error'] = {'code': -33002, 'message': 'Test post-dispatch failure',
+                                     'data': {'kind': 'turn_failed_after_dispatch', 'retryable': False}}
+            else:
+                response['result'] = {'stopReason': 'cancelled'}
+        elif body in ('Busy before work', 'Report activity then busy'):
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
@@ -252,6 +316,16 @@ async fn assert_selections(
 }
 
 async fn setup() -> (tempfile::TempDir, Arc<AgentRegistry>, Arc<AcpSessionSyncService>) {
+    let (temp, registry, sync, _) = setup_with_db().await;
+    (temp, registry, sync)
+}
+
+async fn setup_with_db() -> (
+    tempfile::TempDir,
+    Arc<AgentRegistry>,
+    Arc<AcpSessionSyncService>,
+    aionui_db::Database,
+) {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("peer.py"), PEER).unwrap();
     let db = init_database_memory().await.unwrap();
@@ -285,7 +359,7 @@ async fn setup() -> (tempfile::TempDir, Arc<AgentRegistry>, Arc<AcpSessionSyncSe
     .await
     .unwrap();
     let sync = AcpSessionSyncService::new(repo);
-    (temp, registry, sync)
+    (temp, registry, sync, db)
 }
 
 async fn check_load(agent_name: &str, expect_native: bool, load_surface: &str) {
@@ -358,6 +432,7 @@ async fn prompt(instance: &AgentInstance, content: &str) -> Result<(), AgentSend
             content: content.into(),
             msg_id: content.into(),
             turn_id: None,
+            hidden_input_id: None,
             files: vec![],
             attachments: Vec::new(),
             inject_skills: vec![],
@@ -518,21 +593,14 @@ async fn fresh_model_refusal_preserves_rules_in_the_same_process() {
 }
 
 #[tokio::test]
-async fn fresh_model_refusal_preserves_rules_after_reopen() {
+async fn fresh_model_refusal_preserves_rules_after_transcript_reopen() {
     check_fresh_model_refusal_preserves_rules(true).await;
 }
 
 async fn check_fresh_model_refusal_preserves_rules(reopen: bool) {
-    let (temp, registry, sync) = setup().await;
-    let mut instance = open_session(
-        temp.path(),
-        &registry,
-        &sync,
-        "aelix-acp",
-        "fresh-refusal.txt",
-        "generic",
-    )
-    .await;
+    let (temp, registry, sync, db) = setup_with_db().await;
+    let surface = if reopen { "transcript-complete" } else { "generic" };
+    let mut instance = open_session(temp.path(), &registry, &sync, "aelix-acp", "fresh-refusal.txt", surface).await;
     assert!(!prelude_pending(&sync).await, "a fresh prelude starts in memory");
 
     let error = prompt(&instance, "Choose a model first").await.unwrap_err();
@@ -541,15 +609,28 @@ async fn check_fresh_model_refusal_preserves_rules(reopen: bool) {
     let persisted_after_refusal = prelude_pending(&sync).await;
     if reopen {
         instance.kill_and_wait(None).await;
-        instance = open_session(
-            temp.path(),
-            &registry,
-            &sync,
-            "aelix-acp",
-            "fresh-refusal.txt",
-            "generic",
+        let (manager, domain_rx) =
+            build_session(temp.path(), &registry, &sync, "aelix-acp", "fresh-refusal.txt", surface).await;
+        let repo = Arc::new(aionui_db::SqliteConversationRepository::new(db.pool().clone()));
+        let manager = manager.with_conversation_repository(Some(repo));
+        sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+        manager.warmup_session().await.unwrap();
+        let replayed: String = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id = ? AND acp_native_entry_id = 'one'",
         )
-        .await;
+        .bind(CONVERSATION)
+        .fetch_one(db.pool())
+        .await
+        .expect("the reopen must reconcile the native transcript");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replayed).unwrap()["content"],
+            "From CLI"
+        );
+        assert!(
+            prelude_pending(&sync).await,
+            "transcript reconciliation must retain the prelude"
+        );
+        instance = AgentInstance::Acp(Arc::new(manager));
     }
     prompt(&instance, "After selecting a model").await.unwrap();
     prompt(&instance, "Second explicit send").await.unwrap();
@@ -1020,6 +1101,7 @@ async fn first_slash_prompt_with_attachments_consumes_the_prelude_as_ordinary_in
                 content: format!("/extension list\n\n[[AION_FILES]]\n{path}"),
                 msg_id: "attachment".into(),
                 turn_id: None,
+                hidden_input_id: None,
                 files: vec![path.clone()],
                 attachments: Vec::new(),
                 inject_skills: vec![],
@@ -1052,5 +1134,176 @@ async fn first_slash_prompt_with_attachments_consumes_the_prelude_as_ordinary_in
             "{attachment}"
         );
         agent.kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn transcript_load_applies_only_complete_success_for_a_capable_session() {
+    use aionui_db::{IConversationRepository, SqliteConversationRepository, models::MessageRow};
+
+    for surface in [
+        "transcript-complete",
+        "transcript-no-session-capability",
+        "transcript-no-marker",
+        "transcript-unavailable",
+        "transcript-partial",
+        "transcript-untagged-display",
+        "transcript-missing-final-part",
+        "transcript-count-extra",
+        "transcript-count-ok",
+    ] {
+        let (temp, registry, sync, db) = setup_with_db().await;
+        sync.repo()
+            .update_session_id_for_user(USER, CONVERSATION, SESSION)
+            .await
+            .unwrap();
+        let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+        let legacy = MessageRow {
+            id: "existing-host-history".into(),
+            conversation_id: CONVERSATION.into(),
+            msg_id: None,
+            r#type: "text".into(),
+            content: r#"{"content":"Only in Host DB"}"#.into(),
+            position: Some("left".into()),
+            status: Some("finish".into()),
+            hidden: false,
+            created_at: 20,
+            backend_turn_id: None,
+        };
+        repo.insert_message(USER, &legacy).await.unwrap();
+        let (manager, domain_rx) = build_session(temp.path(), &registry, &sync, "aelix-acp", "load.txt", surface).await;
+        let manager = manager.with_conversation_repository(Some(repo.clone()));
+        sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+        let result = manager.warmup_session().await;
+        if surface == "transcript-unavailable" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Native session history is unavailable")
+            );
+        } else {
+            result.unwrap();
+        }
+        let applied = matches!(surface, "transcript-complete" | "transcript-count-ok");
+        if applied {
+            assert!(
+                repo.get_message(USER, CONVERSATION, &legacy.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let content: String = sqlx::query_scalar("SELECT content FROM messages WHERE acp_native_entry_id = 'one'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&content).unwrap()["content"],
+                if surface == "transcript-count-ok" {
+                    "From CLI tail"
+                } else {
+                    "From CLI"
+                }
+            );
+        } else {
+            assert_eq!(
+                repo.get_message(USER, CONVERSATION, &legacy.id).await.unwrap(),
+                Some(legacy)
+            );
+        }
+        let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM acp_transcript_display_archive")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(applied), "{surface}");
+        AgentInstance::Acp(Arc::new(manager)).kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_hidden_prompt_keeps_its_native_key_and_syncs_cli_history() {
+    verify_hidden_outcome("transcript-hidden-failed").await;
+}
+
+#[tokio::test]
+async fn cancelled_hidden_prompt_keeps_its_native_key_and_syncs_cli_history() {
+    verify_hidden_outcome("transcript-hidden-cancelled").await;
+}
+
+async fn verify_hidden_outcome(surface: &str) {
+    use aionui_db::{IConversationRepository, SqliteConversationRepository, models::MessageRow};
+
+    let (temp, registry, sync, db) = setup_with_db().await;
+    let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+    let (manager, domain_rx) = build_session(temp.path(), &registry, &sync, "aelix-acp", "hidden.txt", surface).await;
+    let manager = manager.with_conversation_repository(Some(repo.clone()));
+    sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+    manager.warmup_session().await.unwrap();
+    let agent = AgentInstance::Acp(Arc::new(manager));
+    let hidden = MessageRow {
+        id: "hidden-echo".into(),
+        conversation_id: CONVERSATION.into(),
+        msg_id: Some("hidden-echo".into()),
+        r#type: "text".into(),
+        content: r#"{"content":"Hidden input"}"#.into(),
+        position: Some("right".into()),
+        status: Some("finish".into()),
+        hidden: true,
+        created_at: 20,
+        backend_turn_id: None,
+    };
+    repo.insert_message(USER, &hidden).await.unwrap();
+
+    let result = agent
+        .send_message(SendMessageData {
+            content: "Hidden input".into(),
+            msg_id: "turn-output".into(),
+            turn_id: None,
+            hidden_input_id: Some(hidden.id.clone()),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            inject_skills: Vec::new(),
+        })
+        .await;
+    if surface == "transcript-hidden-failed" {
+        assert_eq!(result.unwrap_err().stream_error().protocol_code, Some(-33002));
+    } else {
+        result.unwrap();
+    }
+    let native: (String, String) =
+        sqlx::query_as("SELECT acp_native_session_id, acp_native_entry_id FROM messages WHERE id = 'hidden-echo'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(native, ("native".into(), "hidden-live".into()));
+    agent.kill_and_wait(None).await;
+
+    for _ in 0..2 {
+        let (manager, domain_rx) = build_session(
+            temp.path(),
+            &registry,
+            &sync,
+            "aelix-acp",
+            "loaded.txt",
+            "transcript-after-hidden",
+        )
+        .await;
+        let manager = manager.with_conversation_repository(Some(repo.clone()));
+        sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+        manager.warmup_session().await.unwrap();
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT acp_native_entry_id, hidden FROM messages ORDER BY created_at, id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("hidden-live".into(), true),
+                ("cli-input".into(), false),
+                ("cli-answer".into(), false)
+            ]
+        );
+        AgentInstance::Acp(Arc::new(manager)).kill_and_wait(None).await;
     }
 }

@@ -314,7 +314,7 @@ impl AcpAgentManager {
             if !self.params.mcp_servers.is_empty() {
                 load_req = load_req.mcp_servers(self.params.mcp_servers.clone());
             }
-            let (load_response, legacy_models) = match self.protocol.load_session(load_req).await {
+            let (load_response, legacy_models, transcript) = match self.protocol.load_session(load_req).await {
                 Ok(r) => r,
                 Err(e) if is_acp_session_not_found(&e) => {
                     return self.rebuild_after_acp_session_not_found(session_id, e).await;
@@ -351,7 +351,12 @@ impl AcpAgentManager {
             self.emit_snapshot_events().await;
 
             return match self.reconcile_session(session_id).await {
-                Ok(()) => Ok(session_id.to_owned()),
+                Ok(()) => {
+                    if let Some(snapshot) = transcript {
+                        self.apply_transcript(session_id, snapshot).await?;
+                    }
+                    Ok(session_id.to_owned())
+                }
                 Err(e) if is_acp_session_not_found(&e) => {
                     self.rebuild_after_session_not_found(session_id, Some(session_id), &e)
                         .await
@@ -486,6 +491,47 @@ impl AcpAgentManager {
         }
     }
 
+    async fn apply_transcript(
+        &self,
+        session_id: &str,
+        snapshot: crate::protocol::acp_transcript::Snapshot,
+    ) -> Result<(), AgentError> {
+        let Some(repo) = &self.conversation_repo else {
+            return Ok(());
+        };
+        let conversation_id = &self.params.conversation_id;
+        let rows = match super::transcript_display::project(snapshot, conversation_id) {
+            Ok(rows) => rows,
+            Err(reason) => {
+                warn!(
+                    conversation_id,
+                    reason, "ACP transcript replay kept the prior conversation history"
+                );
+                return Ok(());
+            }
+        };
+        match repo
+            .apply_acp_transcript(&self.params.user_id, conversation_id, session_id, rows)
+            .await
+        {
+            Ok(aionui_db::AcpTranscriptApply::Applied { displayed, archived }) => {
+                tracing::info!(conversation_id, displayed, archived, "Applied ACP transcript replay");
+            }
+            Ok(aionui_db::AcpTranscriptApply::UnidentifiedHiddenInput) => {
+                tracing::info!(
+                    conversation_id,
+                    "Kept stored ACP history because a hidden input lacks a native receipt"
+                );
+            }
+            Ok(aionui_db::AcpTranscriptApply::Unchanged | aionui_db::AcpTranscriptApply::DisplayReset) => {}
+            Err(_) => {
+                tracing::error!(conversation_id, "Failed to store ACP transcript replay");
+                return Err(AgentError::internal("Could not store session history"));
+            }
+        }
+        Ok(())
+    }
+
     /// Send a prompt to an already-established session.
     pub(super) async fn prompt_existing_session(
         &self,
@@ -531,7 +577,41 @@ impl AcpAgentManager {
         // earlier turn cannot override a later benign empty turn.
         self.process.clear_stderr().await;
 
-        let prompt_response = match self.protocol.prompt(request, data.turn_id.as_deref()).await {
+        let hidden = data
+            .hidden_input_id
+            .as_deref()
+            .zip(self.conversation_repo.as_ref())
+            .and_then(|(id, repo)| {
+                let capture = self
+                    .protocol
+                    .transcript
+                    .begin_hidden_prompt(&request.session_id, &request.prompt)?;
+                Some((id, repo, capture))
+            });
+        let result = self
+            .protocol
+            .prompt(
+                request,
+                data.turn_id.as_deref(),
+                hidden.as_ref().map(|(_, _, capture)| capture),
+            )
+            .await;
+        // Save a verified user entry even when the turn fails or is
+        // cancelled. On an interrupted input loop, a lone matching receipt
+        // could instead belong to an injected input (native harness/core.py).
+        let completed = result
+            .as_ref()
+            .is_ok_and(|response| response.stop_reason == agent_client_protocol::schema::v1::StopReason::EndTurn);
+        if let Some((input_id, repo, capture)) = hidden
+            && let Some(native) = capture.take().and_then(|stage| stage.finish(completed))
+            && repo
+                .bind_acp_hidden_input(&self.params.user_id, &self.params.conversation_id, input_id, &native)
+                .await
+                .is_err()
+        {
+            warn!(conversation_id = %self.params.conversation_id, "Could not store ACP hidden input receipt");
+        }
+        let prompt_response = match result {
             Ok(response) => response,
             Err(error) => {
                 let prelude_change = match consumed_prelude {
@@ -1806,6 +1886,7 @@ mod tests {
             content: content.clone(),
             msg_id: "m1".into(),
             turn_id: None,
+            hidden_input_id: None,
             files: vec![img],
             attachments: Vec::new(),
             inject_skills: vec![],
@@ -1839,6 +1920,7 @@ mod tests {
             content,
             msg_id: "m2".into(),
             turn_id: None,
+            hidden_input_id: None,
             files: vec![img.clone(), pdf.clone()],
             attachments: Vec::new(),
             inject_skills: vec![],
@@ -1892,6 +1974,7 @@ mod tests {
             content: content.clone(),
             msg_id: "m4".into(),
             turn_id: None,
+            hidden_input_id: None,
             files: vec![img.clone()],
             attachments: Vec::new(),
             inject_skills: vec![],
@@ -1925,6 +2008,7 @@ mod tests {
             content: content.clone(),
             msg_id: "m3".into(),
             turn_id: None,
+            hidden_input_id: None,
             files: vec![img_path.clone()],
             attachments: Vec::new(),
             inject_skills: vec![],

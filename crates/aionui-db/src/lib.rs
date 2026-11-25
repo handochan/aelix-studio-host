@@ -33,6 +33,7 @@ pub use models::{
     UpsertAssistantPreferenceParams, UpsertConversationAssistantSnapshotParams, UpsertOverrideParams, UserOrderRow,
     UserStatus, UserType,
 };
+pub use repository::acp_transcript::{AcpTranscriptApply, AcpTranscriptInputGuard, AcpTranscriptRow, NativeMessageKey};
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
     ConversationFilters, ConversationRowUpdate, MentionableCandidatesParams, MessagePageCursor, MessagePageDirection,

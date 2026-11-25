@@ -1,6 +1,7 @@
 use aionui_common::{PaginatedResult, TimestampMs};
 use serde::{Deserialize, Serialize};
 
+use super::acp_transcript::{AcpTranscriptApply, AcpTranscriptInputGuard, AcpTranscriptRow, NativeMessageKey};
 use crate::error::DbError;
 use crate::models::{
     ConversationArtifactRow, ConversationAssistantSnapshotRow, ConversationRow, MessageRow,
@@ -183,8 +184,45 @@ pub trait IConversationRepository: Send + Sync {
         Ok(None)
     }
 
+    /// Keep an in-flight composer echo out of a completed replay replacement.
+    fn protect_acp_transcript_input(&self, _message_id: &str) -> Option<AcpTranscriptInputGuard> {
+        None
+    }
+
+    /// Record a verified native storage receipt on the submitted hidden row.
+    async fn bind_acp_hidden_input(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _message_id: &str,
+        _native: &NativeMessageKey,
+    ) -> Result<(), DbError> {
+        Err(DbError::Init("ACP transcript storage is unavailable".into()))
+    }
+
+    /// Replace only the replay-owned display history using a complete projection.
+    async fn apply_acp_transcript(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _session_id: &str,
+        _rows: Vec<AcpTranscriptRow>,
+    ) -> Result<AcpTranscriptApply, DbError> {
+        Err(DbError::Init("ACP transcript storage is unavailable".into()))
+    }
+
     /// Inserts a new message row.
     async fn insert_message(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError>;
+
+    /// Inserts a message and returns its committed display timestamp.
+    async fn insert_message_returning_created_at(
+        &self,
+        user_id: &str,
+        message: &MessageRow,
+    ) -> Result<TimestampMs, DbError> {
+        self.insert_message(user_id, message).await?;
+        Ok(message.created_at)
+    }
 
     /// Inserts a message row, or merges mutable fields into the existing row with the same ID.
     async fn upsert_message(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError> {
@@ -226,6 +264,10 @@ pub trait IConversationRepository: Send + Sync {
     /// and `created_at` are preserved verbatim; `backend_turn_id` is dropped
     /// (it anchors the SOURCE conversation's backend thread and would poison
     /// fork-point resolution in the copy). Returns the number of copied rows.
+    /// The target keeps the wall-clock activity time set at fork creation.
+    ///
+    /// A guarded ACP HEAD fork can carry the entry IDs of hidden inputs.
+    /// The child still needs a completed replay to verify its native session ID.
     ///
     /// Both conversations must belong to `user_id`. Default is unsupported so
     /// test doubles that never fork don't have to implement it.
@@ -235,6 +277,7 @@ pub trait IConversationRepository: Send + Sync {
         _source_conversation_id: &str,
         _target_conversation_id: &str,
         _cursor: (TimestampMs, &str),
+        _inherit_acp_hidden: bool,
     ) -> Result<u64, DbError> {
         Err(DbError::Init(
             "copy_messages_up_to is not supported by this repository".into(),

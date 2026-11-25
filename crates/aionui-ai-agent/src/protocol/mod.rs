@@ -4,6 +4,7 @@ mod acp_error_wire;
 pub(crate) mod acp_init_budget;
 pub mod acp_relay;
 mod acp_relay_writer;
+pub(crate) mod acp_transcript;
 pub mod byte_grants;
 
 pub(crate) mod custom_agent_probe;

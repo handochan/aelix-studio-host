@@ -50,6 +50,7 @@ use tracing::{debug, info, warn};
 use crate::protocol::acp_dialect;
 use crate::protocol::acp_init_budget::InitBudget;
 use crate::protocol::acp_relay::{self, RelayCall, RelayConnection, RelayError, RelayWriteAdmission};
+use crate::protocol::acp_transcript::{self, CaptureGuard, HiddenInputStage, ReplayStage, Snapshot, TranscriptCapture};
 use crate::protocol::error::AcpError;
 use crate::protocol::events::{self as stream_event, AgentStreamEvent};
 
@@ -111,6 +112,10 @@ fn build_initialize_request() -> InitializeRequest {
     let mut caps = ClientCapabilities::default();
     caps.terminal = true;
     caps.session = Some(session_caps);
+    caps.meta = Some(serde_json::Map::from_iter([(
+        acp_transcript::META.into(),
+        serde_json::json!({ "version": 1 }),
+    )]));
     InitializeRequest::new(ProtocolVersion::LATEST)
         .client_info(Implementation::new(ACP_CLIENT_NAME, ACP_CLIENT_VERSION))
         .client_capabilities(caps)
@@ -160,6 +165,7 @@ pub struct AcpProtocol {
     /// Owned by the outer struct; an `Arc` clone is captured by the SDK
     /// background task's `on_receive_notification` closure.
     replay_suppression: Arc<AtomicBool>,
+    pub(crate) transcript: Arc<TranscriptCapture>,
     /// Client-hosted terminals for this connection (ACP `terminal/*`).
     /// Shared with the SDK background task's request handlers; torn down
     /// (all processes killed) when the protocol drops.
@@ -197,6 +203,7 @@ impl AcpProtocol {
         let relay = Arc::new(RelayConnection::new(relay_candidate, standalone));
         let private_peer_diagnostics = private_peer_diagnostics || relay.offer_host_bytes;
         let replay_suppression = Arc::new(AtomicBool::new(false));
+        let transcript = Arc::new(TranscriptCapture::default());
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
         log_acp_initialize_start(init_budget);
@@ -224,6 +231,7 @@ impl AcpProtocol {
             shutdown_rx,
             Arc::clone(&alive),
             Arc::clone(&replay_suppression),
+            Arc::clone(&transcript),
             Arc::clone(&terminal_registry),
             Arc::clone(&relay),
             private_peer_diagnostics,
@@ -266,6 +274,7 @@ impl AcpProtocol {
             alive,
             initialize_response: Arc::new(RwLock::new(Some(init_response))),
             replay_suppression,
+            transcript,
             terminal_registry,
             relay,
             private_peer_diagnostics,
@@ -320,49 +329,75 @@ impl AcpProtocol {
     ) -> Result<(NewSessionResponse, Option<serde_json::Value>), AcpError> {
         let nonce = self.relay.prepare_open(&mut req.meta);
         let (response, models) = self
-            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new)
+            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_new, None)
             .await?;
         let response: NewSessionResponse = response;
+        self.transcript.set_session(
+            response.session_id.clone(),
+            self.supports_session_transcript(response.meta.as_ref()),
+        );
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok((response, models))
     }
 
-    /// Load (resume) an existing ACP session.
-    ///
-    /// Backends that support `session/load` (e.g. Codex) will replay the
-    /// entire conversation as `session/update` notifications between the
-    /// moment the request is sent and the moment the response returns.
-    /// Those replayed events are historical and must not reach the UI —
-    /// the frontend already renders history from the local DB. The RAII
-    /// `ReplaySuppressionGuard` flips `replay_suppression` on for the
-    /// duration of the request so the SDK notification handler skips the
-    /// UI broadcast path for replay events.
-    ///
-    /// Note: Claude resumes via `session/new` with `_meta.claudeCode.options.resume`
-    /// and never calls this method, so it is unaffected by the guard.
-    ///
-    /// Like [`Self::new_session`], returns the raw top-level `models` value
-    /// alongside the typed response for legacy-surface agents.
+    /// Load an existing session, suppressing historical UI events. A v1
+    /// replay becomes available to storage only after its completed response.
     pub async fn load_session(
         &self,
         mut req: LoadSessionRequest,
-    ) -> Result<(LoadSessionResponse, Option<serde_json::Value>), AcpError> {
+    ) -> Result<(LoadSessionResponse, Option<serde_json::Value>, Option<Snapshot>), AcpError> {
         let _guard = ReplaySuppressionGuard::new(&self.replay_suppression);
         let nonce = self.relay.prepare_open(&mut req.meta);
         let sid = req.session_id.clone();
+        let replay = if self.supports_transcript() {
+            self.transcript.begin_load(sid.clone())
+        } else {
+            None
+        };
         let (response, models) = self
-            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load)
+            .send_request_capturing_legacy_models(req, AGENT_METHOD_NAMES.session_load, replay.as_ref())
             .await?;
         let response: LoadSessionResponse = response;
+        let capable = self.supports_session_transcript(response.meta.as_ref());
+        self.transcript.set_session(sid.clone(), capable);
         self.relay.opened(sid, nonce, response.meta.as_ref());
-        Ok((response, models))
+        let snapshot = if let Some(stage) = replay.and_then(CaptureGuard::take).filter(|_| capable) {
+            match stage.finish(response.meta.as_ref()) {
+                Ok(snapshot) => snapshot,
+                Err(reason) => {
+                    warn!(reason, "ACP transcript replay kept the prior conversation history");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Ok((response, models, snapshot))
+    }
+
+    fn supports_transcript(&self) -> bool {
+        self.initialize_response
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|response| {
+                acp_transcript::version_one(response.agent_capabilities.meta.as_ref(), acp_transcript::META)
+            })
+    }
+
+    fn supports_session_transcript(&self, meta: Option<&agent_client_protocol::schema::v1::Meta>) -> bool {
+        self.supports_transcript() && acp_transcript::version_one(meta, acp_transcript::CAPABILITY)
     }
 
     /// Fork an existing ACP session into a new session.
     pub async fn fork_session(&self, mut req: ForkSessionRequest) -> Result<ForkSessionResponse, AcpError> {
         let nonce = self.relay.prepare_open(&mut req.meta);
         let response = self.send_request(req, AGENT_METHOD_NAMES.session_fork).await?;
+        self.transcript.set_session(
+            response.session_id.clone(),
+            self.supports_session_transcript(response.meta.as_ref()),
+        );
         self.relay
             .opened(response.session_id.clone(), nonce, response.meta.as_ref());
         Ok(response)
@@ -376,6 +411,7 @@ impl AcpProtocol {
     /// Close an ACP session.
     pub async fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, AcpError> {
         self.relay.invalidate();
+        self.transcript.set_session(req.session_id.clone(), false);
         self.send_request(req, AGENT_METHOD_NAMES.session_close).await
     }
 
@@ -383,7 +419,12 @@ impl AcpProtocol {
     ///
     /// Blocks until the agent returns a `PromptResponse` (turn completed).
     /// Streaming events arrive via the `event_tx` broadcast channel.
-    pub async fn prompt(&self, req: PromptRequest, turn_id: Option<&str>) -> Result<PromptResponse, AcpError> {
+    pub async fn prompt(
+        &self,
+        req: PromptRequest,
+        turn_id: Option<&str>,
+        hidden: Option<&CaptureGuard<'_, HiddenInputStage>>,
+    ) -> Result<PromptResponse, AcpError> {
         // A failure observed before handing the prompt to the SDK retains the
         // existing retry policy. After handoff there is no delivery receipt:
         // connection loss cannot prove that the agent did not execute it.
@@ -392,14 +433,24 @@ impl AcpProtocol {
         if !self.private_peer_diagnostics() {
             log_client_request(method, &json_str(&req));
         }
+        let sid = req.session_id.clone();
+        let send = || {
+            if let Some(hidden) = hidden {
+                hidden.register(|| {
+                    let sent = self.connection.send_request(req);
+                    (sent.id().clone(), sent)
+                })
+            } else {
+                self.connection.send_request(req)
+            }
+        };
         let rsp = if let Some(turn_id) = turn_id.filter(|_| self.relay.candidate) {
             let (tx, rx) = oneshot::channel();
             let relay = self.relay.clone();
             let turn_id = turn_id.to_owned();
             let reply_turn = turn_id.clone();
-            let sid = req.session_id.clone();
             let registered = self.relay.begin_prompt(&sid, &turn_id, || {
-                let sent = self.connection.send_request(req);
+                let sent = send();
                 let id = sent.id().clone();
                 let registered = sent.on_receiving_result(async move |result| {
                     relay.end_prompt(&reply_turn);
@@ -417,7 +468,7 @@ impl AcpProtocol {
             self.relay.end_prompt(&turn_id);
             result
         } else {
-            self.connection.send_request(req).block_task().await
+            send().block_task().await
         };
         if !self.private_peer_diagnostics() {
             log_agent_response(method, &json_or_err(&rsp));
@@ -705,6 +756,7 @@ impl AcpProtocol {
         &self,
         req: Req,
         method: &str,
+        replay: Option<&CaptureGuard<'_, ReplayStage>>,
     ) -> Result<(Req::Response, Option<serde_json::Value>), AcpError>
     where
         Req: agent_client_protocol::JsonRpcRequest + serde::Serialize + std::fmt::Debug,
@@ -715,7 +767,15 @@ impl AcpProtocol {
             log_client_request(method, &json_str(&req));
         }
         let untyped = UntypedMessage::new(method, &req).map_err(|e| self.map_sdk_error(e, method))?;
-        let raw = self.connection.send_request(untyped).block_task().await;
+        let sent = if let Some(replay) = replay {
+            replay.register(|| {
+                let sent = self.connection.send_request(untyped);
+                (sent.id().clone(), sent)
+            })
+        } else {
+            self.connection.send_request(untyped)
+        };
+        let raw = sent.block_task().await;
         if !self.private_peer_diagnostics() {
             log_agent_response(method, &json_or_err(&raw));
         }
@@ -798,6 +858,7 @@ async fn run_sdk_background(
     shutdown_rx: oneshot::Receiver<()>,
     alive: Arc<AtomicBool>,
     replay_suppression: Arc<AtomicBool>,
+    transcript: Arc<TranscriptCapture>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
     relay: Arc<RelayConnection>,
     private_peer_diagnostics: bool,
@@ -853,8 +914,10 @@ async fn run_sdk_background(
             let dialect_event_tx = dialect_event_tx.clone();
             let wire = wire_in.clone();
             let reverse = reverse_tx.clone();
+            let transcript = transcript.clone();
             async move {
                 let line = match line {
+                    Ok(line) if transcript.observe(&line) => return None,
                     Ok(line) if wire.candidate => match wire.classify_incoming(line)? {
                         acp_relay::IncomingFrame::Sdk(line) => Ok(line),
                         acp_relay::IncomingFrame::Reverse(request) => {
@@ -1031,14 +1094,14 @@ async fn run_sdk_background(
             let init_result = {
                 let mut req = build_initialize_request();
                 if handshake_relay.candidate {
-                    let mut meta = serde_json::Map::from_iter([(
+                    let meta = req.client_capabilities.meta.get_or_insert_with(Default::default);
+                    meta.insert(
                         acp_relay::META_KEY.into(),
                         serde_json::json!({ "version": 1, "notifications": false }),
-                    )]);
+                    );
                     if handshake_relay.offer_host_bytes {
                         meta.insert(super::byte_grants::META_KEY.into(), serde_json::json!({ "version": 1 }));
                     }
-                    req.client_capabilities.meta = Some(meta);
                 }
                 if !private_peer_diagnostics {
                     log_client_request("initialize", &json_str(&req));

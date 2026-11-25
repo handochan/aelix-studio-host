@@ -52,6 +52,7 @@ pub struct TurnClaim {
     turn_id: String,
     state: Weak<ConversationRuntimeStateService>,
     released: bool,
+    transcript_input: Option<aionui_db::AcpTranscriptInputGuard>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +153,7 @@ impl ConversationRuntimeStateService {
             turn_id: turn_id.to_owned(),
             state: Arc::downgrade(self),
             released: false,
+            transcript_input: None,
         })
     }
 
@@ -611,6 +613,10 @@ impl ConversationRuntimeStateService {
 }
 
 impl TurnClaim {
+    pub(crate) fn protect_transcript_input(&mut self, repo: &dyn aionui_db::IConversationRepository, id: &str) {
+        self.transcript_input = repo.protect_acp_transcript_input(id);
+    }
+
     pub fn turn_id(&self) -> &str {
         &self.turn_id
     }
@@ -636,6 +642,7 @@ impl TurnClaim {
             .upgrade()
             .map(|state| state.release(&self.conversation_id, &self.turn_id))
             .unwrap_or(false);
+        self.transcript_input.take();
         self.released = true;
         was_deleting
     }

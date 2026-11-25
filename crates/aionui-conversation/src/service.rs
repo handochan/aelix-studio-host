@@ -3000,7 +3000,7 @@ impl ConversationService {
         // Copy the visible history up to (and including) the fork point.
         let copied = self
             .conversation_repo
-            .copy_messages_up_to(user_id, id, &new_id, cursor)
+            .copy_messages_up_to(user_id, id, &new_id, cursor, fork_capability.requires_native_head)
             .await?;
         info!(
             parent_conversation_id = %id,
@@ -3748,7 +3748,7 @@ impl ConversationService {
             .runtime_persistence()
             .allows(conversation_id, RuntimeWriteKind::UserMessage);
         if persisted {
-            let user_msg = aionui_db::models::MessageRow {
+            let mut user_msg = aionui_db::models::MessageRow {
                 id: user_msg_id.clone(),
                 conversation_id: conversation_id.to_owned(),
                 msg_id: Some(user_msg_id.clone()),
@@ -3760,10 +3760,17 @@ impl ConversationService {
                 created_at: self.runtime_persistence().message_time(conversation_id, false),
                 backend_turn_id: None,
             };
-            if let Err(e) = self.conversation_repo.insert_message(user_id, &user_msg).await {
-                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert mid-turn user message");
-                return Err(e.into());
-            }
+            user_msg.created_at = match self
+                .conversation_repo
+                .insert_message_returning_created_at(user_id, &user_msg)
+                .await
+            {
+                Ok(created_at) => created_at,
+                Err(e) => {
+                    warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert mid-turn user message");
+                    return Err(e.into());
+                }
+            };
             info!(msg_id = %user_msg_id, "Mid-turn user message persisted");
             self.broadcaster.broadcast(WebSocketMessage::new(
                 "message.userCreated",
@@ -3786,6 +3793,7 @@ impl ConversationService {
             content: resolved.content.clone(),
             msg_id: user_msg_id.clone(),
             turn_id: Some(active_turn_id.clone()),
+            hidden_input_id: None,
             files: resolved.files.clone(),
             attachments: resolved.attachments.clone(),
             inject_skills,
@@ -4009,7 +4017,7 @@ impl ConversationService {
         // Open a NEW turn: mint the id only on this branch. The mid-turn
         // delivery path above instead reuses the running turn's id — a
         // phantom turn id minted outside an actual claim must never exist.
-        let (turn_id, turn_claim) = {
+        let (turn_id, mut turn_claim) = {
             let turn_id = Self::mint_turn_id();
             let turn_claim = self.runtime_state.try_claim_turn(conversation_id, &turn_id)?;
             (turn_id, turn_claim)
@@ -4023,7 +4031,10 @@ impl ConversationService {
         // message — reuse its id instead of writing a duplicate row.
         let was_fallback = fallback_user_msg.is_some();
         let user_msg_id = fallback_user_msg.unwrap_or_else(Self::mint_msg_id);
-        let user_msg = aionui_db::models::MessageRow {
+        if row.r#type == "acp" {
+            turn_claim.protect_transcript_input(self.conversation_repo.as_ref(), &user_msg_id);
+        }
+        let mut user_msg = aionui_db::models::MessageRow {
             id: user_msg_id.clone(),
             conversation_id: conversation_id.to_owned(),
             msg_id: Some(user_msg_id.clone()),
@@ -4049,10 +4060,17 @@ impl ConversationService {
         // (with the statusChanged flip) — doing it again would duplicate the
         // row and the live-view bubble.
         if !was_fallback {
-            if let Err(e) = self.conversation_repo.insert_message(user_id, &user_msg).await {
-                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
-                return Err(e.into());
-            }
+            user_msg.created_at = match self
+                .conversation_repo
+                .insert_message_returning_created_at(user_id, &user_msg)
+                .await
+            {
+                Ok(created_at) => created_at,
+                Err(e) => {
+                    warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
+                    return Err(e.into());
+                }
+            };
 
             info!(msg_id = %user_msg_id, "User message persisted");
 
@@ -4103,6 +4121,7 @@ impl ConversationService {
             attachments: resolved.attachments,
             inject_skills: req.inject_skills,
             required_runtime_mode: None,
+            hidden_input_id: req.hidden.then_some(user_msg_id),
             build_options: build_opts,
             stored_workspace,
             turn_id: turn_id.clone(),
@@ -4146,9 +4165,14 @@ impl ConversationService {
         reject_deprecated_runtime_row(&row)?;
 
         let turn_id = Self::mint_turn_id();
-        let turn_claim = self.runtime_state.try_claim_turn(&request.conversation_id, &turn_id)?;
+        let mut turn_claim = self.runtime_state.try_claim_turn(&request.conversation_id, &turn_id)?;
+        let mut hidden_input_id = None;
         if request.persist_user_message {
             let user_msg_id = Self::mint_msg_id();
+            if row.r#type == "acp" {
+                turn_claim.protect_transcript_input(self.conversation_repo.as_ref(), &user_msg_id);
+                hidden_input_id = request.user_message_hidden.then(|| user_msg_id.clone());
+            }
             let user_msg = aionui_db::models::MessageRow {
                 id: user_msg_id.clone(),
                 conversation_id: request.conversation_id.clone(),
@@ -4226,6 +4250,7 @@ impl ConversationService {
                 attachments: Vec::new(),
                 inject_skills: request.inject_skills,
                 required_runtime_mode: request.required_runtime_mode,
+                hidden_input_id,
                 build_options: build_opts,
                 stored_workspace,
                 turn_id: turn_id.clone(),

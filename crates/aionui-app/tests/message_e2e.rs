@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
 
-use aionui_db::{ConversationRowUpdate, IConversationRepository};
+use aionui_db::{AcpTranscriptRow, ConversationRowUpdate, IConversationRepository, NativeMessageKey};
 use common::{body_json, build_app, build_app_with_mock_agents, get_request, get_with_token, setup_and_login};
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -364,6 +364,64 @@ async fn t8_4_messages_limit_returns_latest_window_in_ascending_order() {
     assert_eq!(items[0]["id"], "msg-mid");
     assert_eq!(items[1]["id"], "msg-new");
     assert!(items[0]["created_at"].as_i64().unwrap() < items[1]["created_at"].as_i64().unwrap());
+}
+
+#[tokio::test]
+async fn latest_message_page_includes_live_input_after_large_transcript_append() {
+    let (mut app, services) = build_app_with_mock_agents().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Transcript append").await;
+    let workspace = tempfile::tempdir().unwrap();
+    update_conversation_workspace(&services, &conv_id, workspace.path().to_str().unwrap()).await;
+    let repo = &services.conversation_repo;
+    let user_id = repo.owner_user_id(&conv_id).await.unwrap().unwrap();
+    let snapshot = |len| {
+        (1..=len)
+            .map(|n| AcpTranscriptRow {
+                message: aionui_db::models::MessageRow {
+                    id: format!("replay-{n}"),
+                    conversation_id: conv_id.clone(),
+                    msg_id: None,
+                    r#type: "text".into(),
+                    content: json!({ "content": format!("History {n}") }).to_string(),
+                    position: Some("right".into()),
+                    status: Some("finish".into()),
+                    hidden: false,
+                    created_at: 0,
+                    backend_turn_id: None,
+                },
+                native: Some(NativeMessageKey {
+                    session_id: "native".into(),
+                    entry_id: format!("entry-{n}"),
+                }),
+            })
+            .collect()
+    };
+    repo.apply_acp_transcript(&user_id, &conv_id, "acp", snapshot(2))
+        .await
+        .unwrap();
+    repo.apply_acp_transcript(&user_id, &conv_id, "acp", snapshot(5002))
+        .await
+        .unwrap();
+
+    let route = format!("/api/conversations/{conv_id}/messages");
+    let send = common::json_with_token("POST", &route, json!({ "content": "Next Host input" }), &token, &csrf);
+    let response = app.clone().oneshot(send).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let sent = body_json(response).await;
+    let response = app
+        .oneshot(get_with_token(&format!("{route}?limit=50"), &token))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = body_json(response).await;
+    let items = page["data"]["items"].as_array().unwrap();
+    let tail = items.iter().position(|item| item["id"] == "replay-5002").unwrap();
+    let user = items
+        .iter()
+        .position(|item| item["msg_id"] == sent["data"]["msg_id"])
+        .expect("the new Host input belongs on the latest page");
+    assert!(user > tail);
 }
 
 #[tokio::test]

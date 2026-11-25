@@ -69,8 +69,12 @@ def tap(log, argv):
 class Model:
     """OpenAI-compatible streaming fixture with scripted delegation and failure."""
 
-    def __init__(self):
+    def __init__(self, hold_text=None, tool_only_text=None):
         self.requests = []
+        self.hold_text = hold_text
+        self.tool_only_text = tool_only_text
+        self.release_requests = asyncio.Event()
+        self.release_tool_requests = asyncio.Event()
 
     async def start(self):
         self.server = await asyncio.start_server(self.respond, "127.0.0.1", 0)
@@ -85,14 +89,28 @@ class Model:
             messages = request.get("messages", [])
             last = messages[-1] if messages else {}
             content = json.dumps(last.get("content"))
+            if last.get("role") == "user" and self.hold_text and self.hold_text in content:
+                partial = {"id": "held", "object": "chat.completion.chunk", "created": 0, "model": "one",
+                           "choices": [{"index": 0, "delta": {"role": "assistant", "content": "PARTIAL_BEFORE_STOP"},
+                                        "finish_reason": None}]}
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                             + ("data: " + json.dumps(partial) + "\n\n").encode())
+                await writer.drain()
+                await self.release_requests.wait()
+                return
+            if last.get("role") == "user" and "CHILD_PENDING_TOOL_CANCEL" in content and self.tool_only_text:
+                await self.release_tool_requests.wait()
+                return
             if last.get("role") == "user" and "FAIL_NOW" in content:
                 partial = {"id":"partial", "object":"chat.completion.chunk", "created":0, "model":"one",
                            "choices":[{"index":0,"delta":{"role":"assistant","content":"PARTIAL_BEFORE_FAILURE"},"finish_reason":None}]}
                 body = ("data: " + json.dumps(partial) + "\n\n" + 'data: {"error":{"message":"SYNTHETIC_TURN_FAILURE","type":"server_error"}}\n\n').encode()
             else:
-                if last.get("role") == "user" and "DELEGATE_NOW" in content:
+                tool_only = self.tool_only_text and self.tool_only_text in content
+                if last.get("role") == "user" and ("DELEGATE_NOW" in content or tool_only):
+                    task = "CHILD_PENDING_TOOL_CANCEL" if tool_only else "CHILD_TASK reply"
                     delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": f"call_agent_{len(self.requests)}", "type": "function",
-                             "function": {"name": "agent", "arguments": json.dumps({"profile": "reviewer", "task": "CHILD_TASK reply"})}}]}
+                             "function": {"name": "agent", "arguments": json.dumps({"profile": "reviewer", "task": task})}}]}
                     stop = "tool_calls"
                 elif last.get("role") == "user" and "CHILD_TASK" in content:
                     await asyncio.sleep(1.5)  # Long enough for live progress frames.

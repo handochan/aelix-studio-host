@@ -14,10 +14,12 @@ Verified adapter contract: [aelix-acp `16d6555`, Studio integration](https://git
 and [src/aelix_acp/wire/errors.py](https://github.com/handochan/aelix-acp/blob/16d6555b08825d1d63c3b082de2b10a1152562c0/src/aelix_acp/wire/errors.py).
 
 The public error payload includes `code` (host locale code), `protocol_code`
-(original numeric code), `data` (original structured ACP data, when present),
-and `retryable: false`. Keys inside `data` remain verbatim, including
-`lockedBy`, `sessionId`, and an explicit `holder: null`. The host does not use
-human-readable error messages to determine these reasons.
+(original numeric code), optional `data` (structured ACP data), and
+`retryable: false`. For peers without negotiated `aelix/hostBytes`, the
+existing application error responses preserve keys such as `lockedBy`,
+`sessionId`, and an explicit `holder: null` when present. Negotiated private-peer
+handling filters `data` to approved diagnostics. The host reads these reasons
+from structured fields.
 
 - HTTP runtime/config errors retain status 502, expose the host code at the
   top level, and carry the public error payload in `details`.
@@ -32,6 +34,46 @@ Standard ACP reserves `-32000` for authentication (verified:
 apply only after initialization identifies `agentInfo.name` as `aelix-acp`.
 Other agents keep the existing authentication and generic protocol error behavior.
 
+## HTTP startup diagnostics
+
+| Endpoint | HTTP status | Top-level `code` for ACP `-33004` |
+| --- | --- | --- |
+| `POST /api/conversations/{id}/runtime/ensure` | 502 | `BAD_GATEWAY` |
+| `POST /api/agents/custom` and `PUT /api/agents/custom/{id}` registration probe | 400 | `BAD_REQUEST` |
+
+For an allowlisted ACP application failure, the existing HTTP error envelope
+includes `details.kind`. The first allowed kind is `socket_path_too_long`,
+which Aelix ACP returns with code `-33004`. The Host includes `details.limitBytes`
+when ACP supplies a positive integer up to 65535. Startup diagnostics contain
+only these approved fields. Unknown kinds, peer messages, paths, credentials,
+stderr, and other ACP data are omitted. True upstream unavailability retains
+the generic `BAD_GATEWAY` response without startup details. For an allowlisted
+kind, runtime ensure and registration put a Host-authored remedy in the
+top-level `error` string. Registration retains the `acp_init_failed:` prefix.
+The manual probe at `POST /api/agents/custom/try-connect` returns the same remedy
+in `data.error` with `data.step = "fail_acp"` in its HTTP 200 response.
+
+Example runtime ensure response
+
+```json
+{
+  "success": false,
+  "error": "ACP could not start: the temporary directory path is too long. Set a shorter TMPDIR.",
+  "code": "BAD_GATEWAY",
+  "details": {
+    "kind": "socket_path_too_long",
+    "limitBytes": 104
+  }
+}
+```
+
+Studio reads `details.kind` to select the localized shorter, writable
+`TMPDIR` hint. Sources for the wire error and Studio lookup are
+[ACP's session implementation](https://github.com/handochan/aelix-acp/blob/7a2ca0e8e7edcc5fe41e15359e9e20a0fa9cc576/src/aelix_acp/session.py)
+and [Studio PR #150](https://github.com/handochan/aelix-studio/pull/150).
+
+## Tool metadata
+
 Tool-call `_meta` is stored in the message content alongside `update`, with
 opaque keys and values. SQLite JSON merge-patch preserves omitted fields,
 removes keys patched with null, and replaces arrays with the newest array.
@@ -39,5 +81,5 @@ Statusless metadata updates retain terminal tool status, including after a turn
 ends; the background watcher updates existing cards without creating a turn. History
 previews compact large tool output without truncating `_meta`.
 
-This change covers host #4 scopes 2 and 3. Replay suppression is unchanged;
-scope 1 waits for aelix-ai #655 and aelix-acp #22.
+The application error codes and tool metadata cover host #4 scopes 2 and 3.
+Scope 1 waits for aelix-ai #655 and aelix-acp #22.
