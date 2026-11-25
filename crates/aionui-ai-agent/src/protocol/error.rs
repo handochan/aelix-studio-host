@@ -381,14 +381,15 @@ impl AcpError {
         // aelix-acp@16d6555/src/aelix_acp/server.py (initialize and dispatch).
         // Preserve standard authentication behavior for every other agent.
         if agent_name == Some("aelix-acp") && matches!(code, -33001 | -33002 | -32000 | -32004) {
-            let data = if code == -32004
-                && err
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("kind"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some(MODEL_SELECTION_REQUIRED)
-            {
+            let kind = err
+                .data
+                .as_ref()
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str);
+            let data = if matches!(
+                (code, kind),
+                (-32004, Some(MODEL_SELECTION_REQUIRED)) | (-33002, Some(TURN_FAILED_AFTER_DISPATCH))
+            ) {
                 safe_application_data(code, err.data.as_ref())
             } else {
                 err.data
@@ -472,6 +473,30 @@ impl AcpError {
 
 pub(super) const ACP_REQUEST_FAILED: &str = "ACP request failed";
 pub(super) const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
+pub(super) const TURN_FAILED_AFTER_DISPATCH: &str = "turn_failed_after_dispatch";
+
+/// aelix-acp@e87954b8/docs/studio-integration.md defines the provider causes.
+pub(super) fn safe_provider_cause(kind: &str, retryable: bool) -> Option<serde_json::Value> {
+    (!retryable
+        && matches!(
+            kind,
+            "provider_auth"
+                | "provider_rate_limit"
+                | "provider_unavailable"
+                | "provider_bad_request"
+                | "provider_network"
+                | "unknown"
+        ))
+    .then(|| serde_json::json!({"kind": kind, "retryable": false}))
+}
+
+pub(super) fn turn_failure_data(cause: Option<serde_json::Value>) -> serde_json::Value {
+    let mut data = serde_json::json!({"kind": TURN_FAILED_AFTER_DISPATCH, "retryable": false});
+    if let Some(cause) = cause {
+        data["cause"] = cause;
+    }
+    data
+}
 
 fn model_selection_count(data: &serde_json::Value) -> Option<u32> {
     if data.as_object()?.len() != 4
@@ -523,7 +548,15 @@ fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<
             }
             Some(json!({"kind":kind,"lockedBy":locked_by,"holder":null,"retryable":false}))
         }
-        (-33002, "turn_failed_after_dispatch") => Some(json!({"kind":kind,"retryable":false})),
+        (-33002, TURN_FAILED_AFTER_DISPATCH) => {
+            let cause = data.get("cause").and_then(|cause| {
+                if data.as_object()?.len() != 3 || data.get("retryable")?.as_bool()? || cause.as_object()?.len() != 2 {
+                    return None;
+                }
+                safe_provider_cause(cause.get("kind")?.as_str()?, cause.get("retryable")?.as_bool()?)
+            });
+            Some(turn_failure_data(cause))
+        }
         (-32000, "session_changing") => Some(json!({"kind":kind})),
         (-32004, MODEL_SELECTION_REQUIRED) => {
             // aelix-acp@a6545f0b/src/aelix_acp/wire/errors.py defines this refusal.

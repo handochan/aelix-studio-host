@@ -203,8 +203,12 @@ async def scenario(args):
             tips = [json.loads(r["content"]).get("error", {}) for r in host.rows(conversation) if r["type"] == "tips"]
             failure = next(e for e in tips if e.get("code") == "USER_AGENT_TURN_FAILED_AFTER_DISPATCH")
             assert failure["protocol_code"] == -33002 and failure["retryable"] is False
-            assert failure["data"] == replies[0]["errorData"], failure
-            assert "SYNTHETIC_TURN_FAILURE" in failure["detail"], failure
+            expected_data = {"kind": "turn_failed_after_dispatch", "retryable": False}
+            cause = replies[0]["errorData"].get("cause")
+            if cause == {"kind": "unknown", "retryable": False}:
+                expected_data["cause"] = cause
+            assert failure["data"] == expected_data, failure
+            assert failure["detail"] == "ACP request failed", failure
             assert any("PARTIAL_BEFORE_FAILURE" in r["content"] and r["status"] == "error" for r in host.rows(conversation)), host.rows(conversation)
             assert model.count("FAIL_NOW") == 1
             observed["dispatchFailure"] = {"code": failure["code"], "data": failure["data"], "modelRequests": 1,

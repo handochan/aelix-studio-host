@@ -1,11 +1,13 @@
-//! Model-selection refusal validation at the ACP stdio boundary.
+//! Public application error validation at the ACP stdio boundary.
 
 use std::{borrow::Cow, collections::BTreeMap};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, value::RawValue};
+use serde_json::{Value, json, value::RawValue};
 
-use super::error::{ACP_REQUEST_FAILED, MODEL_SELECTION_REQUIRED};
+use super::error::{
+    ACP_REQUEST_FAILED, MODEL_SELECTION_REQUIRED, TURN_FAILED_AFTER_DISPATCH, safe_provider_cause, turn_failure_data,
+};
 
 #[derive(Deserialize, Serialize)]
 struct WireReply<'a> {
@@ -34,36 +36,84 @@ struct ModelSelectionRefusal {
     retryable: bool,
 }
 
-fn wire_refusal(raw: &str) -> Option<WireReply<'_>> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TurnFailure<'a> {
+    kind: String,
+    retryable: bool,
+    #[serde(borrow)]
+    cause: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderCause {
+    kind: String,
+    retryable: bool,
+}
+
+fn wire_reply(raw: &str, code: i32) -> Option<WireReply<'_>> {
     let reply: WireReply<'_> = serde_json::from_str(raw).ok()?;
-    (reply.error.code == -32004).then_some(reply)
+    (reply.error.code == code).then_some(reply)
 }
 
 fn valid_model_selection_refusal(raw: &str) -> bool {
-    wire_refusal(raw)
+    wire_reply(raw, -32004)
         .and_then(|reply| serde_json::from_str::<ModelSelectionRefusal>(reply.error.data?.get()).ok())
         .is_some_and(|data| data.kind == MODEL_SELECTION_REQUIRED && data.config_id == "model" && !data.retryable)
 }
 
-fn appears_to_be_model_selection_refusal(reply: &Value) -> bool {
-    reply["error"]["code"].as_i64() == Some(-32004)
-        && reply["error"]["message"].is_string()
-        && reply["error"]["data"]["kind"].as_str() == Some(MODEL_SELECTION_REQUIRED)
+fn wire_provider_cause(raw: &str) -> Option<Value> {
+    let data = wire_reply(raw, -33002)?.error.data?.get();
+    if !data.trim_start().starts_with('{') {
+        return None;
+    }
+    let failure: TurnFailure<'_> = serde_json::from_str(data).ok()?;
+    let cause = failure.cause.get();
+    // Derived structs also accept positional arrays, which are outside this contract.
+    if failure.kind != TURN_FAILED_AFTER_DISPATCH || failure.retryable || !cause.trim_start().starts_with('{') {
+        return None;
+    }
+    let cause: ProviderCause = serde_json::from_str(cause).ok()?;
+    safe_provider_cause(&cause.kind, cause.retryable)
 }
 
-fn sanitize_refusal(reply: &mut Value, raw: Option<&str>) -> bool {
-    if !appears_to_be_model_selection_refusal(reply) {
+fn sanitize_error(reply: &mut Value, raw: Option<&str>) -> bool {
+    if !reply["error"]["message"].is_string() {
         return false;
     }
-    let mut error = serde_json::json!({"code": -32004, "message": ACP_REQUEST_FAILED});
-    if raw.is_some_and(valid_model_selection_refusal) {
-        error["data"] = reply["error"]["data"].take();
+    let code = reply["error"]["code"].as_i64();
+    let kind = reply["error"]["data"]["kind"].as_str();
+    let data = match (code, kind) {
+        (Some(-32004), Some(MODEL_SELECTION_REQUIRED)) => raw
+            .is_some_and(valid_model_selection_refusal)
+            .then(|| reply["error"]["data"].take()),
+        (Some(-33002), Some(TURN_FAILED_AFTER_DISPATCH)) => {
+            let data = turn_failure_data(raw.and_then(wire_provider_cause));
+            if let Some(envelope) = reply.as_object_mut() {
+                envelope.retain(|field, value| match field.as_str() {
+                    "jsonrpc" | "id" | "error" => true,
+                    // Keep malformed hybrids invalid without retaining their payloads.
+                    "method" | "result" => {
+                        *value = Value::Null;
+                        true
+                    }
+                    _ => false,
+                });
+            }
+            Some(data)
+        }
+        _ => return false,
+    };
+    let mut error = json!({"code": code, "message": ACP_REQUEST_FAILED});
+    if let Some(data) = data {
+        error["data"] = data;
     }
     reply["error"] = error;
     true
 }
 
-fn recover_undecodable_refusal(line: &str) -> Option<String> {
+fn recover_undecodable_error(line: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Tag {
         kind: String,
@@ -78,25 +128,31 @@ fn recover_undecodable_refusal(line: &str) -> Option<String> {
     {
         return None;
     }
-    let mut reply = wire_refusal(line)?;
+    let mut reply: WireReply<'_> = serde_json::from_str(line).ok()?;
     // A response with a missing or non-string message is invalid even if the
-    // refusal's code and kind can be read from the raw bytes.
+    // error's code and kind can be read from the raw bytes.
     serde_json::from_str::<String>(reply.error.message.get()).ok()?;
     let data = reply.error.data?.get();
-    if !data.trim_start().starts_with('{') || serde_json::from_str::<Tag>(data).ok()?.kind != MODEL_SELECTION_REQUIRED {
+    if !data.trim_start().starts_with('{') {
         return None;
     }
+    let tag: Tag = serde_json::from_str(data).ok()?;
+    let data = match (reply.error.code, tag.kind.as_str()) {
+        (-32004, MODEL_SELECTION_REQUIRED) => None,
+        (-33002, TURN_FAILED_AFTER_DISPATCH) => Some(serde_json::value::to_raw_value(&turn_failure_data(None)).ok()?),
+        _ => return None,
+    };
     let message = serde_json::value::to_raw_value(ACP_REQUEST_FAILED).ok()?;
     reply.error.message = &message;
-    reply.error.data = None;
+    reply.error.data = data.as_deref();
     serde_json::to_string(&reply).ok()
 }
 
 /// The SDK first reads lines as `Value`, which folds duplicate keys and can
 /// coerce special objects into scalars. Use that view to identify anything
-/// the SDK would see as this refusal. Only the original JSON can validate it.
+/// the SDK would see as one of these errors. Only the original JSON can validate it.
 /// Replace peer text here so SDK and host diagnostics see the public detail.
-pub(super) fn sanitize_model_refusals(line: String, normalized: Option<Value>) -> String {
+pub(super) fn sanitize_public_errors(line: String, normalized: Option<Value>) -> String {
     if line.trim_start().starts_with('[')
         && let Ok(raw) = serde_json::from_str::<Vec<&RawValue>>(&line)
     {
@@ -108,8 +164,8 @@ pub(super) fn sanitize_model_refusals(line: String, normalized: Option<Value>) -
             .map(|raw| {
                 let raw = raw.get();
                 let rewritten = match serde_json::from_str::<Value>(raw) {
-                    Ok(mut reply) => sanitize_refusal(&mut reply, Some(raw)).then(|| reply.to_string()),
-                    Err(_) => recover_undecodable_refusal(raw),
+                    Ok(mut reply) => sanitize_error(&mut reply, Some(raw)).then(|| reply.to_string()),
+                    Err(_) => recover_undecodable_error(raw),
                 };
                 match rewritten {
                     Some(entry) => {
@@ -127,18 +183,18 @@ pub(super) fn sanitize_model_refusals(line: String, normalized: Option<Value>) -
     }
     let Some(mut normalized) = normalized else {
         // A syntactically valid data object can also fail Value decoding.
-        return recover_undecodable_refusal(&line).unwrap_or(line);
+        return recover_undecodable_error(&line).unwrap_or(line);
     };
     let changed = if let Some(entries) = normalized.as_array_mut() {
         // The normalized view can expose a batch synthesized from a raw
         // object. No entry has an original JSON object to validate against.
         let mut changed = false;
         for reply in entries {
-            changed |= sanitize_refusal(reply, None);
+            changed |= sanitize_error(reply, None);
         }
         changed
     } else {
-        sanitize_refusal(&mut normalized, Some(&line))
+        sanitize_error(&mut normalized, Some(&line))
     };
     if changed { normalized.to_string() } else { line }
 }
@@ -148,11 +204,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_cause_requires_a_strict_raw_object() {
+        for cause in [
+            r#"{"kind":"provider_auth","retryable":true}"#,
+            r#"{"kind":"provider_auth","retryable":"false"}"#,
+            r#"{"kind":"provider_auth","retryable":null}"#,
+            r#"{"kind":"provider_auth","retryable":0}"#,
+            r#"{"kind":"provider_auth","retryable":false,"detail":"private peer data"}"#,
+            r#"{"kind":"provider_auth","kind":"unknown","retryable":false}"#,
+            r#"{"kind":"provider_auth","retryable":true,"retryable":false}"#,
+            r#"{"kind":"provider_auth","retryable":{"$serde_json::private::RawValue":"false"}}"#,
+            r#"{"kind":"provider_auth","retryable":{"$serde_json::private::RawValue":"private peer data"}}"#,
+            r#"{"kind":"provider_auth","retryable":1e400}"#,
+            r#"{"kind":"private peer data","retryable":false}"#,
+            r#"{"kind":false,"retryable":false}"#,
+            r#"{"kind":"provider_auth"}"#,
+            r#"{"retryable":false}"#,
+            r#"["provider_auth",false]"#,
+            "null",
+        ] {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-33002,"message":"private peer text","data":{{"kind":"turn_failed_after_dispatch","retryable":false,"cause":{cause}}}}}}}"#
+            );
+            let normalized = serde_json::from_str(&line).ok();
+            let output = sanitize_public_errors(line, normalized);
+            let actual: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(
+                actual["error"],
+                serde_json::json!({"code":-33002,"message":"ACP request failed",
+                    "data":{"kind":"turn_failed_after_dispatch","retryable":false}}),
+                "{cause}",
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_batch_preserves_a_valid_provider_cause_and_drops_duplicates() {
+        let base = r#""kind":"turn_failed_after_dispatch","retryable":false"#;
+        let cause = r#""cause":{"kind":"provider_network","retryable":false}"#;
+        let reply = |id, data| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-33002,"message":"private peer text","data":{{{data}}}}}}}"#
+            )
+        };
+        let sibling = r#"{"jsonrpc":"2.0", "id":4, "result":null}"#;
+        let line = format!(
+            "[{},{},{},{sibling}]",
+            reply(1, format!("{base},{cause}")),
+            reply(2, format!("{base},{cause},{cause}")),
+            reply(3, format!("{base},\"retryable\":false,{cause}")),
+        );
+        let normalized = serde_json::from_str(&line).unwrap();
+        let output = sanitize_public_errors(line, Some(normalized));
+        let actual: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            actual[0]["error"]["data"]["cause"],
+            serde_json::json!({"kind":"provider_network","retryable":false})
+        );
+        for entry in &actual.as_array().unwrap()[1..3] {
+            assert_eq!(
+                entry["error"]["data"],
+                serde_json::json!({"kind":"turn_failed_after_dispatch","retryable":false})
+            );
+        }
+        assert!(!output.contains("private peer text"));
+        assert!(output.contains(sibling));
+    }
+
+    #[test]
+    fn provider_failure_drops_extra_envelope_fields_without_accepting_hybrids() {
+        let data = r#"{"kind":"turn_failed_after_dispatch","retryable":false,"cause":{"kind":"provider_auth","retryable":false}}"#;
+        for hybrid in ["", r#", "method": "private method""#, r#", "result": "private result""#] {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-33002,"message":"private peer text","data":{data}}},"detail":"private envelope"{hybrid}}}"#
+            );
+            let normalized = serde_json::from_str(&line).unwrap();
+            let output = sanitize_public_errors(line, Some(normalized));
+            let actual: Value = serde_json::from_str(&output).unwrap();
+            assert!(!output.contains("private"));
+            assert_eq!(actual["error"]["data"], serde_json::from_str::<Value>(data).unwrap());
+            if !hybrid.is_empty() {
+                assert!(matches!(
+                    agent_client_protocol::TransportFrame::parse_json(&output),
+                    agent_client_protocol::TransportFrame::Malformed { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn model_refusal_drops_extra_error_members_before_sdk_trace() {
         let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"peer refusal","detail":"SECRET2",
             "data":{"kind":"model_selection_required","configId":"model","availableModels":2,"retryable":false}}}"#;
         let original: Value = serde_json::from_str(line).unwrap();
-        let output = sanitize_model_refusals(line.into(), Some(original.clone()));
+        let output = sanitize_public_errors(line.into(), Some(original.clone()));
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             actual["error"],
@@ -173,7 +318,7 @@ mod tests {
             {"jsonrpc":"2.0","id":4,"result":null}
         ]"#;
         let original: Value = serde_json::from_str(line).unwrap();
-        let output = sanitize_model_refusals(line.into(), Some(original.clone()));
+        let output = sanitize_public_errors(line.into(), Some(original.clone()));
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual[0]["id"], 1);
         assert_eq!(actual[0]["error"]["code"], -32004);
@@ -193,7 +338,7 @@ mod tests {
             "data":{"kind":"model_selection_required","configId":"model",
                 "availableModels":{"$serde_json::private::RawValue":"invalid numeric content"},"retryable":false}}}"#;
         assert!(serde_json::from_str::<Value>(line).is_err());
-        let output = sanitize_model_refusals(line.into(), None);
+        let output = sanitize_public_errors(line.into(), None);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual["id"], "prompt");
         assert_eq!(actual["error"]["code"], -32004);
@@ -202,7 +347,7 @@ mod tests {
 
         let sibling = r#"{"jsonrpc":"2.0", "id":2, "result":null}"#;
         let batch = format!("[{line},{sibling}]");
-        let output = sanitize_model_refusals(batch, None);
+        let output = sanitize_public_errors(batch, None);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual[0]["error"]["code"], -32004);
         assert!(actual[0]["error"].get("data").is_none());
@@ -225,7 +370,7 @@ mod tests {
             format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-32004,"message":null,"data":{data}}}}}"#),
         ] {
             assert!(serde_json::from_str::<Value>(&frame).is_err());
-            assert_eq!(sanitize_model_refusals(frame.clone(), None), frame);
+            assert_eq!(sanitize_public_errors(frame.clone(), None), frame);
         }
     }
 
@@ -235,7 +380,7 @@ mod tests {
         for message in ["", r#""message":null,"#] {
             let frame = format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{{message}"code":-32004,"data":{data}}}}}"#);
             let normalized: Value = serde_json::from_str(&frame).unwrap();
-            assert_eq!(sanitize_model_refusals(frame.clone(), Some(normalized)), frame);
+            assert_eq!(sanitize_public_errors(frame.clone(), Some(normalized)), frame);
         }
     }
 }
