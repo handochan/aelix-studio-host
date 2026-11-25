@@ -37,6 +37,7 @@ use tracing::{debug, error, info, warn};
 
 use super::agent_session_flow::PromptOutcome;
 use super::error_mapping::AcpSendFailure;
+use super::session::SessionNewPrelude;
 
 /// The user-visible body inside an [`AgentError`].
 ///
@@ -1381,11 +1382,11 @@ impl AcpAgentManager {
         let raw_user_input = data.content.clone();
         let (content, consumed_prelude) = {
             let mut session = self.session.write().await;
-            let deferred = session.has_deferred_aelix_prelude();
-            let pending = session.has_pending_session_new_prelude();
+            let prelude = session.pending_session_new_prelude();
+            let deferred = matches!(prelude, Some(SessionNewPrelude::Deferred));
             // Without attachments the ACP block builder emits one text block.
             // Path-only fallback files still belong to an ordinary prompt.
-            if pending && data.files.is_empty() && has_slash_command_shape(&raw_user_input) {
+            if prelude.is_some() && data.files.is_empty() && has_slash_command_shape(&raw_user_input) {
                 // Keep the command at the start of the ACP text and save the
                 // rules for the first ordinary prompt in this session.
                 if !deferred {
@@ -1394,7 +1395,7 @@ impl AcpAgentManager {
                         .map_err(AcpSendFailure::PreludePersistence)?;
                     session.mark_deferred_aelix_prelude();
                 }
-                (raw_user_input, false)
+                (raw_user_input, None)
             } else {
                 let mut ctx = PromptCtx {
                     session: &mut session,
@@ -1403,7 +1404,7 @@ impl AcpAgentManager {
                     runtime: &self.runtime,
                 };
                 let mut transformed = self.pipeline.pre_send(&mut ctx, raw_user_input).await;
-                if pending && transformed.starts_with('/') && !transformed.starts_with("//") {
+                if prelude.is_some() && transformed.starts_with('/') && !transformed.starts_with("//") {
                     // Keep an ordinary leading-slash input out of the command
                     // prefix even when there was no prelude text to add.
                     transformed.insert(0, '\n');
@@ -1413,7 +1414,7 @@ impl AcpAgentManager {
                     return Err(AcpSendFailure::PreludePersistence(error));
                 }
                 self.commit_session_changes(&mut session).await;
-                (transformed, deferred)
+                (transformed, prelude)
             }
         };
 

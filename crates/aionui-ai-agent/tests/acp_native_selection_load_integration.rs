@@ -513,6 +513,101 @@ async fn malformed_model_refusal_counts_on_stdio_keep_the_code_and_drop_data() {
 }
 
 #[tokio::test]
+async fn fresh_model_refusal_preserves_rules_in_the_same_process() {
+    check_fresh_model_refusal_preserves_rules(false).await;
+}
+
+#[tokio::test]
+async fn fresh_model_refusal_preserves_rules_after_reopen() {
+    check_fresh_model_refusal_preserves_rules(true).await;
+}
+
+async fn check_fresh_model_refusal_preserves_rules(reopen: bool) {
+    let (temp, registry, sync) = setup().await;
+    let mut instance = open_session(
+        temp.path(),
+        &registry,
+        &sync,
+        "aelix-acp",
+        "fresh-refusal.txt",
+        "generic",
+    )
+    .await;
+    assert!(!prelude_pending(&sync).await, "a fresh prelude starts in memory");
+
+    let error = prompt(&instance, "Choose a model first").await.unwrap_err();
+    assert_eq!(error.code(), Some(AgentErrorCode::UserAgentOperationRefused));
+    assert_eq!(error.stream_error().retryable, Some(false));
+    let persisted_after_refusal = prelude_pending(&sync).await;
+    if reopen {
+        instance.kill_and_wait(None).await;
+        instance = open_session(
+            temp.path(),
+            &registry,
+            &sync,
+            "aelix-acp",
+            "fresh-refusal.txt",
+            "generic",
+        )
+        .await;
+    }
+    prompt(&instance, "After selecting a model").await.unwrap();
+    prompt(&instance, "Second explicit send").await.unwrap();
+    instance.kill_and_wait(None).await;
+
+    let trace = std::fs::read_to_string(temp.path().join("fresh-refusal.txt")).unwrap();
+    assert_eq!(trace.lines().filter(|line| *line == "session/new").count(), 1);
+    assert_eq!(
+        trace.lines().filter(|line| *line == "session/load").count(),
+        usize::from(reopen)
+    );
+    assert_eq!(
+        prompt_trace(temp.path(), "fresh-refusal.txt"),
+        [
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nChoose a model first",
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nAfter selecting a model",
+            "Second explicit send",
+        ]
+    );
+    assert!(persisted_after_refusal);
+    assert!(!prelude_pending(&sync).await);
+}
+
+#[tokio::test]
+async fn fresh_prelude_is_not_restored_for_other_refusals_or_after_activity() {
+    for (text, code) in [
+        ("Busy before work", AgentErrorCode::UserAgentBusy),
+        ("Reject before work", AgentErrorCode::UserAgentInvalidParams),
+        (
+            "Report activity then require model",
+            AgentErrorCode::UserAgentOperationRefused,
+        ),
+        ("Refuse with duplicate count", AgentErrorCode::UserAgentOperationRefused),
+    ] {
+        let (temp, registry, sync) = setup().await;
+        let instance = open_session(
+            temp.path(),
+            &registry,
+            &sync,
+            "aelix-acp",
+            "other-refusal.txt",
+            "generic",
+        )
+        .await;
+        let error = prompt(&instance, text).await.unwrap_err();
+        assert_eq!(error.code(), Some(code), "{text}");
+        assert!(!prelude_pending(&sync).await, "{text}");
+        prompt(&instance, "Another explicit send").await.unwrap();
+        instance.kill_and_wait(None).await;
+
+        let sent = prompt_trace(temp.path(), "other-refusal.txt");
+        assert_eq!(sent.len(), 2, "{text}");
+        assert!(sent[0].starts_with("[Assistant Rules]\n"), "{text}");
+        assert_eq!(sent[1], "Another explicit send", "{text}");
+    }
+}
+
+#[tokio::test]
 async fn model_selection_refusal_restores_the_prelude_for_the_next_explicit_send() {
     let (temp, registry, sync) = setup().await;
     let first = open_session(temp.path(), &registry, &sync, "aelix-acp", "refused.txt", "generic").await;

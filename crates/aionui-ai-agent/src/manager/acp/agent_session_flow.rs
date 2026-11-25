@@ -22,6 +22,7 @@ use super::agent::sdk_to_snake_value;
 use super::agent_close::STDERR_PEEK_LINES;
 use super::error_mapping::{AcpSendFailure, is_acp_session_not_found, is_missing_resumed_session};
 use super::legacy_session_model::LegacySessionModelState;
+use super::session::SessionNewPrelude;
 use tracing::warn;
 
 fn aelix_fork_head_capability(meta: Option<&serde_json::Map<String, Value>>) -> bool {
@@ -490,7 +491,7 @@ impl AcpAgentManager {
         &self,
         data: &SendMessageData,
         session_id: Option<&str>,
-        consumed_prelude: bool,
+        consumed_prelude: Option<SessionNewPrelude>,
     ) -> Result<PromptOutcome, AcpSendFailure> {
         let sid = session_id
             .ok_or_else(|| AgentError::internal("Cannot prompt: no session ID available"))
@@ -533,13 +534,23 @@ impl AcpAgentManager {
         let prompt_response = match self.protocol.prompt(request, data.turn_id.as_deref()).await {
             Ok(response) => response,
             Err(error) => {
-                if consumed_prelude && prompt_was_rejected(&error, &mut probe_rx) {
+                let prelude_change = match consumed_prelude {
+                    Some(SessionNewPrelude::Deferred) => Some(AelixPreludeChange::Restore),
+                    // A fresh prelude had no persisted marker before this prompt.
+                    Some(SessionNewPrelude::Fresh) if error.is_model_selection_required() => {
+                        Some(AelixPreludeChange::Defer)
+                    }
+                    _ => None,
+                };
+                if let Some(change) = prelude_change
+                    && prompt_was_rejected(&error, &mut probe_rx)
+                {
                     let mut session = self.session.write().await;
                     if session.session_id() == Some(sid) {
-                        match self.persist_acp_prelude(sid, AelixPreludeChange::Restore).await {
+                        match self.persist_acp_prelude(sid, change).await {
                             Ok(()) => session.mark_deferred_aelix_prelude(),
                             Err(failure) => warn!(%failure, conversation_id = %self.params.conversation_id,
-                                "Could not restore the deferred Aelix prelude after prompt rejection"),
+                                "Could not preserve the Aelix prelude after prompt rejection"),
                         }
                     }
                 }
