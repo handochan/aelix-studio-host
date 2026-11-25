@@ -223,6 +223,7 @@ impl AcpInputHistory {
 
 pub(super) enum IncomingFrame {
     Sdk(String),
+    StandardReply(RequestId, String),
     Reverse(ReverseRequest),
 }
 
@@ -537,6 +538,28 @@ impl RelayConnection {
         }))
     }
 
+    pub(super) fn observe_legacy_request(&self, line: &str) {
+        if self.is_aelix_peer()
+            && let Ok(header) = serde_json::from_str::<FrameHeader>(line)
+            && let (Some(id), Some(_)) = (header.id, header.method)
+        {
+            self.standard_pending.lock().unwrap().insert(id);
+        }
+    }
+
+    pub(super) fn legacy_request_pending(&self, id: &RequestId) -> bool {
+        self.standard_pending.lock().unwrap().contains(id)
+    }
+
+    pub(super) fn complete_legacy_requests(&self, ids: HashSet<RequestId>) {
+        if !self.candidate && !ids.is_empty() {
+            let mut pending = self.standard_pending.lock().unwrap();
+            for id in ids {
+                pending.remove(&id);
+            }
+        }
+    }
+
     pub(super) fn write_prompt_delimiter(
         &self,
         id: &RequestId,
@@ -632,6 +655,17 @@ impl RelayConnection {
             return Some(IncomingFrame::Sdk(line));
         }
         let Some(id) = header.id else {
+            // A Value-normalized reply can expose an ID absent from its raw
+            // object. Only admit it through an existing standard request;
+            // extension replies still require a directly parsed wire ID.
+            if self.is_aelix_peer()
+                && let Ok(reply) = serde_json::from_str::<Value>(&line)
+                && reply.get("method").is_none()
+                && reply.get("result").is_none()
+                && let Some(id) = super::acp_error_wire::normalized_provider_reply_id(&reply)
+            {
+                return self.finish_standard_reply(&id, line);
+            }
             return Some(IncomingFrame::Sdk(line));
         };
         let request = {
@@ -644,18 +678,7 @@ impl RelayConnection {
                 // after the extension's correlation entry has been reclaimed.
                 None => {
                     drop(wire);
-                    if !self.standard_pending.lock().unwrap().remove(&id) {
-                        return None;
-                    }
-                    let mut session = self.session.lock().unwrap();
-                    if let Some(prompt) = session.prompt.as_mut()
-                        && prompt.request_id == id
-                    {
-                        // Keep written for updates that already entered the
-                        // ordered SDK queue before this response.
-                        prompt.receiving_on_wire = false;
-                    }
-                    return Some(IncomingFrame::Sdk(line));
+                    return self.finish_standard_reply(&id, line);
                 }
             }
         };
@@ -670,10 +693,24 @@ impl RelayConnection {
         Some(IncomingFrame::Sdk(sdk_ack(&id)))
     }
 
+    fn finish_standard_reply(&self, id: &RequestId, line: String) -> Option<IncomingFrame> {
+        if !self.standard_pending.lock().unwrap().remove(id) {
+            return None;
+        }
+        let mut session = self.session.lock().unwrap();
+        if let Some(prompt) = session.prompt.as_mut()
+            && &prompt.request_id == id
+        {
+            // Keep written for updates that already entered the ordered SDK queue.
+            prompt.receiving_on_wire = false;
+        }
+        Some(IncomingFrame::StandardReply(id.clone(), line))
+    }
+
     #[cfg(test)]
     pub(crate) fn incoming(&self, line: String) -> Option<String> {
         match self.classify_incoming(line)? {
-            IncomingFrame::Sdk(line) => Some(line),
+            IncomingFrame::Sdk(line) | IncomingFrame::StandardReply(_, line) => Some(line),
             IncomingFrame::Reverse(_) => None,
         }
     }

@@ -700,13 +700,18 @@ async fn provider_causes_reach_studio_live_and_history_without_redispatch() {
         let host = start_relay_host(dir, fixture(dir).await).await;
         let mut cases: Vec<_> = PROVIDER_CAUSE_KINDS
             .into_iter()
-            .map(|kind| (provider_failure_data(Some(kind)).to_string(), Some(kind)))
+            .map(|kind| (provider_failure_data(Some(kind)).to_string(), Some(kind), false))
             .collect();
-        cases.push((
-            r#"{"kind":"turn_failed_after_dispatch","retryable":false,"cause":{"kind":"private-h1-standard-cause","kind":"provider_auth","retryable":false}}"#.into(),
-            None,
-        ));
-        for (index, (wire, kind)) in cases.into_iter().enumerate() {
+        cases.extend([
+            r#"{"kind":"turn_failed_after_dispatch","retryable":false,"cause":{"kind":"private-h1-standard-cause","kind":"provider_auth","retryable":false}}"#,
+            r#"{"kind":false,"private":"private-h1-standard-data"}"#,
+            r#"{"kind":"unrelated","kind":"turn_failed_after_dispatch","retryable":false,"cause":{"kind":"provider_auth","retryable":1e400}}"#,
+        ].map(|wire| (wire.into(), None, false)));
+        cases.push((provider_failure_data(Some("provider_auth")).to_string(), None, true));
+        for (index, (wire, kind, wrapped)) in cases.into_iter().enumerate() {
+            if wrapped {
+                std::fs::write(dir.join("relay-calls.provider-wrapped-reply"), "").unwrap();
+            }
             std::fs::write(dir.join("relay-calls.provider-prompt-failure"), wire).unwrap();
             let id = create(&host, dir, backend).await;
             if initialize == "relay" {

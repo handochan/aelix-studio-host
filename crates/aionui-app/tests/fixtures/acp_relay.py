@@ -119,7 +119,10 @@ def send_provider_failure(rpc_id, path):
     frame = encode({"jsonrpc": "2.0", "id": rpc_id, "error": {
         "code": -33002, "message": escaped_marker, "data": "fixture-raw-data",
     }, "diagnostic": "private-h1-standard-envelope"})
-    print(frame.replace('"fixture-raw-data"', path.read_text(encoding="utf-8")), flush=True)
+    frame = frame.replace('"fixture-raw-data"', path.read_text(encoding="utf-8"))
+    if path.with_suffix(".provider-wrapped-reply").exists():
+        frame = encode({"$serde_json::private::RawValue": frame})
+    print(frame, flush=True)
 
 
 while True:
