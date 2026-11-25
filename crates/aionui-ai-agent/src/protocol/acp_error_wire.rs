@@ -55,11 +55,11 @@ fn sanitize_refusal(reply: &mut Value, raw: Option<&str>) -> bool {
     if !appears_to_be_model_selection_refusal(reply) {
         return false;
     }
-    let error = reply["error"].as_object_mut().unwrap();
-    if !raw.is_some_and(valid_model_selection_refusal) {
-        error.remove("data");
+    let mut error = serde_json::json!({"code": -32004, "message": ACP_REQUEST_FAILED});
+    if raw.is_some_and(valid_model_selection_refusal) {
+        error["data"] = reply["error"]["data"].take();
     }
-    error.insert("message".into(), Value::String(ACP_REQUEST_FAILED.into()));
+    reply["error"] = error;
     true
 }
 
@@ -146,6 +146,20 @@ pub(super) fn sanitize_model_refusals(line: String, normalized: Option<Value>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_refusal_drops_extra_error_members_before_sdk_trace() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"peer refusal","detail":"SECRET2",
+            "data":{"kind":"model_selection_required","configId":"model","availableModels":2,"retryable":false}}}"#;
+        let original: Value = serde_json::from_str(line).unwrap();
+        let output = sanitize_model_refusals(line.into(), Some(original.clone()));
+        let actual: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            actual["error"],
+            serde_json::json!({"code":-32004,"message":ACP_REQUEST_FAILED,"data":original["error"]["data"]})
+        );
+        assert!(!output.contains("SECRET2"));
+    }
 
     #[test]
     fn legacy_batch_preserves_valid_data_and_strips_only_invalid_refusal_data() {
