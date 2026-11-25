@@ -163,6 +163,10 @@ for line in sys.stdin:
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
+        elif body == 'Report missing session with a vendor error':
+            response['error'] = {'code': -33002, 'message': 'Vendor request failed', 'data': {
+                'kind': 'turn_failed_after_dispatch', 'retryable': False,
+                'error': 'Session not found: ' + params['sessionId']}}
         elif body in ('Choose a model first', 'Report activity then require model'):
             response['error'] = {'code': -32004, 'message': 'Fixture refusal', 'data': {
                 'kind': 'model_selection_required', 'configId': 'model',
@@ -570,6 +574,29 @@ async fn aelix_delivers_the_deferred_prelude_once_after_the_session_is_reopened(
     assert_eq!(prompt_trace(temp.path(), "reopen.txt"), ["Continue again"]);
     assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
     reopened.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn other_acp_peer_keeps_stale_session_classification_for_vendor_error() {
+    let (temp, registry, sync) = setup().await;
+    let instance = open_session(
+        temp.path(),
+        &registry,
+        &sync,
+        "other-acp",
+        "vendor-error.txt",
+        "generic",
+    )
+    .await;
+    let error = prompt(&instance, "Report missing session with a vendor error")
+        .await
+        .unwrap_err();
+    instance.kill_and_wait(None).await;
+    assert_eq!(
+        error.code(),
+        Some(AgentErrorCode::UserAgentSessionNotFound),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

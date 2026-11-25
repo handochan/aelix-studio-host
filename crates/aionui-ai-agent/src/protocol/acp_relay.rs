@@ -103,6 +103,7 @@ pub(crate) struct RelayConnection {
     pub(crate) candidate: bool,
     pub(super) offer_host_bytes: bool,
     requests: OnceLock<Vec<String>>,
+    aelix_peer: AtomicBool,
     host_bytes: AtomicBool,
     session: Mutex<RelaySession>,
     wire: Mutex<HashMap<RequestId, WireRequest>>,
@@ -301,6 +302,7 @@ impl RelayConnection {
             candidate,
             offer_host_bytes: candidate && standalone,
             requests: OnceLock::new(),
+            aelix_peer: AtomicBool::new(false),
             host_bytes: AtomicBool::new(false),
             session: Mutex::new(RelaySession {
                 open: false,
@@ -317,6 +319,13 @@ impl RelayConnection {
     }
 
     pub(crate) fn negotiate(&self, response: &InitializeResponse) {
+        self.aelix_peer.store(
+            response
+                .agent_info
+                .as_ref()
+                .is_some_and(|info| info.name == "aelix-acp"),
+            Ordering::Release,
+        );
         if self.candidate
             && let Some(requests) = advertisement(response)
         {
@@ -333,6 +342,10 @@ impl RelayConnection {
             );
             tracing::info!("ACP session extension requests negotiated");
         }
+    }
+
+    pub(super) fn is_aelix_peer(&self) -> bool {
+        self.aelix_peer.load(Ordering::Acquire)
     }
 
     pub(crate) fn prepare_open(&self, meta: &mut Option<Meta>) -> OpenAttempt {

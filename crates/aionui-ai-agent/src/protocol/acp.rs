@@ -942,7 +942,11 @@ async fn run_sdk_background(
                             ));
                             None
                         } else {
-                            Some(Ok(super::acp_error_wire::sanitize_public_errors(line, normalized)))
+                            Some(Ok(super::acp_error_wire::sanitize_public_errors(
+                                line,
+                                normalized,
+                                wire.is_aelix_peer(),
+                            )))
                         }
                     }
                     Err(err) => Some(Err(err)),

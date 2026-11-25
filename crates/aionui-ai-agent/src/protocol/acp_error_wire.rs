@@ -78,7 +78,7 @@ fn wire_provider_cause(raw: &str) -> Option<Value> {
     safe_provider_cause(&cause.kind, cause.retryable)
 }
 
-fn sanitize_error(reply: &mut Value, raw: Option<&str>) -> bool {
+fn sanitize_error(reply: &mut Value, raw: Option<&str>, aelix_peer: bool) -> bool {
     if !reply["error"]["message"].is_string() {
         return false;
     }
@@ -88,7 +88,7 @@ fn sanitize_error(reply: &mut Value, raw: Option<&str>) -> bool {
         (Some(-32004), Some(MODEL_SELECTION_REQUIRED)) => raw
             .is_some_and(valid_model_selection_refusal)
             .then(|| reply["error"]["data"].take()),
-        (Some(-33002), Some(TURN_FAILED_AFTER_DISPATCH)) => {
+        (Some(-33002), Some(TURN_FAILED_AFTER_DISPATCH)) if aelix_peer => {
             let data = turn_failure_data(raw.and_then(wire_provider_cause));
             if let Some(envelope) = reply.as_object_mut() {
                 envelope.retain(|field, value| match field.as_str() {
@@ -113,7 +113,7 @@ fn sanitize_error(reply: &mut Value, raw: Option<&str>) -> bool {
     true
 }
 
-fn recover_undecodable_error(line: &str) -> Option<String> {
+fn recover_undecodable_error(line: &str, aelix_peer: bool) -> Option<String> {
     #[derive(Deserialize)]
     struct Tag {
         kind: String,
@@ -139,7 +139,9 @@ fn recover_undecodable_error(line: &str) -> Option<String> {
     let tag: Tag = serde_json::from_str(data).ok()?;
     let data = match (reply.error.code, tag.kind.as_str()) {
         (-32004, MODEL_SELECTION_REQUIRED) => None,
-        (-33002, TURN_FAILED_AFTER_DISPATCH) => Some(serde_json::value::to_raw_value(&turn_failure_data(None)).ok()?),
+        (-33002, TURN_FAILED_AFTER_DISPATCH) if aelix_peer => {
+            Some(serde_json::value::to_raw_value(&turn_failure_data(None)).ok()?)
+        }
         _ => return None,
     };
     let message = serde_json::value::to_raw_value(ACP_REQUEST_FAILED).ok()?;
@@ -152,7 +154,7 @@ fn recover_undecodable_error(line: &str) -> Option<String> {
 /// coerce special objects into scalars. Use that view to identify anything
 /// the SDK would see as one of these errors. Only the original JSON can validate it.
 /// Replace peer text here so SDK and host diagnostics see the public detail.
-pub(super) fn sanitize_public_errors(line: String, normalized: Option<Value>) -> String {
+pub(super) fn sanitize_public_errors(line: String, normalized: Option<Value>, aelix_peer: bool) -> String {
     if line.trim_start().starts_with('[')
         && let Ok(raw) = serde_json::from_str::<Vec<&RawValue>>(&line)
     {
@@ -164,8 +166,8 @@ pub(super) fn sanitize_public_errors(line: String, normalized: Option<Value>) ->
             .map(|raw| {
                 let raw = raw.get();
                 let rewritten = match serde_json::from_str::<Value>(raw) {
-                    Ok(mut reply) => sanitize_error(&mut reply, Some(raw)).then(|| reply.to_string()),
-                    Err(_) => recover_undecodable_error(raw),
+                    Ok(mut reply) => sanitize_error(&mut reply, Some(raw), aelix_peer).then(|| reply.to_string()),
+                    Err(_) => recover_undecodable_error(raw, aelix_peer),
                 };
                 match rewritten {
                     Some(entry) => {
@@ -183,18 +185,18 @@ pub(super) fn sanitize_public_errors(line: String, normalized: Option<Value>) ->
     }
     let Some(mut normalized) = normalized else {
         // A syntactically valid data object can also fail Value decoding.
-        return recover_undecodable_error(&line).unwrap_or(line);
+        return recover_undecodable_error(&line, aelix_peer).unwrap_or(line);
     };
     let changed = if let Some(entries) = normalized.as_array_mut() {
         // The normalized view can expose a batch synthesized from a raw
         // object. No entry has an original JSON object to validate against.
         let mut changed = false;
         for reply in entries {
-            changed |= sanitize_error(reply, None);
+            changed |= sanitize_error(reply, None, aelix_peer);
         }
         changed
     } else {
-        sanitize_error(&mut normalized, Some(&line))
+        sanitize_error(&mut normalized, Some(&line), aelix_peer)
     };
     if changed { normalized.to_string() } else { line }
 }
@@ -227,7 +229,7 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-33002,"message":"private peer text","data":{{"kind":"turn_failed_after_dispatch","retryable":false,"cause":{cause}}}}}}}"#
             );
             let normalized = serde_json::from_str(&line).ok();
-            let output = sanitize_public_errors(line, normalized);
+            let output = sanitize_public_errors(line, normalized, true);
             let actual: Value = serde_json::from_str(&output).unwrap();
             assert_eq!(
                 actual["error"],
@@ -255,7 +257,7 @@ mod tests {
             reply(3, format!("{base},\"retryable\":false,{cause}")),
         );
         let normalized = serde_json::from_str(&line).unwrap();
-        let output = sanitize_public_errors(line, Some(normalized));
+        let output = sanitize_public_errors(line, Some(normalized), true);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             actual[0]["error"]["data"]["cause"],
@@ -279,7 +281,7 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-33002,"message":"private peer text","data":{data}}},"detail":"private envelope"{hybrid}}}"#
             );
             let normalized = serde_json::from_str(&line).unwrap();
-            let output = sanitize_public_errors(line, Some(normalized));
+            let output = sanitize_public_errors(line, Some(normalized), true);
             let actual: Value = serde_json::from_str(&output).unwrap();
             assert!(!output.contains("private"));
             assert_eq!(actual["error"]["data"], serde_json::from_str::<Value>(data).unwrap());
@@ -297,7 +299,7 @@ mod tests {
         let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"peer refusal","detail":"SECRET2",
             "data":{"kind":"model_selection_required","configId":"model","availableModels":2,"retryable":false}}}"#;
         let original: Value = serde_json::from_str(line).unwrap();
-        let output = sanitize_public_errors(line.into(), Some(original.clone()));
+        let output = sanitize_public_errors(line.into(), Some(original.clone()), true);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             actual["error"],
@@ -318,7 +320,7 @@ mod tests {
             {"jsonrpc":"2.0","id":4,"result":null}
         ]"#;
         let original: Value = serde_json::from_str(line).unwrap();
-        let output = sanitize_public_errors(line.into(), Some(original.clone()));
+        let output = sanitize_public_errors(line.into(), Some(original.clone()), true);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual[0]["id"], 1);
         assert_eq!(actual[0]["error"]["code"], -32004);
@@ -338,7 +340,7 @@ mod tests {
             "data":{"kind":"model_selection_required","configId":"model",
                 "availableModels":{"$serde_json::private::RawValue":"invalid numeric content"},"retryable":false}}}"#;
         assert!(serde_json::from_str::<Value>(line).is_err());
-        let output = sanitize_public_errors(line.into(), None);
+        let output = sanitize_public_errors(line.into(), None, true);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual["id"], "prompt");
         assert_eq!(actual["error"]["code"], -32004);
@@ -347,7 +349,7 @@ mod tests {
 
         let sibling = r#"{"jsonrpc":"2.0", "id":2, "result":null}"#;
         let batch = format!("[{line},{sibling}]");
-        let output = sanitize_public_errors(batch, None);
+        let output = sanitize_public_errors(batch, None, true);
         let actual: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(actual[0]["error"]["code"], -32004);
         assert!(actual[0]["error"].get("data").is_none());
@@ -370,7 +372,7 @@ mod tests {
             format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":-32004,"message":null,"data":{data}}}}}"#),
         ] {
             assert!(serde_json::from_str::<Value>(&frame).is_err());
-            assert_eq!(sanitize_public_errors(frame.clone(), None), frame);
+            assert_eq!(sanitize_public_errors(frame.clone(), None, true), frame);
         }
     }
 
@@ -380,7 +382,7 @@ mod tests {
         for message in ["", r#""message":null,"#] {
             let frame = format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{{message}"code":-32004,"data":{data}}}}}"#);
             let normalized: Value = serde_json::from_str(&frame).unwrap();
-            assert_eq!(sanitize_public_errors(frame.clone(), Some(normalized)), frame);
+            assert_eq!(sanitize_public_errors(frame.clone(), Some(normalized), true), frame);
         }
     }
 }
