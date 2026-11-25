@@ -123,6 +123,7 @@ impl AgentService {
     }
 
     pub async fn set_agent_enabled(&self, user_id: &str, id: &str, enabled: bool) -> Result<AgentMetadata, AgentError> {
+        self.registry().authorize_studio_aelix(user_id, id)?;
         let updated = self
             .registry()
             .repo_handle()

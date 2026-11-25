@@ -165,6 +165,7 @@ pub struct AcpProtocol {
     /// (all processes killed) when the protocol drops.
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
     relay: Arc<RelayConnection>,
+    private_peer_diagnostics: bool,
 }
 
 #[allow(dead_code)] // Full ACP method set; some methods await wiring (fork, close, list, auth, ext).
@@ -190,9 +191,11 @@ impl AcpProtocol {
         init_budget: InitBudget,
         relay_candidate: bool,
         standalone: bool,
+        private_peer_diagnostics: bool,
     ) -> Result<Self, AcpError> {
         let alive = Arc::new(AtomicBool::new(true));
         let relay = Arc::new(RelayConnection::new(relay_candidate, standalone));
+        let private_peer_diagnostics = private_peer_diagnostics || relay.offer_host_bytes;
         let replay_suppression = Arc::new(AtomicBool::new(false));
         let terminal_registry = Arc::new(crate::terminal::TerminalRegistry::new(terminal_label, terminal_cwd));
         let started_at = std::time::Instant::now();
@@ -223,6 +226,7 @@ impl AcpProtocol {
             Arc::clone(&replay_suppression),
             Arc::clone(&terminal_registry),
             Arc::clone(&relay),
+            private_peer_diagnostics,
             stdin_closed.clone().drop_guard(),
         ));
 
@@ -264,6 +268,7 @@ impl AcpProtocol {
             replay_suppression,
             terminal_registry,
             relay,
+            private_peer_diagnostics,
         })
     }
 
@@ -272,7 +277,7 @@ impl AcpProtocol {
     }
 
     pub(crate) fn private_peer_diagnostics(&self) -> bool {
-        self.relay.offer_host_bytes
+        self.private_peer_diagnostics
     }
 
     fn map_sdk_error(&self, error: agent_client_protocol::Error, method: &str) -> AcpError {
@@ -795,6 +800,7 @@ async fn run_sdk_background(
     replay_suppression: Arc<AtomicBool>,
     terminal_registry: Arc<crate::terminal::TerminalRegistry>,
     relay: Arc<RelayConnection>,
+    private_peer_diagnostics: bool,
     mark_stdin_closed: DropGuard,
 ) {
     // Tolerant transport: intercept incoming lines *before* the SDK parses them
@@ -1032,13 +1038,17 @@ async fn run_sdk_background(
                     }
                     req.client_capabilities.meta = Some(meta);
                 }
-                log_client_request("initialize", &json_str(&req));
+                if !private_peer_diagnostics {
+                    log_client_request("initialize", &json_str(&req));
+                }
                 *phase_for_main.lock().unwrap() = AcpConnectionPhase::Initializing;
                 let raw = connection.send_request(req).block_task().await;
-                log_agent_response("initialize", &json_or_err(&raw));
+                if !private_peer_diagnostics {
+                    log_agent_response("initialize", &json_or_err(&raw));
+                }
                 raw.map_err(|e| {
                     let error = AcpError::from_sdk(e, "initialize");
-                    if handshake_relay.offer_host_bytes {
+                    if private_peer_diagnostics {
                         error.without_remote_detail("initialize")
                     } else {
                         error
@@ -1080,7 +1090,7 @@ async fn run_sdk_background(
             }
             Ok(())
         });
-    let result = if relay.offer_host_bytes {
+    let result = if private_peer_diagnostics {
         sdk.with_subscriber(tracing::Dispatch::none()).await
     } else {
         sdk.await
@@ -1120,7 +1130,7 @@ async fn run_sdk_background(
 
     match result {
         Ok(_) => debug!(?close_phase, "ACP SDK connection closed normally"),
-        Err(_) if relay.offer_host_bytes => warn!(?close_phase, "ACP SDK connection closed with error"),
+        Err(_) if private_peer_diagnostics => warn!(?close_phase, "ACP SDK connection closed with error"),
         Err(e) => warn!(?close_phase, error = %ErrorChain(&e), "ACP SDK connection closed with error"),
     }
 }

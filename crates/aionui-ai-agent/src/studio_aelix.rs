@@ -8,7 +8,15 @@ use serde::Deserialize;
 
 pub(crate) const AGENT_ID: &str = "builtin-aelix";
 pub(crate) const RUNTIME_UNAVAILABLE: &str = "Studio did not provide a usable Aelix runtime";
-const LAUNCH_ENV: &str = "AIONUI_STUDIO_AELIX_LAUNCH";
+pub(crate) const AGENT_DISABLED: &str = "Builtin Aelix is disabled";
+
+pub(crate) fn probe_failure_message(code: &str) -> &'static str {
+    match code {
+        "auth_required" => "Builtin Aelix requires authentication",
+        "command_not_found" => "Builtin Aelix launcher is unavailable",
+        _ => "Builtin Aelix did not complete the ACP connection check",
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,19 +37,12 @@ struct LaunchEnv {
     extension_state: Option<String>,
 }
 
-pub(crate) fn uses_studio_launch(meta: &AgentMetadata) -> bool {
-    meta.id == AGENT_ID
-        && meta.agent_source == AgentSource::Builtin
-        && meta.backend.as_deref() == Some("aelix")
-        && !meta.has_command_override
+pub(crate) fn is_catalog_entry(meta: &AgentMetadata) -> bool {
+    meta.id == AGENT_ID && meta.agent_source == AgentSource::Builtin && meta.backend.as_deref() == Some("aelix")
 }
 
 impl StudioAelixLaunch {
-    pub(crate) fn load() -> Option<Self> {
-        Self::parse(&std::env::var(LAUNCH_ENV).ok()?)
-    }
-
-    fn parse(raw: &str) -> Option<Self> {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
         let launch: Self = serde_json::from_str(raw).ok()?;
         (is_absolute_path(&launch.command)
             && is_absolute_path(&launch.env.agent_dir)
@@ -57,6 +58,23 @@ impl StudioAelixLaunch {
     }
 
     pub(crate) fn resolve_command(&self) -> Option<PathBuf> {
+        let command = Path::new(&self.command);
+        let interpreter = command.file_name()?.to_str()?;
+        #[cfg(windows)]
+        let interpreter = interpreter.to_ascii_lowercase();
+        #[cfg(windows)]
+        let interpreter = interpreter.strip_suffix(".exe")?;
+
+        let launcher = match self.args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["-I", "-S", "-B", "-X", "utf8", script, "acp", "--profile", "coding"] if is_python(interpreter) => {
+                existing_launcher(script, "launch.py")?
+            }
+            [script, "--profile", "coding"] if interpreter == "node" => existing_launcher(script, "launch.cjs")?,
+            _ => return None,
+        };
+        if !launcher.is_file() {
+            return None;
+        }
         let path = aionui_runtime::resolve_command_path(&self.command)?;
         // The runtime builder wraps Windows script shims in a shell. Studio
         // supplies a native executable whose argv can be passed directly.
@@ -71,22 +89,22 @@ impl StudioAelixLaunch {
         path.is_file().then_some(path)
     }
 
-    pub(crate) fn command_spec(self, meta: &AgentMetadata, cwd: String) -> Option<CommandSpec> {
+    pub(crate) fn command_spec(&self, meta: &AgentMetadata, cwd: String) -> Option<CommandSpec> {
         let command = self.resolve_command()?;
         let mut env = vec![
             EnvVar {
                 name: "AELIX_CODING_AGENT_DIR".into(),
-                value: self.env.agent_dir,
+                value: self.env.agent_dir.clone(),
             },
             EnvVar {
                 name: "AELIX_ACP_STUDIO_MANAGED".into(),
-                value: self.env.managed,
+                value: self.env.managed.clone(),
             },
         ];
-        if let Some(value) = self.env.extension_state {
+        if let Some(value) = &self.env.extension_state {
             env.push(EnvVar {
                 name: "AELIX_STUDIO_EXTENSION_STATE".into(),
-                value,
+                value: value.clone(),
             });
         }
         // The registry already filtered overrides. Apply them last, as it does
@@ -97,11 +115,23 @@ impl StudioAelixLaunch {
         }));
         Some(CommandSpec {
             command,
-            args: self.args,
+            args: self.args.clone(),
             env,
             cwd: Some(cwd),
         })
     }
+}
+
+fn is_python(name: &str) -> bool {
+    matches!(name, "python" | "python3")
+        || name
+            .strip_prefix("python3.")
+            .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn existing_launcher<'a>(value: &'a str, name: &str) -> Option<&'a Path> {
+    let path = Path::new(value);
+    (is_absolute_path(value) && path.file_name().and_then(|file| file.to_str()) == Some(name)).then_some(path)
 }
 
 fn is_absolute_path(value: &str) -> bool {
@@ -114,20 +144,91 @@ mod tests {
 
     use super::*;
 
-    fn launch_json() -> Value {
+    fn launch_json(root: &Path, name: &str) -> Value {
+        let executable = root.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        });
+        std::fs::write(&executable, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let launcher = root.join(if name == "node" { "launch.cjs" } else { "launch.py" });
+        std::fs::write(&launcher, "").unwrap();
+        let args = if name == "node" {
+            json!([launcher, "--profile", "coding"])
+        } else {
+            json!(["-I", "-S", "-B", "-X", "utf8", launcher, "acp", "--profile", "coding"])
+        };
         json!({
-            "command": std::env::current_exe().unwrap(),
-            "args": ["--profile", "coding"],
+            "command": executable,
+            "args": args,
             "env": {
-                "AELIX_CODING_AGENT_DIR": std::env::temp_dir(),
+                "AELIX_CODING_AGENT_DIR": root,
                 "AELIX_ACP_STUDIO_MANAGED": "1"
             }
         })
     }
 
     #[test]
+    fn rejects_relative_and_missing_launchers_for_both_runtime_forms() {
+        let root = tempfile::tempdir().unwrap();
+        for (interpreter, launcher, index) in [("python3", "launch.py", 5), ("node", "launch.cjs", 0)] {
+            let mut input = launch_json(root.path(), interpreter);
+            assert!(
+                StudioAelixLaunch::parse(&input.to_string())
+                    .unwrap()
+                    .resolve_command()
+                    .is_some()
+            );
+            let launcher_path = root.path().join(launcher);
+            std::fs::remove_file(&launcher_path).unwrap();
+            for launcher in [PathBuf::from(launcher), launcher_path] {
+                input["args"][index] = json!(launcher);
+                assert!(
+                    StudioAelixLaunch::parse(&input.to_string())
+                        .and_then(|launch| launch.resolve_command())
+                        .is_none(),
+                    "{launcher:?} must not resolve"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_node_executable_and_launcher_with_spaces_are_passed_verbatim() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Studio Runtime With Spaces");
+        std::fs::create_dir(&root).unwrap();
+        let input = launch_json(&root, "node");
+        let node = aionui_runtime::resolve_command_path("node.exe").expect("Windows runner must provide native Node");
+        std::fs::copy(node, root.join("node.exe")).unwrap();
+        std::fs::write(
+            root.join("launch.cjs"),
+            "console.log(JSON.stringify(process.argv.slice(2)));",
+        )
+        .unwrap();
+        let launch = StudioAelixLaunch::parse(&input.to_string()).unwrap();
+        let output = aionui_runtime::Builder::new(launch.resolve_command().unwrap())
+            .args(&launch.args)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!(["--profile", "coding"])
+        );
+    }
+
+    #[test]
     fn launch_requires_a_valid_local_descriptor() {
-        let valid = launch_json();
+        let root = tempfile::tempdir().unwrap();
+        let valid = launch_json(root.path(), "python3");
         let launch = StudioAelixLaunch::parse(&valid.to_string()).unwrap();
         assert!(launch.resolve_command().is_some());
 

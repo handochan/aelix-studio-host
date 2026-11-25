@@ -66,7 +66,7 @@ pub async fn try_connect_custom_agent_with_catalog(
     env: &HashMap<String, String>,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
-    try_connect_with_policy(command, args, env, reporter, true).await
+    try_connect_with_policy(command, args, env, reporter, true, false).await
 }
 
 pub(crate) async fn try_connect_builtin_agent_with_catalog(
@@ -74,8 +74,9 @@ pub(crate) async fn try_connect_builtin_agent_with_catalog(
     args: &[String],
     env: &HashMap<String, String>,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
+    private: bool,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
-    try_connect_with_policy(command, args, env, reporter, false).await
+    try_connect_with_policy(command, args, env, reporter, false, private).await
 }
 
 async fn try_connect_with_policy(
@@ -84,6 +85,7 @@ async fn try_connect_with_policy(
     env: &HashMap<String, String>,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
     user_configured: bool,
+    private: bool,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
     // ── Step 1 — which check ────────────────────────────────────────
     let head = first_token(command);
@@ -97,17 +99,23 @@ async fn try_connect_with_policy(
         Err(error) => {
             return (
                 TryConnectCustomAgentResponse::FailCli {
-                    error: error.to_string(),
+                    error: if private {
+                        crate::studio_aelix::probe_failure_message("command_not_found").into()
+                    } else {
+                        error.to_string()
+                    },
                 },
                 None,
             );
         }
     };
-    debug!(program = %resolved.program.display(), "probe step 1 ok");
+    if !private {
+        debug!(program = %resolved.program.display(), "probe step 1 ok");
+    }
 
     // ── Step 2 — spawn + ACP initialize ─────────────────────────────
     let spec = probe_command_spec(resolved, args, env);
-    try_connect_resolved(spec, false).await
+    try_connect_resolved(spec, private).await
 }
 
 pub(crate) async fn try_connect_resolved(
@@ -131,7 +139,7 @@ pub(crate) async fn try_connect_resolved(
         }
     };
 
-    let outcome = match tokio::time::timeout(STEP2_TIMEOUT, run_handshake(&proc)).await {
+    let outcome = match tokio::time::timeout(STEP2_TIMEOUT, run_handshake(&proc, redact_launch)).await {
         Ok(outcome) => {
             let catalog = match &outcome {
                 ProbeOutcome::Ok(catalog) => catalog.clone(),
@@ -216,7 +224,7 @@ impl ProbeOutcome {
     }
 }
 
-async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
+async fn run_handshake(proc: &CliAgentProcess, private: bool) -> ProbeOutcome {
     let Some((stdin, stdout)) = proc.take_stdio().await else {
         return ProbeOutcome::Fail("stdio not available after spawn_for_sdk".to_string());
     };
@@ -252,6 +260,7 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
         },
         false,
         false,
+        private,
     );
     let protocol = tokio::select! {
         biased;
@@ -302,6 +311,7 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
         Err(AcpError::AuthRequired) => {
             ProbeOutcome::Auth("Agent reachable but requires login/authorization".to_string())
         }
+        Err(_) if private => ProbeOutcome::Fail(crate::studio_aelix::probe_failure_message("acp_init_failed").into()),
         Err(e) => ProbeOutcome::Fail(format!("ACP session/new failed: {e}")),
     };
 

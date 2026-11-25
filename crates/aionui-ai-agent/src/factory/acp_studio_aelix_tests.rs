@@ -13,7 +13,7 @@ use crate::studio_aelix::{AGENT_ID, RUNTIME_UNAVAILABLE};
 
 const TEST_CASE: &str = "HOST67_ACP_TEST_CASE";
 const TEST_DIR: &str = "HOST67_ACP_TEST_DIR";
-const LAUNCH_ENV: &str = "AIONUI_STUDIO_AELIX_LAUNCH";
+const TEST_DESCRIPTOR: &str = "HOST67_ACP_TEST_DESCRIPTOR";
 const USER: &str = "system_default_user";
 
 const PEER: &str = r#"#!/usr/bin/env python3
@@ -23,9 +23,9 @@ import sys
 
 case = os.environ['HOST67_ACP_TEST_CASE']
 root = os.environ['HOST67_ACP_TEST_DIR']
-studio_launch = case not in ('command-override', 'custom')
+studio_launch = case not in ('command-override', 'custom', 'legacy-builtin')
 assert 'AIONUI_STUDIO_AELIX_LAUNCH' not in os.environ
-assert sys.argv[1:] == (['--profile', 'coding'] if studio_launch else [])
+assert sys.argv[1:] == (['acp', '--profile', 'coding'] if studio_launch else [])
 if studio_launch:
     assert os.environ['AELIX_CODING_AGENT_DIR'] == os.path.join(root, 'agent')
     assert os.environ['AELIX_ACP_STUDIO_MANAGED'] == '1'
@@ -66,6 +66,10 @@ async fn studio_launch_and_relay_use_the_seeded_catalog_entry() {
         "env-override",
         "custom",
         "wrong-name",
+        "legacy-builtin",
+        "unproven",
+        "relative-launcher",
+        "missing-launcher",
     ] {
         let workspace = dir.path().join(case);
         std::fs::create_dir(&workspace).unwrap();
@@ -73,6 +77,16 @@ async fn studio_launch_and_relay_use_the_seeded_catalog_entry() {
         std::fs::create_dir(command.parent().unwrap()).unwrap();
         std::fs::write(&command, PEER).unwrap();
         std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launcher = command.with_file_name("launch.py");
+        if case != "missing-launcher" {
+            std::fs::write(&launcher, PEER).unwrap();
+        }
+        let launcher = if case == "relative-launcher" {
+            std::path::PathBuf::from("launch.py")
+        } else {
+            launcher
+        };
+        let python = aionui_runtime::resolve_command_path("python3").unwrap();
         let mut child = aionui_runtime::Builder::new(&test_binary);
         child
             .args([
@@ -84,13 +98,13 @@ async fn studio_launch_and_relay_use_the_seeded_catalog_entry() {
             ])
             .env(TEST_CASE, case)
             .env(TEST_DIR, &workspace)
-            .env_remove(LAUNCH_ENV);
+            .env_remove(TEST_DESCRIPTOR);
         if case != "missing" {
             child.env(
-                LAUNCH_ENV,
+                TEST_DESCRIPTOR,
                 json!({
-                    "command": command,
-                    "args": ["--profile", "coding"],
+                    "command": python,
+                    "args": ["-I", "-S", "-B", "-X", "utf8", launcher, "acp", "--profile", "coding"],
                     "env": {
                         "AELIX_CODING_AGENT_DIR": workspace.join("agent"),
                         "AELIX_ACP_STUDIO_MANAGED": "1",
@@ -130,8 +144,13 @@ async fn studio_launch_child() {
                 .bind(USER).bind(command.to_str().unwrap()).execute(db.pool()).await.unwrap();
             "e4cedc22"
         }
+        "legacy-builtin" => {
+            sqlx::query("INSERT INTO agent_metadata (id, agent_id, name, backend, agent_type, agent_source, command, created_at, updated_at) VALUES ('legacy-fixture', 'legacy-fixture', 'Old fixture', 'aelix', 'acp', 'builtin', ?1, 1, 1)")
+                .bind(command.to_str().unwrap()).execute(db.pool()).await.unwrap();
+            "legacy-fixture"
+        }
         "command-override" => {
-            sqlx::query("UPDATE agent_metadata SET command_override = ? WHERE id = 'builtin-aelix'")
+            sqlx::query("UPDATE agent_metadata SET command_override = ? WHERE agent_id = 'builtin-aelix'")
                 .bind(command.to_str().unwrap())
                 .execute(db.pool())
                 .await
@@ -139,23 +158,36 @@ async fn studio_launch_child() {
             AGENT_ID
         }
         "env-override" => {
-            sqlx::query("UPDATE agent_metadata SET env_override = '[{\"name\":\"HOST67_OVERRIDE\",\"value\":\"set\"}]' WHERE id = 'builtin-aelix'")
+            sqlx::query("UPDATE agent_metadata SET env_override = '[{\"name\":\"HOST67_OVERRIDE\",\"value\":\"set\"}]' WHERE agent_id = 'builtin-aelix'")
                 .execute(db.pool()).await.unwrap();
             AGENT_ID
         }
         "missing" => {
-            sqlx::query("UPDATE agent_metadata SET last_check_status = 'online', last_check_kind = 'session' WHERE id = 'builtin-aelix'")
+            sqlx::query("UPDATE agent_metadata SET last_check_status = 'online', last_check_kind = 'session' WHERE agent_id = 'builtin-aelix'")
                 .execute(db.pool()).await.unwrap();
             AGENT_ID
         }
         _ => AGENT_ID,
     };
-    let registry = AgentRegistry::new(Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone())));
+    let descriptor = std::env::var(TEST_DESCRIPTOR).ok();
+    let registry = AgentRegistry::new_for_studio(
+        Arc::new(SqliteAgentMetadataRepository::new(db.pool().clone())),
+        USER.to_owned(),
+        descriptor.as_deref(),
+    );
     registry.hydrate().await.unwrap();
     let meta = registry.get_for_user(USER, id).await.unwrap().unwrap();
-    let spec = resolve_agent_command_spec(&meta, USER, cwd, "studio-acp", Arc::new(BroadcastEventBus::new(16))).await;
+    let spec = resolve_agent_command_spec(
+        &registry,
+        &meta,
+        USER,
+        cwd,
+        "studio-acp",
+        Arc::new(BroadcastEventBus::new(16)),
+    )
+    .await;
 
-    if case == "missing" {
+    if matches!(case.as_str(), "missing" | "relative-launcher" | "missing-launcher") {
         assert!(!meta.available);
         assert!(matches!(spec, Err(AgentError::BadRequest(message)) if message == RUNTIME_UNAVAILABLE));
         let service =
@@ -192,9 +224,16 @@ async fn studio_launch_child() {
     }
 
     let spec = spec.unwrap();
-    assert_eq!(spec.command, command);
+    let descriptor_path = !matches!(case.as_str(), "command-override" | "custom" | "legacy-builtin");
+    let expected = if descriptor_path {
+        aionui_runtime::resolve_command_path("python3").unwrap()
+    } else {
+        command
+    };
+    assert_eq!(spec.command, expected);
+    let provenance = descriptor_path && case != "unproven";
     let candidate = matches!(case.as_str(), "original" | "moved" | "wrong-name");
-    assert_eq!(is_builtin_aelix(&meta), candidate);
+    assert_eq!(is_builtin_aelix(&meta, provenance), candidate);
     if candidate {
         assert_eq!(meta.id, AGENT_ID);
         assert!(meta.command.is_none());
@@ -210,7 +249,7 @@ async fn studio_launch_child() {
             AgentManagementStatus::Online
         );
     }
-    let params = assemble_acp_params(
+    let mut params = assemble_acp_params(
         format!("studio-acp-{case}"),
         USER.into(),
         WorkspaceInfo {
@@ -226,6 +265,7 @@ async fn studio_launch_child() {
         false,
     )
     .await;
+    params.studio_launch = provenance;
     let paths = aionui_extension::resolve_skill_paths(&workspace, &workspace);
     let (manager, _events, _notifications) = AcpAgentManager::build(
         Arc::new(params),

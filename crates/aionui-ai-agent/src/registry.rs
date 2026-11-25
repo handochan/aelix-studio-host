@@ -112,6 +112,21 @@ pub struct AgentRegistry {
     /// slow history) during the last hydrate/refresh. Settled by
     /// [`Self::run_slow_probe_recheck`].
     pending_recheck: RwLock<Vec<String>>,
+    studio_aelix: Option<StudioAelixState>,
+}
+
+struct StudioAelixState {
+    operator: String,
+    launch: Option<crate::studio_aelix::StudioAelixLaunch>,
+    health: std::sync::Mutex<Option<StudioAelixHealth>>,
+}
+
+struct StudioAelixHealth {
+    status: AgentSnapshotCheckStatus,
+    kind: Option<AgentSnapshotCheckKind>,
+    code: Option<String>,
+    latency_ms: i64,
+    checked_at: i64,
 }
 
 impl AgentRegistry {
@@ -120,6 +135,31 @@ impl AgentRegistry {
     }
 
     pub fn new_with_probe_policy(repo: Arc<dyn IAgentMetadataRepository>, probe_policy: ProbePolicy) -> Arc<Self> {
+        Self::new_with_studio_state(repo, probe_policy, None)
+    }
+
+    /// The composition root supplies the principal of its protected Studio listener.
+    pub fn new_for_studio(
+        repo: Arc<dyn IAgentMetadataRepository>,
+        operator: String,
+        descriptor: Option<&str>,
+    ) -> Arc<Self> {
+        Self::new_with_studio_state(
+            repo,
+            ProbePolicy::default(),
+            Some(StudioAelixState {
+                operator,
+                launch: descriptor.and_then(crate::studio_aelix::StudioAelixLaunch::parse),
+                health: std::sync::Mutex::new(None),
+            }),
+        )
+    }
+
+    fn new_with_studio_state(
+        repo: Arc<dyn IAgentMetadataRepository>,
+        probe_policy: ProbePolicy,
+        studio_aelix: Option<StudioAelixState>,
+    ) -> Arc<Self> {
         let (tx, rx) = mpsc::channel::<CatalogSyncMessage>(CATALOG_SYNC_CHANNEL_CAPACITY);
         let this = Arc::new(Self {
             repo,
@@ -128,10 +168,118 @@ impl AgentRegistry {
             catalog_tx: tx,
             probe_policy,
             pending_recheck: RwLock::new(Vec::new()),
+            studio_aelix,
         });
 
         this.clone().spawn_catalog_consumer(rx);
         this
+    }
+
+    fn studio_state_for(&self, user_id: &str) -> Option<&StudioAelixState> {
+        self.studio_aelix.as_ref().filter(|studio| studio.operator == user_id)
+    }
+
+    pub(crate) fn authorize_studio_aelix(&self, user_id: &str, id: &str) -> Result<(), AgentError> {
+        if id == crate::studio_aelix::AGENT_ID && self.studio_state_for(user_id).is_none() {
+            return Err(AgentError::forbidden("Builtin Aelix requires the Studio operator"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn studio_aelix_launch(&self, user_id: &str) -> Option<&crate::studio_aelix::StudioAelixLaunch> {
+        self.studio_state_for(user_id)?.launch.as_ref()
+    }
+
+    pub(crate) fn record_studio_health(
+        &self,
+        user_id: &str,
+        params: &aionui_db::UpdateAgentAvailabilitySnapshotParams<'_>,
+    ) {
+        if let Some(studio) = self.studio_state_for(user_id) {
+            *studio.health.lock().unwrap() = params
+                .last_check_status
+                .and_then(|status| parse_last_check_status(Some(status)))
+                .map(|status| StudioAelixHealth {
+                    status,
+                    kind: parse_last_check_kind(params.last_check_kind),
+                    code: params.last_check_error_code.map(str::to_owned),
+                    latency_ms: params.last_check_latency_ms.unwrap_or_default(),
+                    checked_at: params.last_check_at.unwrap_or_default(),
+                });
+        }
+    }
+
+    pub(crate) fn reset_studio_health(&self, user_id: &str, id: &str) {
+        if id == crate::studio_aelix::AGENT_ID
+            && let Some(studio) = self.studio_state_for(user_id)
+        {
+            *studio.health.lock().unwrap() = None;
+        }
+    }
+
+    fn decode_projected(
+        &self,
+        row: AgentMetadataRow,
+        mode: AvailabilityProjection,
+        user_id: Option<&str>,
+    ) -> Option<(AgentMetadata, Option<UnavailableReason>)> {
+        let (mut meta, mut reason) = decode_row(row, mode)?;
+        if crate::studio_aelix::is_catalog_entry(&meta) {
+            reason = self.project_studio_aelix(&mut meta, user_id);
+        }
+        Some((meta, reason))
+    }
+
+    fn project_studio_aelix(&self, meta: &mut AgentMetadata, user_id: Option<&str>) -> Option<UnavailableReason> {
+        let studio = match user_id {
+            Some(user_id) => self.studio_state_for(user_id),
+            None => self.studio_aelix.as_ref(),
+        };
+        meta.last_check_status = None;
+        meta.last_check_kind = None;
+        meta.last_check_error_code = None;
+        meta.last_check_error_message = None;
+        meta.last_check_error_details = None;
+        meta.last_check_guidance = None;
+        meta.last_check_latency_ms = None;
+        meta.last_check_at = None;
+        meta.last_success_at = None;
+        meta.last_failure_at = None;
+        meta.resolved_command = None;
+        meta.available = false;
+        if studio.is_none() {
+            meta.command = None;
+            meta.args.clear();
+            meta.env.clear();
+            meta.has_command_override = false;
+            meta.env_override_key_count = 0;
+            meta.handshake = AgentHandshake::default();
+        }
+        if !meta.enabled {
+            return Some(UnavailableReason::Disabled);
+        }
+        if let Some(studio) = studio {
+            if let Some(health) = studio.health.lock().unwrap().as_ref() {
+                meta.last_check_status = Some(health.status);
+                meta.last_check_kind = health.kind;
+                meta.last_check_error_code = health.code.clone();
+                meta.last_check_error_message = health
+                    .code
+                    .as_ref()
+                    .map(|code| crate::studio_aelix::probe_failure_message(code).to_owned());
+                meta.last_check_latency_ms = Some(health.latency_ms);
+                meta.last_check_at = Some(health.checked_at);
+            }
+            if meta.has_command_override {
+                return apply_probe_availability(meta);
+            }
+            meta.resolved_command = studio.launch.as_ref().and_then(|launch| launch.resolve_command());
+            meta.available = meta.resolved_command.is_some();
+        }
+        (!meta.available).then(|| UnavailableReason::ManagedRuntimeUnavailable {
+            resource: "Aelix".to_owned(),
+            detail: crate::studio_aelix::RUNTIME_UNAVAILABLE.to_owned(),
+        })
     }
 
     /// Drive the single consumer task. Runs until every sender (including
@@ -206,7 +354,9 @@ impl AgentRegistry {
         };
 
         let can_update_global_cache = row.user_id.is_none() || row.user_id.as_deref() == Some(SYSTEM_DEFAULT_USER_ID);
-        if can_update_global_cache && let Some((mut meta, reason)) = decode_row(row, AvailabilityProjection::Cached) {
+        if can_update_global_cache
+            && let Some((mut meta, reason)) = self.decode_projected(row, AvailabilityProjection::Cached, Some(user_id))
+        {
             let existing_availability = self
                 .by_id
                 .read()
@@ -238,7 +388,7 @@ impl AgentRegistry {
         }
         .map_err(|e| AgentError::internal(format!("load agent_metadata '{id}' for handshake merge: {e}")))?;
         Ok(row
-            .and_then(|row| decode_row(row, AvailabilityProjection::Cached))
+            .and_then(|row| self.decode_projected(row, AvailabilityProjection::Cached, Some(user_id)))
             .and_then(|(meta, _)| meta.handshake.config_options))
     }
 
@@ -275,7 +425,7 @@ impl AgentRegistry {
 
         let candidates: Vec<_> = rows
             .into_iter()
-            .filter_map(|row| decode_row(row, AvailabilityProjection::Probe))
+            .filter_map(|row| self.decode_projected(row, AvailabilityProjection::Probe, None))
             .collect();
         let validated = validate_cli_candidates(candidates, self.probe_policy).await;
 
@@ -377,10 +527,11 @@ impl AgentRegistry {
         let candidates: Vec<_> = snapshot
             .into_iter()
             .map(|mut meta| {
-                let (path, reason) = probe_with_reason(&meta);
-                meta.resolved_command = path;
-                meta.available = meta.resolved_command.is_some() || is_internal_commandless_agent(&meta);
-                let reason = if meta.available { None } else { reason };
+                let reason = if crate::studio_aelix::is_catalog_entry(&meta) {
+                    self.project_studio_aelix(&mut meta, None)
+                } else {
+                    apply_probe_availability(&mut meta)
+                };
                 (meta, reason)
             })
             .collect();
@@ -425,7 +576,7 @@ impl AgentRegistry {
             self.unavailable_reasons.write().await.remove(id);
             return Ok(None);
         };
-        let Some((meta, reason)) = decode_row(row, AvailabilityProjection::Probe) else {
+        let Some((meta, reason)) = self.decode_projected(row, AvailabilityProjection::Probe, None) else {
             self.by_id.write().await.remove(id);
             self.unavailable_reasons.write().await.remove(id);
             return Ok(None);
@@ -462,7 +613,8 @@ impl AgentRegistry {
             .find_builtin_by_backend_for_user(user_id, vendor)
             .await
             .ok()??;
-        decode_row(row, AvailabilityProjection::Cached).map(|(meta, _)| meta)
+        self.decode_projected(row, AvailabilityProjection::Cached, Some(user_id))
+            .map(|(meta, _)| meta)
     }
 
     /// Every enabled, installed row whose `agent_type` matches,
@@ -540,14 +692,15 @@ impl AgentRegistry {
             .filter_map(|row| {
                 let can_use_global_cache =
                     row.user_id.is_none() || row.user_id.as_deref() == Some(SYSTEM_DEFAULT_USER_ID);
-                decode_row(row, AvailabilityProjection::Cached).map(|decoded| (decoded, can_use_global_cache))
+                self.decode_projected(row, AvailabilityProjection::Cached, Some(user_id))
+                    .map(|decoded| (decoded, can_use_global_cache))
             })
             .map(|((mut meta, mut reason), can_use_global_cache)| {
                 let cached_meta = can_use_global_cache.then(|| cached_rows.get(&meta.id)).flatten();
                 let cached_reason = can_use_global_cache.then(|| cached_reasons.get(&meta.id)).flatten();
                 if cached_meta.is_some() {
                     (meta, reason) = overlay_hydrated_availability(meta, reason, cached_meta, cached_reason);
-                } else if !has_availability_snapshot(&meta) {
+                } else if !crate::studio_aelix::is_catalog_entry(&meta) && !has_availability_snapshot(&meta) {
                     reason = apply_probe_availability(&mut meta);
                 }
                 agent_management_row(meta, reason.as_ref())
@@ -569,7 +722,9 @@ impl AgentRegistry {
             .get_for_user(user_id, id)
             .await
             .map_err(|e| AgentError::internal(format!("load agent_metadata '{id}' for user: {e}")))?;
-        let Some((meta, _)) = row.and_then(|row| decode_row(row, AvailabilityProjection::Probe)) else {
+        let Some((meta, _)) =
+            row.and_then(|row| self.decode_projected(row, AvailabilityProjection::Probe, Some(user_id)))
+        else {
             return Ok(None);
         };
         let (meta, _, _) = validate_cli_availability(meta, None, self.probe_policy).await;
@@ -590,7 +745,8 @@ impl AgentRegistry {
             return Ok(None);
         };
         let can_use_global_cache = row.user_id.is_none() || row.user_id.as_deref() == Some(SYSTEM_DEFAULT_USER_ID);
-        let Some((mut meta, mut reason)) = decode_row(row, AvailabilityProjection::Cached) else {
+        let Some((mut meta, mut reason)) = self.decode_projected(row, AvailabilityProjection::Cached, Some(user_id))
+        else {
             return Ok(None);
         };
         let cached_meta = if can_use_global_cache {
@@ -605,7 +761,7 @@ impl AgentRegistry {
         };
         if cached_meta.is_some() {
             (meta, reason) = overlay_hydrated_availability(meta, reason, cached_meta.as_ref(), cached_reason.as_ref());
-        } else if !has_availability_snapshot(&meta) {
+        } else if !crate::studio_aelix::is_catalog_entry(&meta) && !has_availability_snapshot(&meta) {
             reason = apply_probe_availability(&mut meta);
         }
         Ok(Some(agent_management_row(meta, reason.as_ref())))
@@ -711,7 +867,7 @@ fn overlay_hydrated_availability(
     let Some(cached_meta) = cached_meta else {
         return (meta, reason);
     };
-    if crate::studio_aelix::uses_studio_launch(&meta)
+    if crate::studio_aelix::is_catalog_entry(&meta)
         || has_availability_snapshot(&meta)
         || !same_runtime_availability_inputs(&meta, cached_meta)
     {
@@ -950,7 +1106,7 @@ async fn validate_cli_availability(
     reason: Option<UnavailableReason>,
     policy: ProbePolicy,
 ) -> (AgentMetadata, Option<UnavailableReason>, InlineProbeOutcome) {
-    if !meta.available || meta.agent_source != AgentSource::Builtin {
+    if !meta.available || meta.agent_source != AgentSource::Builtin || crate::studio_aelix::is_catalog_entry(&meta) {
         return (meta, reason, InlineProbeOutcome::NotProbed);
     }
 
@@ -1014,11 +1170,6 @@ fn apply_cached_availability(meta: &mut AgentMetadata) -> Option<UnavailableReas
     if is_internal_commandless_agent(meta) {
         meta.available = true;
         return None;
-    }
-    if crate::studio_aelix::uses_studio_launch(meta) {
-        // A prior host run may have used a different installation or had no
-        // runtime at all. Project presence from this host's startup environment.
-        return apply_probe_availability(meta);
     }
     if cached_snapshot_indicates_missing(meta) {
         meta.available = false;
@@ -1239,7 +1390,7 @@ fn derive_management_status(meta: &AgentMetadata, reason: Option<&UnavailableRea
     match meta.last_check_status {
         Some(AgentSnapshotCheckStatus::Offline) => AgentManagementStatus::Offline,
         Some(AgentSnapshotCheckStatus::Online) => AgentManagementStatus::Online,
-        None if crate::studio_aelix::uses_studio_launch(meta) => AgentManagementStatus::Online,
+        None if crate::studio_aelix::is_catalog_entry(meta) => AgentManagementStatus::Online,
         None => AgentManagementStatus::Unchecked,
     }
 }
@@ -1583,15 +1734,6 @@ impl std::fmt::Display for UnavailableReason {
 fn probe_resolved_command(meta: &AgentMetadata) -> Result<PathBuf, UnavailableReason> {
     if !meta.enabled {
         return Err(UnavailableReason::Disabled);
-    }
-
-    if crate::studio_aelix::uses_studio_launch(meta) {
-        return crate::studio_aelix::StudioAelixLaunch::load()
-            .and_then(|launch| launch.resolve_command())
-            .ok_or_else(|| UnavailableReason::ManagedRuntimeUnavailable {
-                resource: "Aelix".to_owned(),
-                detail: crate::studio_aelix::RUNTIME_UNAVAILABLE.to_owned(),
-            });
     }
 
     // Builtin claude/codex run as direct CLIs now: availability is a PATH-only

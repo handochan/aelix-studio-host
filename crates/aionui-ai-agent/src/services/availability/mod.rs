@@ -61,11 +61,15 @@ impl AgentAvailabilityService {
     }
 
     pub async fn run_manual_health_check(&self, user_id: &str, id: &str) -> Result<AgentManagementRow, AgentError> {
+        self.registry.authorize_studio_aelix(user_id, id)?;
         let meta = self
             .registry
             .get_for_user(user_id, id)
             .await?
             .ok_or_else(|| AgentError::not_found(format!("Agent '{id}' not found")))?;
+        if crate::studio_aelix::is_catalog_entry(&meta) && !meta.enabled {
+            return Err(AgentError::bad_request(crate::studio_aelix::AGENT_DISABLED));
+        }
 
         // #675: never short-circuit on a stale availability verdict — the
         // manual check is the user's self-rescue path. `run_probe` handles a
@@ -167,6 +171,12 @@ impl AgentAvailabilityService {
                 existing.last_failure_at
             },
         };
+        if id == crate::studio_aelix::AGENT_ID {
+            self.registry.authorize_studio_aelix(user_id, id)?;
+            self.registry.record_studio_health(user_id, &params);
+            self.registry.reload_one(id).await?;
+            return Ok(());
+        }
         self.registry
             .repo_handle()
             .update_availability_snapshot_for_user(user_id, id, &params)
@@ -205,10 +215,12 @@ async fn run_probe(
     // has nothing extra to say.
     let mut guidance: Option<String> = None;
 
-    let (status, error_code, error_message) = if crate::studio_aelix::uses_studio_launch(meta) {
+    let studio = crate::studio_aelix::is_catalog_entry(meta);
+    let (status, error_code, error_message) = if studio && !meta.has_command_override {
         // Availability already projects a missing runtime. Avoid persisting an
         // offline handshake verdict for a host that had no runtime to probe.
-        let spec = crate::studio_aelix::StudioAelixLaunch::load()?
+        let spec = registry
+            .studio_aelix_launch(user_id)?
             .command_spec(meta, std::env::temp_dir().to_string_lossy().into_owned())?;
         let probe = custom_agent_probe::try_connect_resolved(spec, true).await;
         apply_acp_probe_result(registry, meta, user_id, probe)
@@ -292,7 +304,7 @@ async fn run_probe(
             ),
             Ok(args) => {
                 let probe = if meta.agent_source == AgentSource::Builtin {
-                    custom_agent_probe::try_connect_builtin_agent_with_catalog(command, &args, &env, None).await
+                    custom_agent_probe::try_connect_builtin_agent_with_catalog(command, &args, &env, None, studio).await
                 } else {
                     custom_agent_probe::try_connect_custom_agent_with_catalog(command, &args, &env, None).await
                 };

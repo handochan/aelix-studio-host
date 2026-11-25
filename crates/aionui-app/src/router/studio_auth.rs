@@ -30,6 +30,10 @@ pub struct StudioAuth {
 }
 
 impl StudioAuth {
+    pub(crate) fn operator_id(&self) -> &'static str {
+        OPERATOR
+    }
+
     pub fn new(port: u16, secret: [u8; 64]) -> Self {
         let authority = format!("127.0.0.1:{port}");
         Self {

@@ -7,7 +7,7 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1::{
     ContentBlock, InitializeResponse, Meta, RequestId, SessionId, SessionNotification, SessionUpdate,
 };
-use aionui_api_types::{AcpExtensionDiscovery, AcpExtensionRequest, AgentMetadata, AgentSource};
+use aionui_api_types::{AcpExtensionDiscovery, AcpExtensionRequest, AgentMetadata};
 use serde::Deserialize;
 use serde_json::{Value, json, value::RawValue};
 use tokio::sync::{oneshot, watch};
@@ -41,9 +41,10 @@ pub(crate) fn check_stdio_line(line: String) -> Result<String, tokio_util::codec
     }
 }
 
-pub(crate) fn is_builtin_aelix(metadata: &AgentMetadata) -> bool {
-    metadata.agent_source == AgentSource::Builtin
-        && metadata.backend.as_deref() == Some("aelix")
+pub(crate) fn is_builtin_aelix(metadata: &AgentMetadata, studio_launch: bool) -> bool {
+    studio_launch
+        && crate::studio_aelix::is_catalog_entry(metadata)
+        && metadata.enabled
         && !metadata.has_command_override
         && metadata.env_override_key_count == 0
 }

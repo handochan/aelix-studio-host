@@ -28,6 +28,10 @@ fn main() -> ExitCode {
 
 fn run_main() -> Result<ExitCode, MainError> {
     let cli = Cli::parse();
+    let studio_launch = std::env::var(aionui_runtime::STUDIO_AELIX_LAUNCH_ENV).ok();
+    // SAFETY: startup is single-threaded here, before runtime setup or any
+    // child spawn. This is the same boundary used for the PATH update below.
+    unsafe { std::env::remove_var(aionui_runtime::STUDIO_AELIX_LAUNCH_ENV) };
 
     // mcp-* subcommands route into short-lived stdio helpers that live entirely
     // outside the main HTTP server. They share the global flags so clap can
@@ -53,7 +57,7 @@ fn run_main() -> Result<ExitCode, MainError> {
         .enable_all()
         .build()
         .map_err(|error| runtime_init_error_for_command(&cli.command, error))?;
-    runtime.block_on(async_main(merged_path, cli))
+    runtime.block_on(async_main(merged_path, cli, studio_launch))
 }
 
 fn runtime_init_error_for_command(command: &Option<Command>, error: std::io::Error) -> MainError {
@@ -75,7 +79,7 @@ fn runtime_init_error_for_command(command: &Option<Command>, error: std::io::Err
     ))
 }
 
-async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError> {
+async fn async_main(merged_path: String, cli: Cli, studio_launch: Option<String>) -> Result<ExitCode, MainError> {
     // MCP stdio helpers must not touch the database, logging setup, or `AppServices`.
     match cli.command {
         Some(Command::Capabilities) => Ok(commands::run_capabilities()),
@@ -174,7 +178,15 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError
 
             let listener = commands::bind_http_listener(&mut env.config).await?;
             let database = bootstrap::init_data_layer(&env.config).await?;
-            let services = AppServices::from_config(database, &env.config).await.map_err(|error| {
+            let studio_auth = studio_secret.map(|secret| aionui_app::StudioAuth::new(env.config.port, secret));
+            let services = match &studio_auth {
+                Some(auth) => {
+                    AppServices::from_config_with_studio_auth(database, &env.config, auth, studio_launch.as_deref())
+                        .await
+                }
+                None => AppServices::from_config(database, &env.config).await,
+            }
+            .map_err(|error| {
                 bootstrap::BootstrapError::new(
                     bootstrap::BootstrapErrorCode::ServiceInitFailed,
                     "services.init",
@@ -183,7 +195,6 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode, MainError
                 .with_source(error)
             })?;
             let parent_exit = parent_exit_signal(cli.parent_pid);
-            let studio_auth = studio_secret.map(|secret| aionui_app::StudioAuth::new(env.config.port, secret));
             Ok(commands::run_server(env, services, listener, parent_exit, studio_auth).await?)
         }
     }
