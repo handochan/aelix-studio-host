@@ -268,8 +268,8 @@ impl AcpSession {
         self.pending_session_new_prelude = Some(SessionNewPrelude::Deferred);
     }
 
-    pub(super) fn has_deferred_aelix_prelude(&self) -> bool {
-        matches!(self.pending_session_new_prelude, Some(SessionNewPrelude::Deferred))
+    pub(super) fn pending_session_new_prelude(&self) -> Option<SessionNewPrelude> {
+        self.pending_session_new_prelude
     }
 
     /// Consume the prelude flag. Returns `true` exactly once after
@@ -279,8 +279,8 @@ impl AcpSession {
     }
 }
 
-#[derive(Debug, Clone)]
-enum SessionNewPrelude {
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SessionNewPrelude {
     Fresh,
     Deferred,
 }

@@ -871,8 +871,8 @@ async fn run_sdk_background(
     // We use the vendored `Lines` transport — the crate's documented
     // first-party interception point — whose newline framing is equivalent to
     // `ByteStreams` (which internally splits stdout on `\n` and appends `\n` on
-    // writes). Only the two recognised shapes are absorbed; every other line,
-    // including genuinely malformed input, is forwarded unchanged.
+    // writes). Model-selection refusal data is also validated against the raw
+    // line before the SDK can normalize it.
     let dialect_event_tx = event_tx.clone();
     let incoming_alive = Arc::clone(&alive);
     let eof_alive = Arc::clone(&alive);
@@ -930,9 +930,9 @@ async fn run_sdk_background(
                     other => other,
                 };
                 match line {
-                    Ok(line) => match acp_dialect::classify_incoming_line(&line) {
-                        acp_dialect::LineDisposition::Forward(line) => Some(Ok(line)),
-                        acp_dialect::LineDisposition::Absorb(kind) => {
+                    Ok(line) => {
+                        let normalized = serde_json::from_str(&line).ok();
+                        if let Some(kind) = normalized.as_ref().and_then(acp_dialect::absorbed_kind) {
                             log_acp_dialect_absorbed(kind, &line);
                             // `broadcast::send` is synchronous and non-blocking; a
                             // send error only means no active subscriber for this
@@ -941,8 +941,10 @@ async fn run_sdk_background(
                                 stream_event::AcpDialectSignalData { kind },
                             ));
                             None
+                        } else {
+                            Some(Ok(super::acp_error_wire::sanitize_model_refusals(line, normalized)))
                         }
-                    },
+                    }
                     Err(err) => Some(Err(err)),
                 }
             }

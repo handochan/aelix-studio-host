@@ -14,8 +14,7 @@
 //! This module classifies a single raw newline-delimited JSON-RPC line at the
 //! transport boundary — *before* the SDK parses it — so those two shapes can be
 //! absorbed (and turned into an internal signal) instead of surfacing `-32602`.
-//! Every other line, including genuinely malformed input and any other unknown
-//! variant, is forwarded unchanged so the SDK still surfaces real errors.
+//! Other dialect notifications are left for the SDK to handle.
 //!
 //! Wire shapes are grounded in captured real data from this issue's
 //! `attachments/extracted/logs.txt` (deserialization-rejection payloads at
@@ -25,42 +24,23 @@
 use crate::protocol::events::AcpDialectSignalKind;
 use serde_json::Value;
 
-/// What the tolerant layer decides to do with one incoming JSON-RPC line.
-pub(crate) enum LineDisposition {
-    /// Hand the line to the SDK unchanged (canonical or unknown-but-not-ours).
-    Forward(String),
-    /// A recognised CodeBuddy dialect notification: absorb it (never reaches the
-    /// SDK, so no `-32602`) and raise the corresponding internal signal.
-    Absorb(AcpDialectSignalKind),
-}
-
 /// The `_meta` key CodeBuddy uses to tag an emergency-compaction notification.
 const COMPACT_TYPE_META_KEY: &str = "codebuddy.ai/compactType";
 /// Prefix of the `messageId` CodeBuddy stamps on max-token compaction chunks.
 const COMPACT_MESSAGE_ID_PREFIX: &str = "compact-maxtoken";
 
-/// Classify one raw newline-delimited JSON-RPC line per the wire criteria in
-/// `logs.txt`. Only the two recognised CodeBuddy shapes are absorbed; anything
-/// else (parse failure, other method, other/unknown variant) is forwarded.
-pub(crate) fn classify_incoming_line(line: &str) -> LineDisposition {
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        // Genuinely malformed input must still reach the SDK (validation #4:
-        // never swallow real errors).
-        return LineDisposition::Forward(line.to_owned());
-    };
-
+/// Identify the two CodeBuddy notifications the transport absorbs.
+pub(crate) fn absorbed_kind(value: &Value) -> Option<AcpDialectSignalKind> {
     // Only `session/update` notifications are candidates.
     if value.get("method").and_then(Value::as_str) != Some("session/update") {
-        return LineDisposition::Forward(line.to_owned());
+        return None;
     }
 
-    let Some(update) = value.pointer("/params/update") else {
-        return LineDisposition::Forward(line.to_owned());
-    };
+    let update = value.pointer("/params/update")?;
 
     // (a) `session_end` terminal marker — an unknown `sessionUpdate` variant.
     if update.get("sessionUpdate").and_then(Value::as_str) == Some("session_end") {
-        return LineDisposition::Absorb(AcpDialectSignalKind::SessionEnd);
+        return Some(AcpDialectSignalKind::SessionEnd);
     }
 
     // (b) emergency compaction: identified by the codebuddy compact markers, NOT
@@ -75,13 +55,7 @@ pub(crate) fn classify_incoming_line(line: &str) -> LineDisposition {
         .get("messageId")
         .and_then(Value::as_str)
         .is_some_and(|id| id.starts_with(COMPACT_MESSAGE_ID_PREFIX));
-    if has_compact_meta || has_compact_message_id {
-        return LineDisposition::Absorb(AcpDialectSignalKind::TokenPressure);
-    }
-
-    // (c) everything else — including other unknown variants and malformed
-    // messages — is forwarded so the SDK can surface `-32602` as before.
-    LineDisposition::Forward(line.to_owned())
+    (has_compact_meta || has_compact_message_id).then_some(AcpDialectSignalKind::TokenPressure)
 }
 
 /// Extract non-sensitive correlation context from an absorbed dialect line for
@@ -113,14 +87,10 @@ mod tests {
     use super::*;
 
     fn absorb_kind(line: &str) -> Option<AcpDialectSignalKind> {
-        match classify_incoming_line(line) {
-            LineDisposition::Absorb(kind) => Some(kind),
-            LineDisposition::Forward(forwarded) => {
-                // Forward must preserve the original line verbatim.
-                assert_eq!(forwarded, line);
-                None
-            }
-        }
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .as_ref()
+            .and_then(absorbed_kind)
     }
 
     // Real `session_end` payload shape (logs.txt:8798), wrapped in its JSON-RPC

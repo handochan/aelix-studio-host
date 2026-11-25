@@ -559,3 +559,154 @@ async fn byte_grant_rpc_refusals_preserve_safe_studio_recovery_context() {
         host.tasks.kill_and_wait(&id, None).await;
     }
 }
+
+#[tokio::test]
+async fn protected_prompt_model_selection_refusal_reaches_studio_live_and_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+    let refusal = model_selection_refusal();
+    std::fs::write(dir.join("relay-calls.prompt-refusal"), refusal.to_string()).unwrap();
+    let host = start_relay_host(dir, fixture(dir).await).await;
+    let id = create(&host, dir, "builtin-aelix").await;
+    let root = format!("{}/api/conversations/{id}", host.url);
+    ensure_and_discover(&host, &root).await;
+    let discovery = read(
+        host.client
+            .get(format!("{root}/acp-extensions"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(discovery["data"]["hostBytes"], true);
+    assert_model_selection_refusal(&host, &id, refusal).await;
+    // The fixture appends before each reply, including in a replacement worker.
+    let requests = std::fs::read_to_string(dir.join("relay-calls.prompt-requests")).unwrap();
+    assert_eq!(
+        requests.lines().count(),
+        1,
+        "prompt requests across workers: {requests}"
+    );
+    host.tasks.kill_and_wait(&id, None).await;
+}
+
+#[tokio::test]
+async fn legacy_prompt_model_selection_refusal_hides_peer_text() {
+    let trace = ByteTrace::default();
+    let capture = trace.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || capture.clone())
+            .finish(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let refusal = model_selection_refusal();
+    std::fs::write(dir.join("relay-calls.prompt-refusal"), refusal.to_string()).unwrap();
+    let host = start_relay_host(dir, fixture(dir).await).await;
+    let id = create(&host, dir, "custom-aelix").await;
+    assert_model_selection_refusal(&host, &id, refusal).await;
+    host.tasks.kill_and_wait(&id, None).await;
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("relay-calls.initialize")).unwrap(),
+        "standard"
+    );
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("Received JSON-RPC message"),
+        "legacy SDK tracing must be exercised"
+    );
+    assert!(
+        !log.contains("private-h1-standard"),
+        "peer refusal text reached host diagnostics"
+    );
+}
+
+fn model_selection_refusal() -> Value {
+    json!({"kind": "model_selection_required", "configId": "model", "availableModels": 2, "retryable": false})
+}
+
+async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Value) {
+    let root = format!("{}/api/conversations/{id}", host.url);
+    let mut upgrade = host.upgrade();
+    upgrade
+        .headers_mut()
+        .insert(PRIVATE_HEADER, FIXTURE_TOKEN.parse().unwrap());
+    let (mut websocket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    let accepted = read(
+        host.client
+            .post(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .json(&json!({"content": "Choose a model first"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    let turn_id = accepted["data"]["turn_id"].as_str().unwrap();
+    let expected = json!({
+        "message": "The Agent cannot perform this operation",
+        "protocol_code": -32004,
+        "data": refusal,
+        "code": "USER_AGENT_OPERATION_REFUSED",
+        "ownership": "user_agent",
+        "detail": "ACP request failed",
+        "retryable": false,
+        "feedback_recommended": false,
+    });
+    let live_error = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut refusal = None;
+        loop {
+            let frame = websocket.next().await.unwrap().unwrap();
+            if let Ok(text) = frame.to_text() {
+                assert!(!text.contains("private-h1-standard"), "peer text reached the stream");
+                let event: Value = serde_json::from_str(text).unwrap();
+                if event["data"]["conversation_id"] != id || event["data"]["turn_id"] != turn_id {
+                    continue;
+                }
+                match event["name"].as_str() {
+                    Some("message.stream") if event["data"]["type"] == "error" => {
+                        refusal = Some(event["data"]["data"].clone());
+                    }
+                    Some("turn.completed") => break refusal.expect("turn completed without an error frame"),
+                    _ => {}
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let history = read(
+        host.client
+            .get(format!("{root}/messages"))
+            .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(
+        !history.to_string().contains("private-h1-standard"),
+        "peer text reached history"
+    );
+    let tip = history["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["type"] == "tips")
+        .expect("the completed refusal must be in history");
+    assert_eq!(live_error, expected);
+    assert_eq!(
+        tip["content"],
+        json!({"type": "error", "content": expected["message"], "error": expected}),
+    );
+}

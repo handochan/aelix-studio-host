@@ -55,6 +55,7 @@ for line in sys.stdin:
     params = request.get('params', {})
     entry = method
     response = {'jsonrpc': '2.0', 'id': request['id']}
+    refusal_data = None
     if method == 'initialize':
         response['result'] = {
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
@@ -135,7 +136,8 @@ for line in sys.stdin:
             with open(trace, 'a') as output:
                 output.write(entry + '\n')
             sys.exit(0)
-        if body in ('Report activity then reject', 'Report activity then busy'):
+        if body in ('Report activity then reject', 'Report activity then busy',
+                    'Report activity then require model'):
             print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
                 'sessionId': params['sessionId'], 'update': {'sessionUpdate': 'agent_message_chunk',
                 'content': {'type': 'text', 'text': 'Already started'}}}}), flush=True)
@@ -161,6 +163,16 @@ for line in sys.stdin:
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
+        elif body in ('Choose a model first', 'Report activity then require model'):
+            response['error'] = {'code': -32004, 'message': 'Fixture refusal', 'data': {
+                'kind': 'model_selection_required', 'configId': 'model',
+                'availableModels': 2, 'retryable': False}}
+        elif body in ('Refuse with duplicate count', 'Refuse with object count'):
+            count = ('0,"availableModels":2' if body == 'Refuse with duplicate count'
+                     else '{"$serde_json::private::RawValue":"2"}')
+            refusal_data = ('{"kind":"model_selection_required","configId":"model",'
+                            '"availableModels":' + count + ',"retryable":false}')
+            response['error'] = {'code': -32004, 'message': 'Fixture refusal', 'data': 'fixture raw data'}
         else:
             response['result'] = {'stopReason': 'end_turn'}
     else:
@@ -173,7 +185,10 @@ for line in sys.stdin:
             'availableCommands': [{'name': name, 'description': name} for name in name_list]}}}), flush=True)
     with open(trace, 'a') as output:
         output.write(entry + '\n')
-    print(json.dumps(response), flush=True)
+    frame = json.dumps(response)
+    if refusal_data is not None:
+        frame = frame.replace('"fixture raw data"', refusal_data)
+    print(frame, flush=True)
 "#;
 
 const USER: &str = "selector-user";
@@ -558,6 +573,153 @@ async fn aelix_delivers_the_deferred_prelude_once_after_the_session_is_reopened(
 }
 
 #[tokio::test]
+async fn malformed_model_refusal_counts_on_stdio_keep_the_code_and_drop_data() {
+    let (temp, registry, sync) = setup().await;
+    let instance = open_session(temp.path(), &registry, &sync, "aelix-acp", "raw-refusal.txt", "generic").await;
+    let mut payloads = Vec::new();
+    for text in ["Refuse with duplicate count", "Refuse with object count"] {
+        let error = prompt(&instance, text).await.unwrap_err().into_stream_error();
+        assert_eq!(error.code, Some(AgentErrorCode::UserAgentOperationRefused));
+        assert_eq!(error.protocol_code, Some(-32004));
+        payloads.push(error.data);
+    }
+    instance.kill_and_wait(None).await;
+    assert_eq!(payloads, [None, None]);
+}
+
+#[tokio::test]
+async fn fresh_model_refusal_preserves_rules_in_the_same_process() {
+    check_fresh_model_refusal_preserves_rules(false).await;
+}
+
+#[tokio::test]
+async fn fresh_model_refusal_preserves_rules_after_transcript_reopen() {
+    check_fresh_model_refusal_preserves_rules(true).await;
+}
+
+async fn check_fresh_model_refusal_preserves_rules(reopen: bool) {
+    let (temp, registry, sync, db) = setup_with_db().await;
+    let surface = if reopen { "transcript-complete" } else { "generic" };
+    let mut instance = open_session(temp.path(), &registry, &sync, "aelix-acp", "fresh-refusal.txt", surface).await;
+    assert!(!prelude_pending(&sync).await, "a fresh prelude starts in memory");
+
+    let error = prompt(&instance, "Choose a model first").await.unwrap_err();
+    assert_eq!(error.code(), Some(AgentErrorCode::UserAgentOperationRefused));
+    assert_eq!(error.stream_error().retryable, Some(false));
+    let persisted_after_refusal = prelude_pending(&sync).await;
+    if reopen {
+        instance.kill_and_wait(None).await;
+        let (manager, domain_rx) =
+            build_session(temp.path(), &registry, &sync, "aelix-acp", "fresh-refusal.txt", surface).await;
+        let repo = Arc::new(aionui_db::SqliteConversationRepository::new(db.pool().clone()));
+        let manager = manager.with_conversation_repository(Some(repo));
+        sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+        manager.warmup_session().await.unwrap();
+        let replayed: String = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id = ? AND acp_native_entry_id = 'one'",
+        )
+        .bind(CONVERSATION)
+        .fetch_one(db.pool())
+        .await
+        .expect("the reopen must reconcile the native transcript");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replayed).unwrap()["content"],
+            "From CLI"
+        );
+        assert!(
+            prelude_pending(&sync).await,
+            "transcript reconciliation must retain the prelude"
+        );
+        instance = AgentInstance::Acp(Arc::new(manager));
+    }
+    prompt(&instance, "After selecting a model").await.unwrap();
+    prompt(&instance, "Second explicit send").await.unwrap();
+    instance.kill_and_wait(None).await;
+
+    let trace = std::fs::read_to_string(temp.path().join("fresh-refusal.txt")).unwrap();
+    assert_eq!(trace.lines().filter(|line| *line == "session/new").count(), 1);
+    assert_eq!(
+        trace.lines().filter(|line| *line == "session/load").count(),
+        usize::from(reopen)
+    );
+    assert_eq!(
+        prompt_trace(temp.path(), "fresh-refusal.txt"),
+        [
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nChoose a model first",
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nAfter selecting a model",
+            "Second explicit send",
+        ]
+    );
+    assert!(persisted_after_refusal);
+    assert!(!prelude_pending(&sync).await);
+}
+
+#[tokio::test]
+async fn fresh_prelude_is_not_restored_for_other_refusals_or_after_activity() {
+    for (text, code) in [
+        ("Busy before work", AgentErrorCode::UserAgentBusy),
+        ("Reject before work", AgentErrorCode::UserAgentInvalidParams),
+        (
+            "Report activity then require model",
+            AgentErrorCode::UserAgentOperationRefused,
+        ),
+        ("Refuse with duplicate count", AgentErrorCode::UserAgentOperationRefused),
+    ] {
+        let (temp, registry, sync) = setup().await;
+        let instance = open_session(
+            temp.path(),
+            &registry,
+            &sync,
+            "aelix-acp",
+            "other-refusal.txt",
+            "generic",
+        )
+        .await;
+        let error = prompt(&instance, text).await.unwrap_err();
+        assert_eq!(error.code(), Some(code), "{text}");
+        assert!(!prelude_pending(&sync).await, "{text}");
+        prompt(&instance, "Another explicit send").await.unwrap();
+        instance.kill_and_wait(None).await;
+
+        let sent = prompt_trace(temp.path(), "other-refusal.txt");
+        assert_eq!(sent.len(), 2, "{text}");
+        assert!(sent[0].starts_with("[Assistant Rules]\n"), "{text}");
+        assert_eq!(sent[1], "Another explicit send", "{text}");
+    }
+}
+
+#[tokio::test]
+async fn model_selection_refusal_restores_the_prelude_for_the_next_explicit_send() {
+    let (temp, registry, sync) = setup().await;
+    let first = open_session(temp.path(), &registry, &sync, "aelix-acp", "refused.txt", "generic").await;
+    prompt(&first, "/help").await.unwrap();
+    assert!(prelude_pending(&sync).await);
+
+    let error = prompt(&first, "Choose a model first").await.unwrap_err();
+    assert_eq!(error.code(), Some(AgentErrorCode::UserAgentOperationRefused));
+    assert_eq!(error.stream_error().retryable, Some(false));
+    let sent = prompt_trace(temp.path(), "refused.txt");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], "/help");
+    assert!(sent[1].contains("Fixture conversation rules"));
+    first.kill_and_wait(None).await;
+
+    let reopened = open_session(temp.path(), &registry, &sync, "aelix-acp", "selected.txt", "generic").await;
+    prompt(&reopened, "Explicit send after reopening").await.unwrap();
+    prompt(&reopened, "Second explicit send").await.unwrap();
+    let sent = prompt_trace(temp.path(), "selected.txt");
+    reopened.kill_and_wait(None).await;
+    assert_eq!(
+        sent,
+        [
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nExplicit send after reopening",
+            "Second explicit send",
+        ]
+    );
+    assert!(!prelude_pending(&sync).await);
+}
+
+#[tokio::test]
 async fn aelix_keeps_its_deferred_prelude_after_a_confirmed_request_rejection() {
     for (text, code) in [
         ("Reject before work", AgentErrorCode::UserAgentInvalidParams),
@@ -595,6 +757,11 @@ async fn aelix_does_not_restore_a_deferred_prelude_after_activity_or_transport_l
     for (text, code) in [
         ("Report activity then reject", AgentErrorCode::UserAgentInvalidParams),
         ("Report activity then busy", AgentErrorCode::UserAgentBusy),
+        (
+            "Report activity then require model",
+            AgentErrorCode::UserAgentOperationRefused,
+        ),
+        ("Refuse with duplicate count", AgentErrorCode::UserAgentOperationRefused),
         (
             "Close after receiving prompt",
             AgentErrorCode::UserAgentPromptOutcomeUnknown,

@@ -150,6 +150,12 @@ fn errors() -> Vec<(i32, Value, AgentErrorCode, &'static str)> {
             AgentErrorCode::UserAgentOperationRefused,
             "USER_AGENT_OPERATION_REFUSED",
         ),
+        (
+            -32004,
+            json!({"kind":"model_selection_required","configId":"model","availableModels":2,"retryable":false}),
+            AgentErrorCode::UserAgentOperationRefused,
+            "USER_AGENT_OPERATION_REFUSED",
+        ),
     ]
 }
 

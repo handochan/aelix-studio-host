@@ -285,6 +285,14 @@ impl std::fmt::Display for AcpError {
 }
 
 impl AcpError {
+    pub(crate) fn is_model_selection_required(&self) -> bool {
+        matches!(
+            self,
+            Self::ApplicationError { code: -32004, data: Some(data), .. }
+                if model_selection_count(data).is_some()
+        )
+    }
+
     /// Apply only after prompt dispatch. Do not infer delivery from the absence
     /// of streamed output, or classify ordinary agent error replies as EOF.
     pub(crate) fn after_prompt_dispatch(self, transport_closed: bool) -> Self {
@@ -314,27 +322,26 @@ impl AcpError {
     /// Keep the SDK's classification while discarding free-form peer details
     /// at the Host error boundary. HTTP, WS and diagnostics share this error.
     pub fn without_remote_detail(mut self, method: &str) -> Self {
-        const DETAIL: &str = "ACP request failed";
         let startup_details = self.public_startup_diagnostic().map(|(_, details)| details);
         match &mut self {
             Self::SessionNotFound { session_id } => *session_id = method.to_owned(),
             Self::ProtocolParseError { message }
             | Self::InvalidRequest { message }
-            | Self::InvalidParams { message } => *message = DETAIL.into(),
+            | Self::InvalidParams { message } => *message = ACP_REQUEST_FAILED.into(),
             Self::ResourceNotFound { resource, message } => {
                 *resource = None;
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
             }
             Self::ApplicationError { code, message, data } => {
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
                 *data = startup_details.or_else(|| safe_application_data(*code, data.as_ref()));
             }
             Self::OtherProtocolError { message, data, .. } => {
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
                 *data = startup_details;
             }
             Self::AgentInternal { message, data, .. } => {
-                *message = DETAIL.into();
+                *message = ACP_REQUEST_FAILED.into();
                 *data = None;
             }
             _ => {}
@@ -374,10 +381,22 @@ impl AcpError {
         // aelix-acp@16d6555/src/aelix_acp/server.py (initialize and dispatch).
         // Preserve standard authentication behavior for every other agent.
         if agent_name == Some("aelix-acp") && matches!(code, -33001 | -33002 | -32000 | -32004) {
+            let data = if code == -32004
+                && err
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(MODEL_SELECTION_REQUIRED)
+            {
+                safe_application_data(code, err.data.as_ref())
+            } else {
+                err.data
+            };
             return AcpError::ApplicationError {
                 code,
                 message: err.message,
-                data: err.data,
+                data,
             };
         }
         match err.code {
@@ -451,6 +470,21 @@ impl AcpError {
     }
 }
 
+pub(super) const ACP_REQUEST_FAILED: &str = "ACP request failed";
+pub(super) const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
+
+fn model_selection_count(data: &serde_json::Value) -> Option<u32> {
+    if data.as_object()?.len() != 4
+        || data.get("kind")?.as_str() != Some(MODEL_SELECTION_REQUIRED)
+        || data.get("configId")?.as_str() != Some("model")
+        || data.get("retryable")?.as_bool() != Some(false)
+    {
+        return None;
+    }
+    // A u32 count is exactly representable by Studio's JavaScript numbers.
+    u32::try_from(data.get("availableModels")?.as_u64()?).ok()
+}
+
 /// Project a startup diagnostic from the ACP data object. Verified adapter
 /// example: aelix-acp@7a2ca0e/src/aelix_acp/session.py and src/aelix_acp/wire/errors.py.
 fn safe_startup_diagnostic(data: Option<&serde_json::Value>) -> Option<(&'static str, serde_json::Value)> {
@@ -491,6 +525,11 @@ fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<
         }
         (-33002, "turn_failed_after_dispatch") => Some(json!({"kind":kind,"retryable":false})),
         (-32000, "session_changing") => Some(json!({"kind":kind})),
+        (-32004, MODEL_SELECTION_REQUIRED) => {
+            // aelix-acp@a6545f0b/src/aelix_acp/wire/errors.py defines this refusal.
+            let available_models = model_selection_count(data)?;
+            Some(json!({"kind":kind,"configId":"model","availableModels":available_models,"retryable":false}))
+        }
         (-32004, "studio_extension_management_required") => {
             let action = data.get("action").and_then(Value::as_str)?;
             matches!(action, "install" | "update" | "remove").then(|| json!({"kind":kind,"action":action}))
@@ -839,6 +878,74 @@ mod tests {
                 json!({"kind":"restrictions_unenforceable","methods":[]})
             );
         }
+    }
+
+    #[test]
+    fn model_selection_refusal_preserves_exact_fields_through_sdk_and_protected_relay() {
+        use serde_json::json;
+
+        for available in [0, 2, u32::MAX] {
+            let input = json!({
+                "kind": "model_selection_required", "configId": "model",
+                "availableModels": available, "retryable": false,
+            });
+            let error = AcpError::from_sdk_for_agent(
+                SdkError::new(-32004, "private peer message").data(input.clone()),
+                "session/prompt",
+                Some("aelix-acp"),
+            );
+            assert!(matches!(&error, AcpError::ApplicationError { data: Some(data), .. } if *data == input));
+            assert!(matches!(
+                error.without_remote_detail("session/prompt"),
+                AcpError::ApplicationError { code: -32004, message, data: Some(data) }
+                    if message == "ACP request failed" && data == input
+            ));
+        }
+    }
+
+    #[test]
+    fn model_selection_refusal_drops_extra_missing_and_invalid_fields() {
+        use serde_json::json;
+
+        let valid = json!({
+            "kind": "model_selection_required", "configId": "model",
+            "availableModels": 2, "retryable": false,
+        });
+        for (field, value) in [
+            ("extra", json!("private peer data")),
+            ("configId", json!("other")),
+            ("configId", json!(false)),
+            ("availableModels", json!(-1)),
+            ("availableModels", json!(2.0)),
+            ("availableModels", json!(2.5)),
+            ("availableModels", json!("2")),
+            ("availableModels", json!(true)),
+            ("availableModels", json!(u64::from(u32::MAX) + 1)),
+            ("retryable", json!(true)),
+            ("retryable", json!("false")),
+            ("retryable", json!(null)),
+            ("kind", json!("different_kind")),
+            ("kind", json!(1)),
+        ] {
+            let mut input = valid.clone();
+            input[field] = value;
+            assert_eq!(safe_application_data(-32004, Some(&input)), None, "{input}");
+            if field != "kind" {
+                let error = AcpError::from_sdk_for_agent(
+                    SdkError::new(-32004, "refused").data(input),
+                    "session/prompt",
+                    Some("aelix-acp"),
+                );
+                assert!(matches!(error, AcpError::ApplicationError { data: None, .. }));
+            }
+        }
+        for field in ["kind", "configId", "availableModels", "retryable"] {
+            let mut input = valid.clone();
+            input.as_object_mut().unwrap().remove(field);
+            assert_eq!(safe_application_data(-32004, Some(&input)), None, "{input}");
+        }
+        assert_eq!(safe_application_data(-32000, Some(&valid)), None);
+        assert_eq!(safe_application_data(-32004, Some(&json!([valid]))), None);
     }
 
     #[test]

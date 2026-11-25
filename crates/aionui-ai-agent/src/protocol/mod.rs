@@ -1,5 +1,6 @@
 pub(crate) mod acp;
 pub(crate) mod acp_dialect;
+mod acp_error_wire;
 pub(crate) mod acp_init_budget;
 pub mod acp_relay;
 mod acp_relay_writer;
