@@ -1329,7 +1329,7 @@ async fn copy_messages_up_to_is_inclusive_reminted_and_order_preserving() {
 
     // Fork at m3 (inclusive): m4 must not be copied.
     let copied = repo
-        .copy_messages_up_to(USER_ID, &source.id, &target.id, (2000, &m3.id))
+        .copy_messages_up_to(USER_ID, &source.id, &target.id, (2000, &m3.id), false)
         .await
         .unwrap();
     assert_eq!(copied, 3);
@@ -1392,7 +1392,7 @@ async fn copy_messages_up_to_rejects_foreign_target_without_partial_copy() {
     repo.create(&foreign).await.unwrap();
 
     let err = repo
-        .copy_messages_up_to(USER_ID, &source.id, &foreign.id, (9999, "zzz"))
+        .copy_messages_up_to(USER_ID, &source.id, &foreign.id, (9999, "zzz"), false)
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));

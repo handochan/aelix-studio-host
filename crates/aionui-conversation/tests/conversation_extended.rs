@@ -1011,6 +1011,97 @@ async fn native_fork_persists_the_selected_head_and_rejects_a_stale_renderer_ref
 }
 
 #[tokio::test]
+async fn guarded_fork_latest_page_includes_the_first_input_after_a_large_replay_append() {
+    use aionui_db::{AcpTranscriptRow, IAgentMetadataRepository, NativeMessageKey, UpdateAgentHandshakeParams};
+
+    let db = init_database_memory().await.unwrap();
+    let (svc, repo, acp_repo, _) = setup_fork_in_pool(db.pool());
+    let parent = svc.create(USER_ID, fork_create_req("gemini")).await.unwrap();
+    acp_repo
+        .update_session_id_for_user(USER_ID, &parent.id, "parent-sid")
+        .await
+        .unwrap();
+    let agent = acp_repo.get_for_user(USER_ID, &parent.id).await.unwrap().unwrap();
+    aionui_db::SqliteAgentMetadataRepository::new(db.pool().clone())
+        .apply_handshake(
+            &agent.agent_id,
+            &UpdateAgentHandshakeParams {
+                agent_capabilities: Some(Some(
+                    r#"{"session_capabilities":{"fork":{"_meta":{"aelix/expectedHead":1}}}}"#.into(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    let template = make_message(&parent.id, "history", 0);
+    let snapshot = |count| {
+        (1..=count)
+            .map(|n| AcpTranscriptRow {
+                message: MessageRow {
+                    id: format!("replay-{n}"),
+                    msg_id: None,
+                    ..template.clone()
+                },
+                native: Some(NativeMessageKey {
+                    session_id: "native-parent".into(),
+                    entry_id: format!("entry-{n}"),
+                }),
+            })
+            .collect()
+    };
+    for count in [2, 5002] {
+        repo.apply_acp_transcript(USER_ID, &parent.id, "parent-sid", snapshot(count))
+            .await
+            .unwrap();
+    }
+
+    let input = make_message(&parent.id, "parent input", 0);
+    repo.insert_message(USER_ID, &input).await.unwrap();
+    // Keep the logical clock ahead of wall time even on a loaded test runner.
+    let mut reply = make_message(&parent.id, "parent reply", 60_000);
+    reply.position = Some("left".into());
+    reply.backend_turn_id = Some("parent-head".into());
+    repo.insert_message(USER_ID, &reply).await.unwrap();
+    let mut request = fork_req(&reply.id);
+    request.expected_native_head = reply.backend_turn_id.clone();
+    let fork_started = now_ms();
+    let child = svc.fork(USER_ID, &parent.id, request).await.unwrap();
+    let saved_fork = repo.get(USER_ID, &child.id).await.unwrap().unwrap();
+    let on_create = svc
+        .list_messages(USER_ID, &child.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    let inherited = on_create.items.last().unwrap();
+    assert_eq!(inherited.created_at, reply.created_at);
+    assert_eq!(inherited.msg_id, reply.msg_id);
+
+    let task_manager: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager::default());
+    let sent = svc
+        .send_message(
+            USER_ID,
+            &child.id,
+            serde_json::from_value(json!({"content": "first child input"})).unwrap(),
+            &task_manager,
+        )
+        .await
+        .unwrap();
+    let page = svc
+        .list_messages(USER_ID, &child.id, ListMessagesQuery::default())
+        .await
+        .unwrap();
+    let input = page
+        .items
+        .iter()
+        .find(|row| row.msg_id.as_deref() == Some(sent.msg_id.as_str()))
+        .expect("the first child input belongs on the latest page");
+    assert_eq!(input.created_at, inherited.created_at + 1);
+    assert!((fork_started..=now_ms()).contains(&saved_fork.updated_at));
+}
+
+#[tokio::test]
 async fn fork_head_creates_lineage_row_and_copies_messages() {
     let (svc, repo, acp_repo) = setup_fork().await;
     let parent = svc.create(USER_ID, fork_create_req("claude")).await.unwrap();

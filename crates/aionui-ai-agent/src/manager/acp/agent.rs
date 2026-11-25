@@ -585,6 +585,7 @@ pub struct AcpAgentManager {
     /// Pre-computed, immutable session parameters assembled by the factory.
     pub(super) params: Arc<AcpSessionParams>,
     pub(super) session_repo: Option<Arc<dyn aionui_db::IAcpSessionRepository>>,
+    pub(super) conversation_repo: Option<Arc<dyn aionui_db::IConversationRepository>>,
 
     /// Session aggregate root — owns desired/observed/advertised state.
     /// Single in-memory source of truth for session lifecycle, modes,
@@ -665,6 +666,11 @@ impl AcpAgentManager {
 
     pub fn with_session_repository(mut self, repo: Arc<dyn aionui_db::IAcpSessionRepository>) -> Self {
         self.session_repo = Some(repo);
+        self
+    }
+
+    pub fn with_conversation_repository(mut self, repo: Option<Arc<dyn aionui_db::IConversationRepository>>) -> Self {
+        self.conversation_repo = repo;
         self
     }
 
@@ -762,6 +768,7 @@ impl AcpAgentManager {
         let manager = Self {
             params,
             session_repo: None,
+            conversation_repo: None,
             session: RwLock::new(session),
             runtime,
             process,
@@ -2044,6 +2051,7 @@ mod tests {
             content: "original team wake".into(),
             msg_id: "msg-acp-final".into(),
             turn_id: Some("turn-acp-final".into()),
+            hidden_input_id: None,
             files: Vec::new(),
             attachments: Vec::new(),
             inject_skills: Vec::new(),

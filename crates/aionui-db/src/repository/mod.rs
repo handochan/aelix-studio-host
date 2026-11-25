@@ -1,4 +1,5 @@
 pub mod acp_session;
+pub mod acp_transcript;
 pub mod agent_metadata;
 pub mod assistant;
 pub mod channel;

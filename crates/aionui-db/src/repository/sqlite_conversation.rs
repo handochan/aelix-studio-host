@@ -1,7 +1,10 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use aionui_common::{PaginatedResult, TimestampMs};
 
+use super::acp_transcript::{
+    self, AcpTranscriptApply, AcpTranscriptInputGuard, AcpTranscriptRow, ActiveInputs, NativeMessageKey,
+};
 use crate::error::DbError;
 use crate::models::{
     ConversationArtifactRow, ConversationAssistantSnapshotRow, ConversationRow, MessageRow,
@@ -33,11 +36,15 @@ pub(super) const PUBLISHED_FORK_OR_CONVERSATION: &str = "(json_type(CASE WHEN js
 #[derive(Clone, Debug)]
 pub struct SqliteConversationRepository {
     pool: SqlitePool,
+    acp_transcript_inputs: ActiveInputs,
 }
 
 impl SqliteConversationRepository {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            acp_transcript_inputs: ActiveInputs::default(),
+        }
     }
 
     async fn conversation_exists_for_user(&self, user_id: &str, conversation_id: &str) -> Result<bool, DbError> {
@@ -58,7 +65,33 @@ impl SqliteConversationRepository {
         }
     }
 
-    async fn insert_message_once(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError> {
+    /// Replays and guarded forks share one display clock with live inserts.
+    /// A guarded fork inherits display keys before it has a replay of its own.
+    /// Extend the latest committed key under the writer lock in both cases.
+    async fn live_message_times(
+        connection: &mut SqliteConnection,
+        message: &MessageRow,
+    ) -> Result<(TimestampMs, TimestampMs), DbError> {
+        let head: Option<TimestampMs> = sqlx::query_scalar(
+            "SELECT (SELECT MAX(created_at) FROM messages WHERE conversation_id = ?1)
+             WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?1
+                           AND acp_transcript_source IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM conversations WHERE id = ?1
+                           AND json_type(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END,
+                                         '$.fork.expected_native_head') IS 'text')",
+        )
+        .bind(&message.conversation_id)
+        .fetch_optional(connection)
+        .await?
+        .flatten();
+        Ok(match head {
+            // Conversation-list recency stays on the activity clock.
+            Some(tail) => (message.created_at.max(tail.saturating_add(1)), aionui_common::now_ms()),
+            None => (message.created_at, message.created_at),
+        })
+    }
+
+    async fn insert_message_once(&self, user_id: &str, message: &MessageRow) -> Result<TimestampMs, DbError> {
         // BEGIN IMMEDIATE claims the writer lock up front (same pattern as
         // `claim_run`) so concurrent inserters queue on SQLite's busy handler
         // instead of a read-then-write transaction failing with "database is
@@ -66,7 +99,7 @@ impl SqliteConversationRepository {
         let mut connection = self.pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await?;
 
-        let result: Result<(), DbError> = async {
+        let result: Result<TimestampMs, DbError> = async {
             // Ownership check inside the same transaction as the insert +
             // bump, so parent-chain authorization and the write are atomic.
             let exists: i64 =
@@ -81,6 +114,7 @@ impl SqliteConversationRepository {
                     message.conversation_id
                 )));
             }
+            let (created_at, activity_at) = Self::live_message_times(&mut connection, message).await?;
             sqlx::query(
                 "INSERT INTO messages \
                     (id, conversation_id, msg_id, type, content, position, \
@@ -95,7 +129,7 @@ impl SqliteConversationRepository {
             .bind(&message.position)
             .bind(&message.status)
             .bind(message.hidden)
-            .bind(message.created_at)
+            .bind(created_at)
             .bind(&message.backend_turn_id)
             .execute(&mut *connection)
             .await?;
@@ -104,18 +138,18 @@ impl SqliteConversationRepository {
             // the conversation-list sort floats fresh activity to the top;
             // MAX() keeps recency monotonic under out-of-order upserts.
             sqlx::query("UPDATE conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?")
-                .bind(message.created_at)
+                .bind(activity_at)
                 .bind(&message.conversation_id)
                 .execute(&mut *connection)
                 .await?;
-            Ok(())
+            Ok(created_at)
         }
         .await;
 
         match result {
-            Ok(()) => {
+            Ok(created_at) => {
                 sqlx::query("COMMIT").execute(&mut *connection).await?;
-                Ok(())
+                Ok(created_at)
             }
             Err(error) => {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
@@ -130,6 +164,7 @@ impl SqliteConversationRepository {
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await?;
 
         let result: Result<(), DbError> = async {
+            let (created_at, activity_at) = Self::live_message_times(&mut connection, message).await?;
             let result = sqlx::query(
                 "INSERT INTO messages \
                 (id, conversation_id, msg_id, type, content, position, \
@@ -174,7 +209,7 @@ impl SqliteConversationRepository {
             .bind(&message.position)
             .bind(&message.status)
             .bind(message.hidden)
-            .bind(message.created_at)
+            .bind(created_at)
             .bind(&message.backend_turn_id)
             .bind(user_id)
             .execute(&mut *connection)
@@ -191,7 +226,7 @@ impl SqliteConversationRepository {
             }
 
             sqlx::query("UPDATE conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?")
-                .bind(message.created_at)
+                .bind(activity_at)
                 .bind(&message.conversation_id)
                 .execute(&mut *connection)
                 .await?;
@@ -302,6 +337,38 @@ impl super::conversation::AcpRelayWriteLock for sqlx::Transaction<'static, sqlx:
 
 #[async_trait::async_trait]
 impl IConversationRepository for SqliteConversationRepository {
+    fn protect_acp_transcript_input(&self, message_id: &str) -> Option<AcpTranscriptInputGuard> {
+        Some(AcpTranscriptInputGuard::new(&self.acp_transcript_inputs, message_id))
+    }
+
+    async fn bind_acp_hidden_input(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        message_id: &str,
+        native: &NativeMessageKey,
+    ) -> Result<(), DbError> {
+        acp_transcript::bind_hidden_input(&self.pool, user_id, conversation_id, message_id, native).await
+    }
+
+    async fn apply_acp_transcript(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        session_id: &str,
+        rows: Vec<AcpTranscriptRow>,
+    ) -> Result<AcpTranscriptApply, DbError> {
+        acp_transcript::apply(
+            &self.pool,
+            &self.acp_transcript_inputs,
+            user_id,
+            conversation_id,
+            session_id,
+            rows,
+        )
+        .await
+    }
+
     // ── Conversation CRUD ───────────────────────────────────────────
 
     async fn aionrs_team_permission_mode(&self, user_id: &str, id: &str) -> Result<Option<String>, DbError> {
@@ -1035,6 +1102,14 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn insert_message(&self, user_id: &str, message: &MessageRow) -> Result<(), DbError> {
+        self.insert_message_once(user_id, message).await.map(|_| ())
+    }
+
+    async fn insert_message_returning_created_at(
+        &self,
+        user_id: &str,
+        message: &MessageRow,
+    ) -> Result<TimestampMs, DbError> {
         self.insert_message_once(user_id, message).await
     }
 
@@ -1097,19 +1172,33 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn delete_messages_by_conversation(&self, user_id: &str, conv_id: &str) -> Result<(), DbError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
-            "DELETE FROM messages \
-             WHERE conversation_id = ? \
-               AND EXISTS ( \
-                    SELECT 1 FROM conversations c \
-                    WHERE c.id = messages.conversation_id AND c.user_id = ? \
-               )",
+            "INSERT OR IGNORE INTO acp_transcript_display_resets (conversation_id, session_id)
+             SELECT a.conversation_id, a.session_id FROM acp_session a JOIN conversations c ON c.id = a.conversation_id
+             WHERE c.id = ? AND c.user_id = ? AND NULLIF(a.session_id, '') IS NOT NULL",
         )
         .bind(conv_id)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-
+        sqlx::query(
+            "DELETE FROM messages WHERE conversation_id = ?
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = messages.conversation_id AND user_id = ?)",
+        )
+        .bind(conv_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM acp_transcript_display_archive WHERE conversation_id = ?
+             AND EXISTS (SELECT 1 FROM conversations WHERE id = acp_transcript_display_archive.conversation_id AND user_id = ?)",
+        )
+        .bind(conv_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1119,6 +1208,7 @@ impl IConversationRepository for SqliteConversationRepository {
         source_conversation_id: &str,
         target_conversation_id: &str,
         cursor: (TimestampMs, &str),
+        inherit_acp_hidden: bool,
     ) -> Result<u64, DbError> {
         let (cursor_created_at, cursor_id) = cursor;
 
@@ -1141,7 +1231,23 @@ impl IConversationRepository for SqliteConversationRepository {
                 }
             }
 
-            let rows = sqlx::query_as::<_, MessageRow>(
+            if inherit_acp_hidden {
+                // A cleared display no longer has the hidden tags for the
+                // native prefix being forked. Carry the parent's exclusion
+                // until the child publishes its own ACP binding.
+                sqlx::query(
+                    "INSERT OR IGNORE INTO acp_transcript_display_resets (conversation_id, session_id)
+                     SELECT ?, '' FROM acp_transcript_display_resets r
+                     LEFT JOIN acp_session a ON a.conversation_id = r.conversation_id
+                     WHERE r.conversation_id = ? AND (r.session_id = '' OR r.session_id = a.session_id)",
+                )
+                .bind(target_conversation_id)
+                .bind(source_conversation_id)
+                .execute(&mut *connection)
+                .await?;
+            }
+
+            let rows = sqlx::query_as::<_, acp_transcript::StoredDisplayRow>(
                 "SELECT m.* FROM messages m \
                  WHERE m.conversation_id = ? \
                    AND (m.created_at < ? OR (m.created_at = ? AND m.id <= ?)) \
@@ -1155,16 +1261,17 @@ impl IConversationRepository for SqliteConversationRepository {
             .await?;
 
             let mut copied: u64 = 0;
-            let mut latest_created_at: Option<TimestampMs> = None;
-            for row in &rows {
+            for source in &rows {
+                let row = &source.message;
+                let inherited_entry = inherit_acp_hidden.then(|| source.fork_hidden_entry()).flatten();
                 // `generate_id()` is a monotonic UUIDv7, so reminting in
                 // display order keeps the `(created_at, id)` sort stable for
                 // rows sharing a timestamp.
                 sqlx::query(
                     "INSERT INTO messages \
                         (id, conversation_id, msg_id, type, content, position, \
-                         status, hidden, created_at, backend_turn_id) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                         status, hidden, created_at, backend_turn_id, acp_native_entry_id) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
                 )
                 .bind(aionui_common::generate_id())
                 .bind(target_conversation_id)
@@ -1175,20 +1282,10 @@ impl IConversationRepository for SqliteConversationRepository {
                 .bind(&row.status)
                 .bind(row.hidden)
                 .bind(row.created_at)
+                .bind(inherited_entry)
                 .execute(&mut *connection)
                 .await?;
                 copied += 1;
-                latest_created_at = Some(row.created_at);
-            }
-
-            // One recency bump for the whole batch (mirrors the per-insert
-            // bump contract of `insert_message_once`).
-            if let Some(bump) = latest_created_at {
-                sqlx::query("UPDATE conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?")
-                    .bind(bump)
-                    .bind(target_conversation_id)
-                    .execute(&mut *connection)
-                    .await?;
             }
 
             Ok(copied)
