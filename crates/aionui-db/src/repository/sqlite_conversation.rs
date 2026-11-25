@@ -1172,6 +1172,7 @@ impl IConversationRepository for SqliteConversationRepository {
         source_conversation_id: &str,
         target_conversation_id: &str,
         cursor: (TimestampMs, &str),
+        inherit_acp_hidden: bool,
     ) -> Result<u64, DbError> {
         let (cursor_created_at, cursor_id) = cursor;
 
@@ -1194,7 +1195,23 @@ impl IConversationRepository for SqliteConversationRepository {
                 }
             }
 
-            let rows = sqlx::query_as::<_, MessageRow>(
+            if inherit_acp_hidden {
+                // A cleared display no longer has the hidden tags for the
+                // native prefix being forked. Carry the parent's exclusion
+                // until the child publishes its own ACP binding.
+                sqlx::query(
+                    "INSERT OR IGNORE INTO acp_transcript_display_resets (conversation_id, session_id)
+                     SELECT ?, '' FROM acp_transcript_display_resets r
+                     LEFT JOIN acp_session a ON a.conversation_id = r.conversation_id
+                     WHERE r.conversation_id = ? AND (r.session_id = '' OR r.session_id = a.session_id)",
+                )
+                .bind(target_conversation_id)
+                .bind(source_conversation_id)
+                .execute(&mut *connection)
+                .await?;
+            }
+
+            let rows = sqlx::query_as::<_, acp_transcript::StoredDisplayRow>(
                 "SELECT m.* FROM messages m \
                  WHERE m.conversation_id = ? \
                    AND (m.created_at < ? OR (m.created_at = ? AND m.id <= ?)) \
@@ -1209,15 +1226,17 @@ impl IConversationRepository for SqliteConversationRepository {
 
             let mut copied: u64 = 0;
             let mut latest_created_at: Option<TimestampMs> = None;
-            for row in &rows {
+            for source in &rows {
+                let row = &source.message;
+                let inherited_entry = inherit_acp_hidden.then(|| source.fork_hidden_entry()).flatten();
                 // `generate_id()` is a monotonic UUIDv7, so reminting in
                 // display order keeps the `(created_at, id)` sort stable for
                 // rows sharing a timestamp.
                 sqlx::query(
                     "INSERT INTO messages \
                         (id, conversation_id, msg_id, type, content, position, \
-                         status, hidden, created_at, backend_turn_id) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                         status, hidden, created_at, backend_turn_id, acp_native_entry_id) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
                 )
                 .bind(aionui_common::generate_id())
                 .bind(target_conversation_id)
@@ -1228,6 +1247,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 .bind(&row.status)
                 .bind(row.hidden)
                 .bind(row.created_at)
+                .bind(inherited_entry)
                 .execute(&mut *connection)
                 .await?;
                 copied += 1;

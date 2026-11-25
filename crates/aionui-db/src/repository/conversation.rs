@@ -255,6 +255,9 @@ pub trait IConversationRepository: Send + Sync {
     /// (it anchors the SOURCE conversation's backend thread and would poison
     /// fork-point resolution in the copy). Returns the number of copied rows.
     ///
+    /// A guarded ACP HEAD fork can carry the entry IDs of hidden inputs.
+    /// The child still needs a completed replay to verify its native session ID.
+    ///
     /// Both conversations must belong to `user_id`. Default is unsupported so
     /// test doubles that never fork don't have to implement it.
     async fn copy_messages_up_to(
@@ -263,6 +266,7 @@ pub trait IConversationRepository: Send + Sync {
         _source_conversation_id: &str,
         _target_conversation_id: &str,
         _cursor: (TimestampMs, &str),
+        _inherit_acp_hidden: bool,
     ) -> Result<u64, DbError> {
         Err(DbError::Init(
             "copy_messages_up_to is not supported by this repository".into(),

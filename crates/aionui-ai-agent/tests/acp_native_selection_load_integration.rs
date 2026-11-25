@@ -36,6 +36,17 @@ def options():
         )
     ]
 
+def notification(sid, update):
+    print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update',
+                      'params': {'sessionId': sid, 'update': update}}), flush=True)
+
+def replay(entry, sequence, text, kind='user_message_chunk', part=0):
+    return {'sessionUpdate': kind, 'content': {'type': 'text', 'text': text},
+            '_meta': {'aelix/transcript': {'source': 'replay', 'nativeSessionId': 'native', 'entryId': entry,
+                                          'parentEntryId': None, 'sequence': sequence,
+                                          'role': 'user' if kind == 'user_message_chunk' else 'assistant',
+                                          'part': part}}}
+
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -62,16 +73,30 @@ for line in sys.stdin:
         resumed = params.get('_meta', {}).get('claudeCode', {}).get('options', {}).get('resume')
         session_id = 'replacement-session' if resumed == 'selector-session' else 'selector-session'
         response['result'] = {'sessionId': session_id, 'configOptions': options()}
+        if load_surface.startswith('transcript-'):
+            response['result']['_meta'] = {'aelix/transcriptCapability': {'version': 1}}
     elif method == 'session/load' and params['sessionId'] == 'selector-session':
         response['result'] = {'configOptions': options()}
         if load_surface.startswith('transcript-'):
-            update = {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': 'From CLI'},
-                      '_meta': {'aelix/transcript': {'source': 'replay', 'nativeSessionId': 'native', 'entryId': 'one',
-                                                     'parentEntryId': None, 'sequence': 1, 'role': 'user', 'part': 0}}}
-            print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
-                'sessionId': params['sessionId'], 'update': update}}), flush=True)
-            marker = {'version': 1, 'nativeSessionId': 'native', 'leafId': 'one',
-                      'totalMessages': 2 if load_surface == 'transcript-partial' else 1, 'recovered': False}
+            sid = params['sessionId']
+            if load_surface == 'transcript-after-hidden':
+                notification(sid, replay('hidden-live', 1, 'Hidden input'))
+                notification(sid, replay('cli-input', 2, 'From CLI'))
+                notification(sid, replay('cli-answer', 3, 'CLI reply', 'agent_message_chunk'))
+                marker = {'version': 1, 'nativeSessionId': 'native', 'leafId': 'cli-answer',
+                          'totalMessages': 3, 'totalFrames': 3, 'recovered': False}
+            else:
+                notification(sid, replay('one', 1, 'From CLI'))
+                marker = {'version': 1, 'nativeSessionId': 'native', 'leafId': 'one',
+                          'totalMessages': 2 if load_surface == 'transcript-partial' else 1, 'recovered': False}
+                if load_surface == 'transcript-untagged-display':
+                    notification(sid, {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': 'tail'}})
+                if load_surface in ('transcript-count-ok', 'transcript-count-extra'):
+                    notification(sid, replay('one', 1, ' tail', part=1))
+                if load_surface in ('transcript-count-ok', 'transcript-missing-final-part'):
+                    marker['totalFrames'] = 2
+                if load_surface == 'transcript-count-extra':
+                    marker['totalFrames'] = 1
             meta = {}
             if load_surface != 'transcript-no-session-capability':
                 meta['aelix/transcriptCapability'] = {'version': 1}
@@ -114,7 +139,25 @@ for line in sys.stdin:
             print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
                 'sessionId': params['sessionId'], 'update': {'sessionUpdate': 'agent_message_chunk',
                 'content': {'type': 'text', 'text': 'Already started'}}}}), flush=True)
-        if body in ('Busy before work', 'Report activity then busy'):
+        if load_surface in ('transcript-hidden-failed', 'transcript-hidden-cancelled'):
+            sid = params['sessionId']
+            receipt = {'source': 'live', 'nativeSessionId': 'native', 'bindingId': 'binding', 'streamId': 'stream',
+                     'role': 'user', 'status': 'stored', 'entryId': 'hidden-live', 'parentEntryId': None,
+                     'sequence': 1, 'replaced': False}
+            notification(sid, {'sessionUpdate': 'user_message_chunk', 'content': {'type': 'text', 'text': text},
+                               '_meta': {'aelix/transcript': {**receipt, 'part': 0}}})
+            print(json.dumps({'jsonrpc': '2.0', 'method': '_aelix/transcript/settled',
+                              'params': {'sessionId': sid, **receipt}}), flush=True)
+            notification(sid, {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Partial'},
+                               '_meta': {'aelix/transcript': {'source': 'live', 'nativeSessionId': 'native',
+                                                              'bindingId': 'binding', 'streamId': 'assistant',
+                                                              'role': 'assistant'}}})
+            if load_surface == 'transcript-hidden-failed':
+                response['error'] = {'code': -33002, 'message': 'Test post-dispatch failure',
+                                     'data': {'kind': 'turn_failed_after_dispatch', 'retryable': False}}
+            else:
+                response['result'] = {'stopReason': 'cancelled'}
+        elif body in ('Busy before work', 'Report activity then busy'):
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
@@ -937,6 +980,10 @@ async fn transcript_load_applies_only_complete_success_for_a_capable_session() {
         "transcript-no-marker",
         "transcript-unavailable",
         "transcript-partial",
+        "transcript-untagged-display",
+        "transcript-missing-final-part",
+        "transcript-count-extra",
+        "transcript-count-ok",
     ] {
         let (temp, registry, sync, db) = setup_with_db().await;
         sync.repo()
@@ -971,7 +1018,8 @@ async fn transcript_load_applies_only_complete_success_for_a_capable_session() {
         } else {
             result.unwrap();
         }
-        if surface == "transcript-complete" {
+        let applied = matches!(surface, "transcript-complete" | "transcript-count-ok");
+        if applied {
             assert!(
                 repo.get_message(USER, CONVERSATION, &legacy.id)
                     .await
@@ -984,7 +1032,11 @@ async fn transcript_load_applies_only_complete_success_for_a_capable_session() {
                 .unwrap();
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&content).unwrap()["content"],
-                "From CLI"
+                if surface == "transcript-count-ok" {
+                    "From CLI tail"
+                } else {
+                    "From CLI"
+                }
             );
         } else {
             assert_eq!(
@@ -996,7 +1048,95 @@ async fn transcript_load_applies_only_complete_success_for_a_capable_session() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(count, i64::from(surface == "transcript-complete"), "{surface}");
+        assert_eq!(count, i64::from(applied), "{surface}");
+        AgentInstance::Acp(Arc::new(manager)).kill_and_wait(None).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_hidden_prompt_keeps_its_native_key_and_syncs_cli_history() {
+    verify_hidden_outcome("transcript-hidden-failed").await;
+}
+
+#[tokio::test]
+async fn cancelled_hidden_prompt_keeps_its_native_key_and_syncs_cli_history() {
+    verify_hidden_outcome("transcript-hidden-cancelled").await;
+}
+
+async fn verify_hidden_outcome(surface: &str) {
+    use aionui_db::{IConversationRepository, SqliteConversationRepository, models::MessageRow};
+
+    let (temp, registry, sync, db) = setup_with_db().await;
+    let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+    let (manager, domain_rx) = build_session(temp.path(), &registry, &sync, "aelix-acp", "hidden.txt", surface).await;
+    let manager = manager.with_conversation_repository(Some(repo.clone()));
+    sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+    manager.warmup_session().await.unwrap();
+    let agent = AgentInstance::Acp(Arc::new(manager));
+    let hidden = MessageRow {
+        id: "hidden-echo".into(),
+        conversation_id: CONVERSATION.into(),
+        msg_id: Some("hidden-echo".into()),
+        r#type: "text".into(),
+        content: r#"{"content":"Hidden input"}"#.into(),
+        position: Some("right".into()),
+        status: Some("finish".into()),
+        hidden: true,
+        created_at: 20,
+        backend_turn_id: None,
+    };
+    repo.insert_message(USER, &hidden).await.unwrap();
+
+    let result = agent
+        .send_message(SendMessageData {
+            content: "Hidden input".into(),
+            msg_id: "turn-output".into(),
+            turn_id: None,
+            hidden_input_id: Some(hidden.id.clone()),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            inject_skills: Vec::new(),
+        })
+        .await;
+    if surface == "transcript-hidden-failed" {
+        assert_eq!(result.unwrap_err().stream_error().protocol_code, Some(-33002));
+    } else {
+        result.unwrap();
+    }
+    let native: (String, String) =
+        sqlx::query_as("SELECT acp_native_session_id, acp_native_entry_id FROM messages WHERE id = 'hidden-echo'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(native, ("native".into(), "hidden-live".into()));
+    agent.kill_and_wait(None).await;
+
+    for _ in 0..2 {
+        let (manager, domain_rx) = build_session(
+            temp.path(),
+            &registry,
+            &sync,
+            "aelix-acp",
+            "loaded.txt",
+            "transcript-after-hidden",
+        )
+        .await;
+        let manager = manager.with_conversation_repository(Some(repo.clone()));
+        sync.attach(USER.into(), CONVERSATION.into(), domain_rx).await;
+        manager.warmup_session().await.unwrap();
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT acp_native_entry_id, hidden FROM messages ORDER BY created_at, id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("hidden-live".into(), true),
+                ("cli-input".into(), false),
+                ("cli-answer".into(), false)
+            ]
+        );
         AgentInstance::Acp(Arc::new(manager)).kill_and_wait(None).await;
     }
 }

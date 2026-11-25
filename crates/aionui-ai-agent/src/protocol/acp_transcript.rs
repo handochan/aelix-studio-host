@@ -80,7 +80,14 @@ struct Marker {
     native_session_id: String,
     leaf_id: Option<String>,
     total_messages: usize,
+    #[serde(default, deserialize_with = "present_frame_count")]
+    total_frames: Option<usize>,
     recovered: bool,
+}
+
+// Omission is backward compatible; a present count must be an integer.
+fn present_frame_count<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<usize>, D::Error> {
+    usize::deserialize(value).map(Some)
 }
 
 #[derive(Default)]
@@ -112,7 +119,10 @@ impl ReplayStage {
         if marker.recovered {
             return Err("recovered_snapshot");
         }
-        if self.failed || !valid_order(&self.frames, &marker) {
+        if self.failed
+            || marker.total_frames.is_some_and(|count| count != self.frames.len())
+            || !valid_order(&self.frames, &marker)
+        {
             return Err("incomplete_snapshot");
         }
         Ok(Some(Snapshot { frames: self.frames }))
@@ -260,6 +270,7 @@ pub(crate) struct HiddenInputStage {
     chunks: Option<LiveEntry>,
     receipt: Option<NativeMessageKey>,
     ambiguous: bool,
+    streamed_assistant: bool,
 }
 
 impl HiddenInputStage {
@@ -304,8 +315,34 @@ impl HiddenInputStage {
         }
     }
 
-    pub(crate) fn finish(self) -> Option<NativeMessageKey> {
-        self.receipt.filter(|_| !self.ambiguous)
+    fn observe_update(&mut self, update: &Value) {
+        if update["sessionUpdate"] == "user_message_chunk" {
+            self.observe_user_chunk(update);
+            return;
+        }
+        let entry = &update["_meta"][META];
+        // Native emits an assistant delta after processing its input loop.
+        // A stored receipt for identical injected text can precede a stopped
+        // input loop. A synthetic assistant settlement cannot prove a stream.
+        if self.receipt.is_some()
+            && matches!(
+                update["sessionUpdate"].as_str(),
+                Some("agent_message_chunk" | "agent_thought_chunk")
+            )
+            && entry["source"] == "live"
+            && entry["role"] == "assistant"
+            && entry["streamId"].as_str().is_some_and(|id| !id.is_empty())
+            && self.chunks.as_ref().is_some_and(|user| {
+                entry["bindingId"] == user.binding_id && entry["nativeSessionId"] == user.entry.native_session_id
+            })
+        {
+            self.streamed_assistant = true;
+        }
+    }
+
+    pub(crate) fn finish(self, completed: bool) -> Option<NativeMessageKey> {
+        self.receipt
+            .filter(|_| !self.ambiguous && (completed || self.streamed_assistant))
     }
 }
 
@@ -358,6 +395,7 @@ impl TranscriptCapture {
                 chunks: None,
                 receipt: None,
                 ambiguous: false,
+                streamed_assistant: false,
             },
         )
     }
@@ -385,10 +423,8 @@ impl TranscriptCapture {
                 let params = &frame["params"];
                 if frame["method"] == SETTLED {
                     pending.stage.observe_receipt(params);
-                } else if frame["method"] == "session/update"
-                    && params["update"]["sessionUpdate"] == "user_message_chunk"
-                {
-                    pending.stage.observe_user_chunk(&params["update"]);
+                } else if frame["method"] == "session/update" {
+                    pending.stage.observe_update(&params["update"]);
                 }
             }
         }
@@ -402,11 +438,27 @@ impl TranscriptCapture {
         if !pending.matches_notification(&frame) || frame["method"] != "session/update" {
             return false;
         }
-        let meta = &frame["params"]["update"]["_meta"][META];
+        let update = &frame["params"]["update"];
+        let meta = &update["_meta"][META];
+        let replay = &mut pending.stage;
         if !matches!(meta["source"].as_str(), Some("replay" | "adapter")) {
+            // Load lifecycle updates carry configuration, independent of
+            // display replay. An untagged display frame only invalidates
+            // a candidate snapshot; legacy loads keep their existing path.
+            if !matches!(
+                update["sessionUpdate"].as_str(),
+                Some(
+                    "available_commands_update"
+                        | "config_option_update"
+                        | "current_mode_update"
+                        | "session_info_update"
+                        | "usage_update"
+                )
+            ) {
+                replay.failed = true;
+            }
             return false;
         }
-        let replay = &mut pending.stage;
         replay.bytes = replay.bytes.saturating_add(line.len());
         if replay.failed || replay.frames.len() >= MAX_FRAMES || replay.bytes > MAX_WIRE_BYTES {
             replay.failed = true;
@@ -543,7 +595,23 @@ mod tests {
                 assert!(capture.observe(&receipt.to_string()));
             }
             assert!(!capture.observe(&json!({"jsonrpc":"2.0", "id":9, "result":{}}).to_string()));
-            assert_eq!(guard.take().unwrap().finish().is_some(), expected);
+            assert_eq!(guard.take().unwrap().finish(true).is_some(), expected);
         }
+    }
+
+    #[test]
+    fn interrupted_prompt_does_not_bind_a_single_receipt_before_the_input_loop_finishes() {
+        let capture = TranscriptCapture::default();
+        let session = SessionId::new("acp");
+        capture.set_session(session.clone(), true);
+        let guard = capture
+            .begin_hidden_prompt(&session, &[ContentBlock::from("identical")])
+            .unwrap();
+        guard.register(|| (RequestId::Number(9), ()));
+        let receipt = user_receipt("injected", "stored");
+        capture.observe(&user_chunk(&receipt, "identical", 0).to_string());
+        capture.observe(&receipt.to_string());
+        capture.observe(&json!({"jsonrpc":"2.0", "id":9, "result":{"stopReason":"cancelled"}}).to_string());
+        assert!(guard.take().unwrap().finish(false).is_none());
     }
 }

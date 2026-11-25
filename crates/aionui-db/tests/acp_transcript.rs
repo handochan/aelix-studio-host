@@ -388,3 +388,211 @@ async fn replay_preserves_display_head_after_app_messages() {
     assert_eq!(history[2].id, "new-head");
     assert_eq!(history[2].backend_turn_id.as_deref(), Some("existing-fork-head"));
 }
+
+#[tokio::test]
+async fn guarded_head_fork_binds_inherited_hidden_entry_to_the_child_snapshot() {
+    let (repo, db) = setup().await;
+    create(&repo, "child").await;
+    let source = row("hidden-parent", true, "same");
+    repo.insert_message(OWNER, &source).await.unwrap();
+    repo.bind_acp_hidden_input(OWNER, "conversation", &source.id, &native("inherited"))
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.copy_messages_up_to(OWNER, "conversation", "child", (source.created_at, &source.id), true)
+            .await
+            .unwrap(),
+        1
+    );
+    let inherited: (bool, Option<String>, String) = sqlx::query_as(
+        "SELECT hidden, acp_native_session_id, acp_native_entry_id FROM messages WHERE conversation_id = 'child'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(inherited, (true, None, "inherited".to_owned()));
+
+    let child = |id, entry| {
+        let mut value = replay(id, entry, "same");
+        value.message.conversation_id = "child".into();
+        value.native.as_mut().unwrap().session_id = "native-child".into();
+        value
+    };
+    assert_eq!(
+        repo.apply_acp_transcript(OWNER, "child", "child-acp", vec![child("cli", "appended")])
+            .await
+            .unwrap(),
+        AcpTranscriptApply::UnidentifiedHiddenInput
+    );
+    let snapshot = || vec![child("inherited-row", "inherited"), child("cli", "appended")];
+    assert_eq!(
+        repo.apply_acp_transcript(OWNER, "child", "child-acp", snapshot())
+            .await
+            .unwrap(),
+        AcpTranscriptApply::Applied {
+            displayed: 2,
+            archived: 1
+        }
+    );
+    let rows: Vec<(String, bool)> =
+        sqlx::query_as("SELECT id, hidden FROM messages WHERE conversation_id = 'child' ORDER BY created_at, id")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![("inherited-row".into(), true), ("cli".into(), false)]);
+    let archived_key: (String, String) = sqlx::query_as(
+        "SELECT acp_native_session_id, acp_native_entry_id FROM acp_transcript_display_archive WHERE conversation_id = 'child'",
+    )
+    .fetch_one(db.pool()).await.unwrap();
+    assert_eq!(archived_key, ("native-child".into(), "inherited".into()));
+    assert_eq!(
+        repo.apply_acp_transcript(OWNER, "child", "child-acp", snapshot())
+            .await
+            .unwrap(),
+        AcpTranscriptApply::Unchanged
+    );
+    let parent_key: String =
+        sqlx::query_scalar("SELECT acp_native_session_id FROM messages WHERE id = 'hidden-parent'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(parent_key, "native");
+}
+
+#[tokio::test]
+async fn appending_to_sixty_thousand_rows_keeps_all_existing_cursor_slots() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = aionui_db::init_database(&directory.path().join("append.db"))
+        .await
+        .unwrap();
+    let repo = SqliteConversationRepository::new(db.pool().clone());
+    create(&repo, "conversation").await;
+
+    sqlx::query(
+        "WITH RECURSIVE ints(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM ints WHERE n < 60000)
+         INSERT INTO messages (id, conversation_id, msg_id, type, content, position, status, hidden, created_at,
+                               acp_transcript_source, acp_native_session_id, acp_native_entry_id)
+         SELECT 'row-' || n, 'conversation', 'row-' || n, 'text', '{\"content\":\"same\"}', 'right', 'finish', 0, n,
+                'native', 'native', 'entry-' || n
+         FROM ints",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE messages SET backend_turn_id = 'head-reference' WHERE id = 'row-60000'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE display_writes (operation TEXT, message_id TEXT);
+         CREATE TRIGGER display_update AFTER UPDATE ON messages
+           BEGIN INSERT INTO display_writes VALUES ('update', new.id); END;
+         CREATE TRIGGER display_insert AFTER INSERT ON messages
+           BEGIN INSERT INTO display_writes VALUES ('insert', new.id); END;
+         CREATE TRIGGER display_delete AFTER DELETE ON messages
+           BEGIN INSERT INTO display_writes VALUES ('delete', old.id); END;",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let snapshot = || {
+        (1..=60001)
+            .map(|n| replay(&format!("row-{n}"), &format!("entry-{n}"), "same"))
+            .collect()
+    };
+    let rows = snapshot();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        repo.apply_acp_transcript(OWNER, "conversation", "acp", rows)
+            .await
+            .unwrap(),
+        AcpTranscriptApply::Applied {
+            displayed: 60001,
+            archived: 0
+        }
+    );
+    eprintln!("60,000 rows plus one append, end to end: {:?}", started.elapsed());
+    let writes: Vec<(String, String)> = sqlx::query_as("SELECT operation, message_id FROM display_writes")
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(writes, vec![("insert".into(), "row-60001".into())]);
+    let moved: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM messages WHERE created_at != CAST(substr(id, 5) AS INTEGER)")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(moved, 0);
+    let heads: Vec<String> = sqlx::query_scalar(
+        "SELECT backend_turn_id FROM messages WHERE id IN ('row-60000', 'row-60001') ORDER BY created_at",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(heads, ["head-reference", "head-reference"]);
+    assert_eq!(
+        repo.apply_acp_transcript(OWNER, "conversation", "acp", snapshot())
+            .await
+            .unwrap(),
+        AcpTranscriptApply::Unchanged
+    );
+}
+
+#[tokio::test]
+async fn guarded_fork_keeps_the_display_reset_of_its_native_prefix() {
+    use aionui_db::{IAcpSessionRepository, SqliteAcpSessionRepository};
+
+    let (repo, db) = setup().await;
+    let sessions = SqliteAcpSessionRepository::new(db.pool().clone());
+    create(&repo, "child").await;
+    create(&repo, "grandchild").await;
+    for (conversation, session) in [
+        ("conversation", Some("parent-acp")),
+        ("child", None),
+        ("grandchild", None),
+    ] {
+        sqlx::query("INSERT INTO acp_session (conversation_id, agent_source, agent_id, session_id) VALUES (?, 'builtin', 'fixture', ?)")
+            .bind(conversation).bind(session).execute(db.pool()).await.unwrap();
+    }
+
+    let hidden = row("old-hidden", true, "removed from the local display");
+    repo.insert_message(OWNER, &hidden).await.unwrap();
+    repo.delete_messages_by_conversation(OWNER, "conversation")
+        .await
+        .unwrap();
+    let recent = row("visible", false, "after reset");
+    repo.insert_message(OWNER, &recent).await.unwrap();
+    repo.copy_messages_up_to(OWNER, "conversation", "child", (recent.created_at, &recent.id), true)
+        .await
+        .unwrap();
+    sessions
+        .update_session_id_for_user(OWNER, "child", "child-acp")
+        .await
+        .unwrap();
+    repo.copy_messages_up_to(OWNER, "child", "grandchild", (i64::MAX, "unused"), true)
+        .await
+        .unwrap();
+    sessions
+        .update_session_id_for_user(OWNER, "grandchild", "grandchild-acp")
+        .await
+        .unwrap();
+
+    for (conversation, session) in [("child", "child-acp"), ("grandchild", "grandchild-acp")] {
+        let result = repo
+            .apply_acp_transcript(
+                OWNER,
+                conversation,
+                session,
+                vec![replay("old-native", "old-hidden", "removed")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, AcpTranscriptApply::DisplayReset);
+        let active: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id = ?")
+            .bind(conversation)
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(active, [recent.content.clone()]);
+    }
+}

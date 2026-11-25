@@ -69,8 +69,10 @@ def tap(log, argv):
 class Model:
     """OpenAI-compatible streaming fixture with scripted delegation and failure."""
 
-    def __init__(self):
+    def __init__(self, hold_text=None):
         self.requests = []
+        self.hold_text = hold_text
+        self.release_requests = asyncio.Event()
 
     async def start(self):
         self.server = await asyncio.start_server(self.respond, "127.0.0.1", 0)
@@ -85,6 +87,15 @@ class Model:
             messages = request.get("messages", [])
             last = messages[-1] if messages else {}
             content = json.dumps(last.get("content"))
+            if last.get("role") == "user" and self.hold_text and self.hold_text in content:
+                partial = {"id": "held", "object": "chat.completion.chunk", "created": 0, "model": "one",
+                           "choices": [{"index": 0, "delta": {"role": "assistant", "content": "PARTIAL_BEFORE_STOP"},
+                                        "finish_reason": None}]}
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                             + ("data: " + json.dumps(partial) + "\n\n").encode())
+                await writer.drain()
+                await self.release_requests.wait()
+                return
             if last.get("role") == "user" and "FAIL_NOW" in content:
                 partial = {"id":"partial", "object":"chat.completion.chunk", "created":0, "model":"one",
                            "choices":[{"index":0,"delta":{"role":"assistant","content":"PARTIAL_BEFORE_FAILURE"},"finish_reason":None}]}

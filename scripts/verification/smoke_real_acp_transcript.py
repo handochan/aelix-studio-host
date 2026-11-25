@@ -35,6 +35,7 @@ def run_adapter(source, wire, arguments):
     """Record real adapter frames without putting its process outside Host supervision."""
     sys.path.insert(0, source)
     from aelix_acp.server import Server, main
+    from aelix_acp.wire.errors import ProtocolError
 
     def record(direction, method=None, session_id=None, update=None, meta=None):
         update = update or {}
@@ -50,9 +51,16 @@ def run_adapter(source, wire, arguments):
 
     async def traced_dispatch(server, method, params):
         record("host_to_adapter", method, params.get("sessionId"))
-        result = await dispatch(server, method, params)
+        try:
+            result = await dispatch(server, method, params)
+        except ProtocolError as error:
+            if method == "session/prompt":
+                record("prompt_outcome", method, params.get("sessionId"), meta={"code": error.code})
+            raise
         if method == "session/load":
             record("load_result", method, params.get("sessionId"), meta=result.get("_meta"))
+        if method == "session/prompt":
+            record("prompt_outcome", method, params.get("sessionId"), meta={"stopReason": result["stopReason"]})
         return result
 
     async def traced_send(server, message, **kwargs):
@@ -125,13 +133,103 @@ async def append_cli(aelix, root, path, env):
         return received
 
 
+def host_session(root, conversation):
+    with contextlib.closing(sqlite3.connect(f"file:{root / 'host/aionui-backend.db'}?mode=ro", uri=True)) as db:
+        row, = db.execute("SELECT session_id FROM acp_session WHERE conversation_id=?", (conversation,)).fetchone()
+    assert row
+    return row
+
+
+async def start_review_cases(host, root, parent_route, assistant, parent_history, model, wire):
+    cases = {}
+    head = parent_history[-1]
+    child = await host.api(parent_route + "/fork", "POST", {
+        "message_id": head["id"], "expected_native_head": head["backend_turn_id"],
+    })
+    child_id = child["id"]
+    child_route = f"/api/conversations/{child_id}"
+    await host.api(child_route + "/runtime/ensure", "POST")
+    original_hidden, = [row for row in parent_history if row["hidden"]]
+    inherited_hidden, = [row for row in rows(root, child_id) if row["hidden"]]
+    assert inherited_hidden["acp_native_session_id"] is None
+    assert inherited_hidden["acp_native_entry_id"] == original_hidden["acp_native_entry_id"]
+    cases["fork"] = (child_id, original_hidden["acp_native_entry_id"], original_hidden["acp_native_session_id"])
+
+    for name, text, outcome in (
+        ("failed", "FAIL_NOW hidden review", {"code": -33002}),
+        ("cancelled", model.hold_text, {"stopReason": "cancelled"}),
+    ):
+        created = await host.api("/api/conversations", "POST", {
+            "name": f"transcript {name}", "assistant": {"id": assistant["id"]},
+            "extra": {"workspace": str(root / "workspace"), "custom_workspace": True},
+        })
+        conversation = created["id"]
+        route = f"/api/conversations/{conversation}"
+        await host.api(route + "/runtime/ensure", "POST")
+        sid = host_session(root, conversation)
+        sent = await host.api(route + "/messages", "POST", {"content": text, "hidden": True})
+        if name == "cancelled":
+            async with asyncio.timeout(30):
+                while not any(frame["sessionId"] == sid and frame["sessionUpdate"] == "agent_message_chunk"
+                              and (frame["meta"] or {}).get(META, {}).get("source") == "live" for frame in frames(wire)):
+                    await asyncio.sleep(0.05)
+            await host.api(route + "/cancel", "POST", {"turn_id": sent["turn_id"]})
+        await host.idle(route)
+        async with asyncio.timeout(30):
+            while not any(frame["direction"] == "prompt_outcome" and frame["sessionId"] == sid and frame["meta"] == outcome
+                          for frame in frames(wire)):
+                await asyncio.sleep(0.05)
+        if name == "cancelled":
+            model.release_requests.set()
+        assert model.count(text) == 1
+        hidden, = [row for row in rows(root, conversation) if row["id"] == sent["msg_id"]]
+        assert hidden["hidden"] and hidden["acp_native_entry_id"] and hidden["acp_native_session_id"], hidden
+        cases[name] = (conversation, hidden["acp_native_entry_id"], None)
+    return cases
+
+
+async def verify_review_cases(args, host, root, env, model, cases):
+    added = {}
+    for name, (conversation, _, _) in cases.items():
+        sid = host_session(root, conversation)
+        cli = await append_cli(args.aelix, root, get_session_file(root, sid), env)
+        assert len(cli) == 4
+        added[name] = cli
+    requested = len(model.requests)
+    await host.start()
+    for name, (conversation, inherited_entry, parent_native_session) in cases.items():
+        route = f"/api/conversations/{conversation}"
+        await host.api(route + "/runtime/ensure", "POST")
+        timeline = rows(root, conversation)
+        matching = [row for row in timeline if row["acp_native_entry_id"] == inherited_entry]
+        if name == "cancelled" and not matching:
+            # Native can withdraw the unanswered input on Stop. The verified
+            # live key still belongs to the archived hidden echo.
+            echo, = [row for row in archived(root, conversation) if row[3] == inherited_entry]
+            assert echo[2] and model.hold_text in json.loads(echo[1])["content"]
+            assert all(model.hold_text not in row["content"] for row in timeline if not row["hidden"])
+        else:
+            hidden, = matching
+            assert hidden["hidden"]
+            if parent_native_session:
+                assert hidden["acp_native_session_id"] != parent_native_session
+        for entry in added[name]:
+            appended, = [row for row in timeline if row["acp_native_entry_id"] == entry["entryId"]]
+            assert not appended["hidden"]
+        assert len([row for row in timeline if json.loads(row["content"]).get("content") == DUPLICATE_PROMPT]) == (
+            3 if name == "fork" else 2
+        )
+    assert len(model.requests) == requested
+    await host.stop()
+
+
 async def scenario(args):
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="host4-transcript-", dir="/tmp" if os.name != "nt" else None) as directory:
         root = Path(directory).resolve()
         for name in ("home", "agent/agents", "workspace", "host"):
             (root / name).mkdir(parents=True)
-        model = Model()
+        model = Model(hold_text="HOLD_HIDDEN_REVIEW" if args.review_regressions else None)
         port = await model.start()
         (root / "agent/models.json").write_text(json.dumps({"providers": {"fixture": {
             "baseUrl": f"http://127.0.0.1:{port}/v1", "api": "openai-completions", "apiKey": "synthetic-fixture-key",
@@ -190,6 +288,9 @@ async def scenario(args):
             assert progress and progress[-1]["children"][0]["state"] == "done", progress
             live_tool = next(row for row in live if row["id"] == call_id)
             assert json.loads(live_tool["content"])["_meta"]["aelix/subagents"] == progress[-1]
+            cases = {}
+            if args.review_regressions:
+                cases = await start_review_cases(host, root, route, assistant, live, model, wire)
             await host.stop()
 
             model_count = len(model.requests)
@@ -224,6 +325,9 @@ async def scenario(args):
             markers = [(frame["meta"] or {}).get(META) for frame in replays if frame["direction"] == "load_result"]
             assert len(markers) == 4
             assert all(bool(marker) == (args.expect == "transcript") for marker in markers), markers
+            if args.require_frame_count:
+                assert all(type(marker.get("totalFrames")) is int and marker["totalFrames"] >= marker["totalMessages"]
+                           for marker in markers), markers
             if args.expect == "transcript":
                 current = history[0]
                 matching = [row for row in current if json.loads(row["content"]).get("content") == DUPLICATE_PROMPT]
@@ -249,11 +353,14 @@ async def scenario(args):
                 assert any(frame["sessionUpdate"] == "user_message_chunk" for frame in replays)
                 assert not any((frame["meta"] or {}).get(META) for frame in replays)
 
-            return {"mode": args.expect, "loads": len(pages), "model_requests_during_loads": 0,
+            if cases:
+                await verify_review_cases(args, host, root, env, model, cases)
+            return {"mode": args.expect, "loads": len(pages), "review_cases": sorted(cases), "model_requests_during_loads": 0,
                     "appended_cli_turns": 2, "visible_cli_inputs": 2 if cli_keys else 0,
                     "tool_subagents_preserved": True, "archive_rows": len(archived(root, conversation))}
         finally:
             await host.stop()
+            model.release_requests.set()
             model.server.close()
             await model.server.wait_closed()
             for name in ("host.log", "wire.jsonl", "cli.log"):
@@ -271,7 +378,11 @@ if __name__ == "__main__":
     parser.add_argument("--acp-source", type=lambda p: Path(p).resolve(), required=True)
     parser.add_argument("--expect", choices=("transcript", "legacy"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--review-regressions", action="store_true", help="exercise failed, cancelled and forked hidden inputs")
+    parser.add_argument("--require-frame-count", action="store_true", help="require the additive completed-load frame count")
     args = parser.parse_args()
+    if args.expect != "transcript" and (args.review_regressions or args.require_frame_count):
+        parser.error("review regressions and frame counts require transcript v1")
     result = asyncio.run(scenario(args))
     report = json.dumps(result, indent=2)
     (args.output / "result.json").write_text(report + "\n", encoding="utf-8")

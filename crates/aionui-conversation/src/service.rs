@@ -3000,7 +3000,7 @@ impl ConversationService {
         // Copy the visible history up to (and including) the fork point.
         let copied = self
             .conversation_repo
-            .copy_messages_up_to(user_id, id, &new_id, cursor)
+            .copy_messages_up_to(user_id, id, &new_id, cursor, fork_capability.requires_native_head)
             .await?;
         info!(
             parent_conversation_id = %id,

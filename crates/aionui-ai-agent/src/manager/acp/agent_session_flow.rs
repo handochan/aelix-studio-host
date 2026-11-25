@@ -595,11 +595,14 @@ impl AcpAgentManager {
                 hidden.as_ref().map(|(_, _, capture)| capture),
             )
             .await;
-        if result
+        // Save a verified user entry even when the turn fails or is
+        // cancelled. On an interrupted input loop, a lone matching receipt
+        // could instead belong to an injected input (native harness/core.py).
+        let completed = result
             .as_ref()
-            .is_ok_and(|response| response.stop_reason == agent_client_protocol::schema::v1::StopReason::EndTurn)
-            && let Some((input_id, repo, capture)) = hidden
-            && let Some(native) = capture.take().and_then(|stage| stage.finish())
+            .is_ok_and(|response| response.stop_reason == agent_client_protocol::schema::v1::StopReason::EndTurn);
+        if let Some((input_id, repo, capture)) = hidden
+            && let Some(native) = capture.take().and_then(|stage| stage.finish(completed))
             && repo
                 .bind_acp_hidden_input(&self.params.user_id, &self.params.conversation_id, input_id, &native)
                 .await
