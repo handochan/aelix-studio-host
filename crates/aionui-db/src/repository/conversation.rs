@@ -264,6 +264,7 @@ pub trait IConversationRepository: Send + Sync {
     /// and `created_at` are preserved verbatim; `backend_turn_id` is dropped
     /// (it anchors the SOURCE conversation's backend thread and would poison
     /// fork-point resolution in the copy). Returns the number of copied rows.
+    /// The target keeps the wall-clock activity time set at fork creation.
     ///
     /// A guarded ACP HEAD fork can carry the entry IDs of hidden inputs.
     /// The child still needs a completed replay to verify its native session ID.

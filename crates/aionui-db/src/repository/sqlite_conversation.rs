@@ -65,9 +65,9 @@ impl SqliteConversationRepository {
         }
     }
 
-    /// Replayed conversations share one display clock with live inserts.
-    /// Read and extend the latest committed key under the writer lock, so
-    /// rapid appends can lead wall time without hiding the next live row.
+    /// Replays and guarded forks share one display clock with live inserts.
+    /// A guarded fork inherits display keys before it has a replay of its own.
+    /// Extend the latest committed key under the writer lock in both cases.
     async fn live_message_times(
         connection: &mut SqliteConnection,
         message: &MessageRow,
@@ -75,7 +75,10 @@ impl SqliteConversationRepository {
         let head: Option<TimestampMs> = sqlx::query_scalar(
             "SELECT (SELECT MAX(created_at) FROM messages WHERE conversation_id = ?1)
              WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?1
-                           AND acp_transcript_source IS NOT NULL)",
+                           AND acp_transcript_source IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM conversations WHERE id = ?1
+                           AND json_type(CASE WHEN json_valid(extra) THEN extra ELSE '{}' END,
+                                         '$.fork.expected_native_head') IS 'text')",
         )
         .bind(&message.conversation_id)
         .fetch_optional(connection)
@@ -1258,7 +1261,6 @@ impl IConversationRepository for SqliteConversationRepository {
             .await?;
 
             let mut copied: u64 = 0;
-            let mut latest_created_at: Option<TimestampMs> = None;
             for source in &rows {
                 let row = &source.message;
                 let inherited_entry = inherit_acp_hidden.then(|| source.fork_hidden_entry()).flatten();
@@ -1284,17 +1286,6 @@ impl IConversationRepository for SqliteConversationRepository {
                 .execute(&mut *connection)
                 .await?;
                 copied += 1;
-                latest_created_at = Some(row.created_at);
-            }
-
-            // One recency bump for the whole batch (mirrors the per-insert
-            // bump contract of `insert_message_once`).
-            if let Some(bump) = latest_created_at {
-                sqlx::query("UPDATE conversations SET updated_at = MAX(updated_at, ?) WHERE id = ?")
-                    .bind(bump)
-                    .bind(target_conversation_id)
-                    .execute(&mut *connection)
-                    .await?;
             }
 
             Ok(copied)
