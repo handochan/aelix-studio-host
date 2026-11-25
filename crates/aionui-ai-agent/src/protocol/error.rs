@@ -437,7 +437,7 @@ impl AcpError {
     }
 }
 
-const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
+pub(super) const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
 
 /// Retain the fixed discriminants consumed by Studio's lock and refusal UI.
 fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<serde_json::Value> {

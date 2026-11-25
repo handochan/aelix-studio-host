@@ -44,6 +44,7 @@ for line in sys.stdin:
     params = request.get('params', {})
     entry = method
     response = {'jsonrpc': '2.0', 'id': request['id']}
+    refusal_data = None
     if method == 'initialize':
         response['result'] = {
             'protocolVersion': 1, 'agentInfo': {'name': agent_name, 'version': '0.0.0'},
@@ -97,6 +98,12 @@ for line in sys.stdin:
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
+        elif body in ('Refuse with duplicate count', 'Refuse with object count'):
+            count = ('0,"availableModels":2' if body == 'Refuse with duplicate count'
+                     else '{"$serde_json::private::RawValue":"2"}')
+            refusal_data = ('{"kind":"model_selection_required","configId":"model",'
+                            '"availableModels":' + count + ',"retryable":false}')
+            response['error'] = {'code': -32004, 'message': 'Fixture refusal', 'data': 'fixture raw data'}
         else:
             response['result'] = {'stopReason': 'end_turn'}
     else:
@@ -109,7 +116,10 @@ for line in sys.stdin:
             'availableCommands': [{'name': name, 'description': name} for name in name_list]}}}), flush=True)
     with open(trace, 'a') as output:
         output.write(entry + '\n')
-    print(json.dumps(response), flush=True)
+    frame = json.dumps(response)
+    if refusal_data is not None:
+        frame = frame.replace('"fixture raw data"', refusal_data)
+    print(frame, flush=True)
 "#;
 
 const USER: &str = "selector-user";
@@ -480,6 +490,21 @@ async fn aelix_delivers_the_deferred_prelude_once_after_the_session_is_reopened(
     assert_eq!(prompt_trace(temp.path(), "reopen.txt"), ["Continue again"]);
     assert_eq!(sync.load_session_id(USER, CONVERSATION).await.as_deref(), Some(SESSION));
     reopened.kill_and_wait(None).await;
+}
+
+#[tokio::test]
+async fn malformed_model_refusal_counts_on_stdio_keep_the_code_and_drop_data() {
+    let (temp, registry, sync) = setup().await;
+    let instance = open_session(temp.path(), &registry, &sync, "aelix-acp", "raw-refusal.txt", "generic").await;
+    let mut payloads = Vec::new();
+    for text in ["Refuse with duplicate count", "Refuse with object count"] {
+        let error = prompt(&instance, text).await.unwrap_err().into_stream_error();
+        assert_eq!(error.code, Some(AgentErrorCode::UserAgentOperationRefused));
+        assert_eq!(error.protocol_code, Some(-32004));
+        payloads.push(error.data);
+    }
+    instance.kill_and_wait(None).await;
+    assert_eq!(payloads, [None, None]);
 }
 
 #[tokio::test]
