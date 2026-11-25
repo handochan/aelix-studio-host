@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use aionui_common::host_env::is_host_env;
+
 use crate::error::ExtensionError;
 
 /// Resolve `${ENV_VAR}` placeholders in a string value.
@@ -19,12 +21,17 @@ pub fn resolve_env_templates(value: &str, strict: bool) -> Result<String, Extens
                 result.push_str("${}");
                 continue;
             }
-            match std::env::var(&var_name) {
-                Ok(val) => result.push_str(&val),
-                Err(_) if strict => {
+            let value = if is_host_env(var_name.as_ref()) {
+                None
+            } else {
+                std::env::var(&var_name).ok()
+            };
+            match value {
+                Some(val) => result.push_str(&val),
+                None if strict => {
                     return Err(ExtensionError::UndefinedEnvVariable(var_name));
                 }
-                Err(_) => { /* lenient: replace with empty string */ }
+                None => { /* lenient: replace with empty string */ }
             }
         } else {
             result.push(ch);

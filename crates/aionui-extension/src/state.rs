@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aionui_common::host_env::HostEnv;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, error, warn};
@@ -40,7 +41,6 @@ struct Inner {
     writer_spawned: Mutex<bool>,
 }
 
-const EXTENSION_STATES_FILE_ENV: &str = "AIONUI_EXTENSION_STATES_FILE";
 const DEFAULT_STATES_FILE: &str = "extension-states.json";
 const USER_STATES_FILE: &str = "extension-user-states.json";
 const SYSTEM_DEFAULT_USER_ID: &str = "system_default_user";
@@ -415,7 +415,7 @@ pub fn save_states_to_file(path: &Path, states: &HashMap<String, ExtensionState>
 /// 1. `AIONUI_EXTENSION_STATES_FILE`
 /// 2. `<data_dir>/extension-states.json`
 pub fn resolve_state_file_path(data_dir: &Path) -> PathBuf {
-    resolve_state_file_path_inner(std::env::var_os(EXTENSION_STATES_FILE_ENV).as_ref(), data_dir)
+    resolve_state_file_path_inner(HostEnv::ExtensionStatesFile.read_os().as_ref(), data_dir)
 }
 
 fn resolve_state_file_path_inner(override_path: Option<&std::ffi::OsString>, data_dir: &Path) -> PathBuf {

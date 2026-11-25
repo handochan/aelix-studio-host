@@ -277,6 +277,7 @@ fn probe_path_with_command(mut command: std::process::Command, budget: Duration)
 
     let deadline = Instant::now() + budget;
 
+    aionui_common::host_env::strip_from_command(&mut command);
     let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

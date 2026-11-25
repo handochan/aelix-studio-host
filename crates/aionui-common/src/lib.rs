@@ -3,6 +3,7 @@
 //! Shared primitives: error types, enums, ID generation, crypto, timestamps, and pagination.
 pub mod chat_attachment;
 pub mod constants;
+pub mod host_env;
 pub mod user_paths;
 
 mod backend_capabilities;

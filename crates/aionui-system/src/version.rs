@@ -1,10 +1,11 @@
 use aionui_api_types::{GitHubReleaseAsset, UpdateCheckRequest, UpdateCheckResult, UpdateReleaseInfo};
+use aionui_common::host_env::HostEnv;
 use serde::Deserialize;
 
 use crate::error::SystemError;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
-const UPDATE_CHECK_ENV: &str = "AELIX_STUDIO_HOST_UPDATE_CHECK";
+const UPDATE_CHECK_ENV: &str = HostEnv::UpdateCheck.name();
 
 /// Service that checks GitHub Releases for available updates.
 #[derive(Clone)]
@@ -23,7 +24,7 @@ impl VersionCheckService {
             http_client,
             current_version,
             api_base: GITHUB_API_BASE.to_owned(),
-            enabled: update_checks_enabled(std::env::var(UPDATE_CHECK_ENV).ok().as_deref()),
+            enabled: update_checks_enabled(HostEnv::UpdateCheck.read().as_deref()),
         }
     }
 
@@ -49,7 +50,7 @@ impl VersionCheckService {
                 "Update checks are disabled; set {UPDATE_CHECK_ENV}=1 to enable them"
             )));
         }
-        let configured_repo = std::env::var("AIONUI_GITHUB_REPO").ok();
+        let configured_repo = HostEnv::GithubRepo.read();
         let repo = resolve_repo(req.repo.as_deref(), configured_repo.as_deref()).ok_or_else(|| {
             SystemError::BadRequest("Update repository is not configured; set repo or AIONUI_GITHUB_REPO".into())
         })?;

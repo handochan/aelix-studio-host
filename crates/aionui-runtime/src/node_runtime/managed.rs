@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use aionui_common::host_env::HostEnv;
 use flate2::read::GzDecoder;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -705,7 +706,7 @@ fn official_archive_sha256(spec: PlatformSpec) -> Result<&'static str, NodeRunti
 
 impl ManagedNodeDownloadSource {
     fn configured(spec: PlatformSpec) -> Result<Self, NodeRuntimeError> {
-        let mut base = crate::outbound_policy::configured_url(crate::outbound_policy::NODE_MIRROR_ENV)?;
+        let mut base = crate::outbound_policy::configured_url(HostEnv::NodeMirror)?;
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }

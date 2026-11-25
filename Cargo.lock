@@ -873,6 +873,7 @@ dependencies = [
 name = "aionui-runtime"
 version = "0.2.2"
 dependencies = [
+ "aionui-common",
  "dirs",
  "flate2",
  "fs2",

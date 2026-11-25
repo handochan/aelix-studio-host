@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use aionui_common::host_env::HostEnv;
 use aionui_process::Spawner;
 use tokio::sync::{Mutex, broadcast};
 
@@ -1611,7 +1612,9 @@ fn idle_check_interval_ms(idle_ttl_ms: Option<i64>) -> u64 {
 /// rule forbids that in normal production); it is a deliberate debugging switch a
 /// developer turns on to reproduce, never enabled by default.
 fn claude_wire_dump_enabled() -> bool {
-    std::env::var("AIONUI_CLAUDE_WIRE_DUMP").is_ok_and(|v| v != "0" && !v.is_empty())
+    HostEnv::ClaudeWireDump
+        .read()
+        .is_some_and(|v| v != "0" && !v.is_empty())
 }
 
 /// Emit one raw-bytes wire line (direction + conv + turn_gen + byte count + a

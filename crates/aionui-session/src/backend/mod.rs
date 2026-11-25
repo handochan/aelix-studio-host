@@ -51,6 +51,7 @@ pub use types::{
 };
 
 use crate::capability::Capabilities;
+use aionui_common::host_env::HostEnv;
 use futures_util::stream::BoxStream;
 
 /// Shared startup-handshake budget for the bound-thread / bound-session waits
@@ -65,8 +66,8 @@ use futures_util::stream::BoxStream;
 /// tick so callers keep their loop shape; on exhaustion they return the RETRYABLE
 /// `BackendError::HandshakeTimeout` (not a bare Transport→500).
 pub(crate) fn handshake_budget() -> std::time::Duration {
-    let secs = std::env::var("AIONUI_HANDSHAKE_TIMEOUT_SECS")
-        .ok()
+    let secs = HostEnv::HandshakeTimeout
+        .read()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|s| *s > 0)
         .unwrap_or(30); // legacy INIT_TIMEOUT_SECS parity

@@ -17,7 +17,7 @@ mod resolver;
 mod shell_env;
 
 pub use agent_env::agent_process_env;
-pub const STUDIO_AELIX_LAUNCH_ENV: &str = "AIONUI_STUDIO_AELIX_LAUNCH";
+pub const STUDIO_AELIX_LAUNCH_ENV: &str = aionui_common::host_env::HostEnv::StudioAelixLaunch.name();
 pub use cache::init;
 pub use managed_resources::{ManagedResourcesMode, managed_resources_mode, set_managed_resources_mode};
 pub use node_runtime::{

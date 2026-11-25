@@ -7,6 +7,7 @@
 //! the canonical `SessionEvent` into the reducer.
 
 use aionui_common::CommandSpec;
+use aionui_common::host_env::HostEnv;
 use aionui_process::{BoxedStdin, ProcessError, Spawner};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
@@ -1406,7 +1407,10 @@ async fn write_ndjson_line(stdin: &mut BoxedStdin, value: &Value) -> Result<(), 
     // into "prompt was/wasn't actually written" vs "CLI received it but went silent".
     // OFF by default — it logs full prompt content (AGENTS.md sensitive-payload rule),
     // a deliberate debugging switch, never on in normal production.
-    if std::env::var("AIONUI_CLAUDE_WIRE_DUMP").is_ok_and(|v| v != "0" && !v.is_empty()) {
+    if HostEnv::ClaudeWireDump
+        .read()
+        .is_some_and(|v| v != "0" && !v.is_empty())
+    {
         let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
         tracing::info!(
             target: "aionui_session::claude_wire",

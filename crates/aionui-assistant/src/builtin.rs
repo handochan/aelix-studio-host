@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use aionui_common::host_env::HostEnv;
 use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use serde_json::Value;
@@ -111,7 +112,7 @@ impl BuiltinAssistantRegistry {
     /// directory, read from disk (test-only override). Otherwise use the
     /// assets embedded at compile time.
     pub fn load() -> Self {
-        if let Ok(env) = std::env::var("AIONUI_BUILTIN_ASSISTANTS_PATH") {
+        if let Some(env) = HostEnv::BuiltinAssistants.read() {
             let p = PathBuf::from(env);
             if p.exists() {
                 return Self::load_from_dir(p);

@@ -170,6 +170,11 @@ jobs:
       - name: Builtin Aelix launch descriptor on Windows
         run: |
           cargo test --locked -p aionui-ai-agent --lib studio_aelix::tests:: -- --test-threads=1
+      - name: Host-only child environment on Windows
+        run: |
+          cargo test --locked -p aionui-ai-agent --lib sdk_child_filters_host_only_settings
+          cargo test --locked -p aionui-ai-agent --lib version_probe_filters_host_env
+          cargo test --locked -p aionui-app --test child_process_env_e2e
 
   release-scripts:
     name: Release scripts

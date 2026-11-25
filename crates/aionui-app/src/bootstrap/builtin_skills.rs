@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use aionui_common::host_env::HostEnv;
 use anyhow::Result;
 use tracing::warn;
 
@@ -9,9 +10,7 @@ use tracing::warn;
 /// the same binary. When `AIONUI_BUILTIN_SKILLS_PATH` is set, skip
 /// materialization — the override path is the source of truth in that mode.
 pub(super) async fn materialize_builtin_skills(data_dir: &Path) -> Result<()> {
-    let skip = std::env::var(aionui_extension::BUILTIN_SKILLS_ENV_VAR)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    let skip = HostEnv::BuiltinSkills.read().is_some_and(|v| !v.is_empty());
     if skip {
         return Ok(());
     }

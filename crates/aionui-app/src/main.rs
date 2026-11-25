@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use aionui_app::AppServices;
+use aionui_common::host_env::{HostEnv, capture_at_startup};
 use cli::{Cli, Command};
 
 use crate::bootstrap::parent_exit_signal;
@@ -27,11 +28,11 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> Result<ExitCode, MainError> {
-    let cli = Cli::parse();
-    let studio_launch = std::env::var(aionui_runtime::STUDIO_AELIX_LAUNCH_ENV).ok();
     // SAFETY: startup is single-threaded here, before runtime setup or any
     // child spawn. This is the same boundary used for the PATH update below.
-    unsafe { std::env::remove_var(aionui_runtime::STUDIO_AELIX_LAUNCH_ENV) };
+    unsafe { capture_at_startup() };
+    let cli = Cli::parse();
+    let studio_launch = HostEnv::StudioAelixLaunch.read();
 
     // mcp-* subcommands route into short-lived stdio helpers that live entirely
     // outside the main HTTP server. They share the global flags so clap can

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use aionui_common::host_env::HostEnv;
 use tracing::{debug, warn};
 
 use crate::constants::{EXTENSION_API_VERSION, EXTENSION_MANIFEST_FILE, EXTENSIONS_DIR_NAME};
@@ -28,7 +29,7 @@ pub struct ScanPath {
 /// In E2E test mode (`AIONUI_E2E_TEST=1`), only the environment variable
 /// paths are returned to ensure test isolation.
 pub fn resolve_scan_paths() -> Vec<ScanPath> {
-    let env_path = std::env::var("AIONUI_EXTENSIONS_PATH").ok();
+    let env_path = HostEnv::ExtensionsPath.read();
     let e2e_mode = is_e2e_test_mode();
     resolve_scan_paths_inner(env_path.as_deref(), e2e_mode, None)
 }
@@ -44,7 +45,7 @@ pub fn resolve_scan_paths() -> Vec<ScanPath> {
 /// In E2E test mode (`AIONUI_E2E_TEST=1`), only the environment variable
 /// paths are returned to ensure test isolation.
 pub fn resolve_scan_paths_for_data_dir(data_dir: &Path) -> Vec<ScanPath> {
-    let env_path = std::env::var("AIONUI_EXTENSIONS_PATH").ok();
+    let env_path = HostEnv::ExtensionsPath.read();
     let e2e_mode = is_e2e_test_mode();
     resolve_scan_paths_inner(env_path.as_deref(), e2e_mode, Some(data_dir))
 }
@@ -324,7 +325,7 @@ fn is_api_version_compatible(ext: &LoadedExtension) -> bool {
 // ---------------------------------------------------------------------------
 
 fn is_e2e_test_mode() -> bool {
-    std::env::var("AIONUI_E2E_TEST").map(|v| v == "1").unwrap_or(false)
+    HostEnv::E2eTest.read().as_deref() == Some("1")
 }
 
 // ---------------------------------------------------------------------------

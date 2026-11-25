@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use aionui_common::host_env::HostEnv;
 use aionui_common::{AgentKillReason, now_ms};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
@@ -17,11 +18,11 @@ const DEFAULT_TEAM_IDLE_TIMEOUT_SECS: i64 = 30 * 60;
 const DEFAULT_SCAN_INTERVAL_SECS: u64 = 60;
 
 /// Environment variable overriding the solo (single-chat) idle timeout, in seconds.
-const ENV_SOLO_IDLE_TIMEOUT_SECS: &str = "AIONUI_IDLE_TIMEOUT_SECS";
+const ENV_SOLO_IDLE_TIMEOUT_SECS: &str = HostEnv::IdleTimeout.name();
 /// Environment variable overriding the team idle timeout, in seconds.
-const ENV_TEAM_IDLE_TIMEOUT_SECS: &str = "AIONUI_TEAM_IDLE_TIMEOUT_SECS";
+const ENV_TEAM_IDLE_TIMEOUT_SECS: &str = HostEnv::TeamIdleTimeout.name();
 /// Environment variable overriding the idle scan interval, in seconds.
-const ENV_IDLE_SCAN_INTERVAL_SECS: &str = "AIONUI_IDLE_SCAN_INTERVAL_SECS";
+const ENV_IDLE_SCAN_INTERVAL_SECS: &str = HostEnv::IdleScanInterval.name();
 
 #[async_trait]
 pub trait IdleCleanupCoordinator: Send + Sync {
@@ -210,9 +211,9 @@ fn resolve_idle_config(
 /// Returns `(solo_timeout_secs, team_timeout_secs, scan_interval_secs)`.
 pub fn resolve_idle_config_from_env() -> (i64, i64, u64) {
     resolve_idle_config(
-        std::env::var(ENV_SOLO_IDLE_TIMEOUT_SECS).ok(),
-        std::env::var(ENV_TEAM_IDLE_TIMEOUT_SECS).ok(),
-        std::env::var(ENV_IDLE_SCAN_INTERVAL_SECS).ok(),
+        HostEnv::IdleTimeout.read(),
+        HostEnv::TeamIdleTimeout.read(),
+        HostEnv::IdleScanInterval.read(),
     )
 }
 

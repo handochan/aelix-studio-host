@@ -61,7 +61,6 @@ fn build_agent_process_env(
 
 fn clean_agent_env(env: &mut BTreeMap<OsString, OsString>) {
     for key in [
-        crate::STUDIO_AELIX_LAUNCH_ENV,
         "NODE_OPTIONS",
         "NODE_INSPECT",
         "NODE_DEBUG",
@@ -71,7 +70,7 @@ fn clean_agent_env(env: &mut BTreeMap<OsString, OsString>) {
     ] {
         remove_env_key(env, key);
     }
-    env.retain(|key, _| !env_key_starts_with(key, "npm_"));
+    env.retain(|key, _| !aionui_common::host_env::is_host_env(key) && !env_key_starts_with(key, "npm_"));
 }
 
 fn get_env_value<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsString> {
@@ -277,6 +276,7 @@ mod tests {
 printf '%s\n' \
   'AIONUI_SHELL_ONLY=from-shell' \
   'AIONUI_OVERLAY=from-shell' \
+  'JWT_SECRET=from-shell' \
   'PATH=/shell/bin:/current/bin' \
   'NODE_OPTIONS=--inspect' \
   'CLAUDECODE=1' \
@@ -296,6 +296,7 @@ printf '%s\n' \
                 .env("PATH", "/current/bin")
                 .env("AIONUI_CURRENT_ONLY", "from-current")
                 .env("AIONUI_OVERLAY", "from-current")
+                .env("AIONCORE_BOOTSTRAP_SECRET", "from-current")
                 .env("NODE_OPTIONS", "--require parent")
                 .env("CLAUDECODE", "1")
                 .env("SSL_CERT_FILE", "/tmp/current-cert.pem")
@@ -323,6 +324,8 @@ printf '%s\n' \
         assert_eq!(value("AIONUI_CURRENT_ONLY").as_deref(), Some("from-current"));
         assert_eq!(value("AIONUI_SHELL_ONLY").as_deref(), Some("from-shell"));
         assert_eq!(value("AIONUI_OVERLAY").as_deref(), Some("from-shell"));
+        assert_eq!(value("JWT_SECRET"), None);
+        assert_eq!(value("AIONCORE_BOOTSTRAP_SECRET"), None);
         assert_eq!(value("NODE_OPTIONS"), None);
         assert_eq!(value("CLAUDECODE"), None);
         assert_eq!(value("SSL_CERT_FILE"), None);

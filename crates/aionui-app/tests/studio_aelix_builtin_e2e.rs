@@ -21,7 +21,8 @@ const PEER: &str = r#"
 import json, os, pathlib, sys, time
 
 here = pathlib.Path(__file__).parent
-(here / 'spawned').write_text('private' if 'AIONUI_STUDIO_AELIX_LAUNCH' not in os.environ else 'inherited')
+private_keys = {'AIONUI_STUDIO_AELIX_LAUNCH', 'JWT_SECRET', 'AIONUI_ENCRYPTION_SECRET', 'AIONCORE_BOOTSTRAP_SECRET'}
+(here / 'spawned').write_text('inherited' if private_keys & os.environ.keys() else 'private')
 fail = (here / 'fail-check').is_file()
 for raw in sys.stdin:
     request = json.loads(raw)
@@ -43,10 +44,10 @@ for raw in sys.stdin:
     elif method == 'session/new':
         if (here / 'terminal-check').is_file():
             marker = here / 'terminal-descriptor-visibility'
-            command = 'if [ "${AIONUI_STUDIO_AELIX_LAUNCH+x}" = x ]; then printf inherited; else printf private; fi > "$1"'
+            command = 'import os,pathlib,sys; pathlib.Path(sys.argv[1]).write_text("inherited" if ' + repr(private_keys) + ' & os.environ.keys() else "private")'
             print(json.dumps({'jsonrpc': '2.0', 'id': 991, 'method': 'terminal/create',
-                 'params': {'sessionId': 'fixture-session', 'command': '/bin/sh',
-                 'args': ['-c', command, 'terminal-fixture', str(marker)]}}), flush=True)
+                 'params': {'sessionId': 'fixture-session', 'command': sys.executable,
+                 'args': ['-c', command, str(marker)]}}), flush=True)
             terminal = json.loads(sys.stdin.readline())
             assert terminal.get('result', {}).get('terminalId'), terminal
             deadline = time.monotonic() + 5
@@ -129,6 +130,8 @@ impl Host {
             .env("HOME", &home)
             .env("USERPROFILE", &home)
             .env("JWT_SECRET", JWT_SECRET)
+            .env("AIONUI_ENCRYPTION_SECRET", "host78-fixture-encryption-root")
+            .env("AIONCORE_BOOTSTRAP_SECRET", "host78-fixture-bootstrap-secret")
             .env(aionui_runtime::STUDIO_AELIX_LAUNCH_ENV, descriptor)
             .env("AIONUI_EXTENSIONS_PATH", root.join("extensions"))
             .stdin(Stdio::piped())
@@ -457,7 +460,7 @@ async fn aelix_other_builtin_never_receives_relay_offer() {
 }
 
 #[tokio::test]
-async fn aelix_descriptor_is_private_to_host_acp_mcp_and_terminal_children() {
+async fn host_secrets_and_aelix_descriptor_are_private_to_acp_mcp_and_terminal_children() {
     let dir = tempfile::tempdir().unwrap();
     let (peer, descriptor) = runtime(dir.path(), "private runtime", false);
     std::fs::write(peer.join("terminal-check"), "").unwrap();
@@ -465,7 +468,7 @@ async fn aelix_descriptor_is_private_to_host_acp_mcp_and_terminal_children() {
     assert_eq!(host.ok(Method::POST, HEALTH, Value::Null).await["status"], "online");
     assert_eq!(std::fs::read_to_string(peer.join("spawned")).unwrap(), "private");
     let marker = dir.path().join("mcp-descriptor-visibility");
-    let script = "import os,pathlib,sys; pathlib.Path(sys.argv[1]).write_text('inherited' if 'AIONUI_STUDIO_AELIX_LAUNCH' in os.environ else 'private')";
+    let script = "import os,pathlib,sys; pathlib.Path(sys.argv[1]).write_text('inherited' if {'AIONUI_STUDIO_AELIX_LAUNCH', 'JWT_SECRET', 'AIONUI_ENCRYPTION_SECRET', 'AIONCORE_BOOTSTRAP_SECRET'} & os.environ.keys() else 'private')";
     host.call(
         Method::POST,
         "/api/mcp/test-connection",
