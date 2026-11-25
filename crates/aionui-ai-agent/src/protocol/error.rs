@@ -311,20 +311,11 @@ impl AcpError {
         )
     }
 
-    /// Convert an SDK [`Error`](SdkError) into an [`AcpError`].
-    ///
-    /// Mapping is by [`ErrorCode`], never by message text. The single
-    /// exceptions are known stale-session shapes: `data.error == "Session not
-    /// found: ..."` and resource-not-found replies from `session/load`
-    /// without a concrete resource URI. OpenCode/Codex have emitted stale
-    /// resume failures with those shapes, so we re-classify them into
-    /// `SessionNotFound` to keep recovery paths uniform across agents.
-    /// See ELECTRON-1HQ.
-    /// `context` carries the session ID or method name for diagnostics.
     /// Keep the SDK's classification while discarding free-form peer details
     /// at the Host error boundary. HTTP, WS and diagnostics share this error.
-    pub(crate) fn without_remote_detail(mut self, method: &str) -> Self {
+    pub fn without_remote_detail(mut self, method: &str) -> Self {
         const DETAIL: &str = "ACP request failed";
+        let startup_details = self.public_startup_details();
         match &mut self {
             Self::SessionNotFound { session_id } => *session_id = method.to_owned(),
             Self::ProtocolParseError { message }
@@ -336,9 +327,13 @@ impl AcpError {
             }
             Self::ApplicationError { code, message, data } => {
                 *message = DETAIL.into();
-                *data = safe_application_data(*code, data.as_ref());
+                *data = startup_details.or_else(|| safe_application_data(*code, data.as_ref()));
             }
-            Self::AgentInternal { message, data, .. } | Self::OtherProtocolError { message, data, .. } => {
+            Self::OtherProtocolError { message, data, .. } => {
+                *message = DETAIL.into();
+                *data = startup_details;
+            }
+            Self::AgentInternal { message, data, .. } => {
                 *message = DETAIL.into();
                 *data = None;
             }
@@ -347,6 +342,27 @@ impl AcpError {
         self
     }
 
+    /// Allowlisted details for HTTP startup failures.
+    pub fn public_startup_details(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::ApplicationError { data, .. } => safe_startup_details(data.as_ref()),
+            Self::OtherProtocolError { code, data, .. } if matches!(ErrorCode::from(*code), ErrorCode::Other(_)) => {
+                safe_startup_details(data.as_ref())
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert an SDK [`Error`](SdkError) into an [`AcpError`].
+    ///
+    /// Mapping is by [`ErrorCode`], never by message text. The single
+    /// exceptions are known stale-session shapes: `data.error == "Session not
+    /// found: ..."` and resource-not-found replies from `session/load`
+    /// without a concrete resource URI. OpenCode/Codex have emitted stale
+    /// resume failures with those shapes, so we re-classify them into
+    /// `SessionNotFound` to keep recovery paths uniform across agents.
+    /// See ELECTRON-1HQ.
+    /// `context` carries the session ID or method name for diagnostics.
     pub fn from_sdk(err: SdkError, context: &str) -> Self {
         Self::from_sdk_for_agent(err, context, None)
     }
@@ -411,6 +427,16 @@ impl AcpError {
                     AcpError::SessionNotFound {
                         session_id: context.to_owned(),
                     }
+                } else if matches!(err.code, ErrorCode::Other(_))
+                    && let Some(details) = safe_startup_details(err.data.as_ref())
+                {
+                    // Classify the structured startup error before inspecting
+                    // agent prose for legacy stale-session signals.
+                    AcpError::OtherProtocolError {
+                        code,
+                        message: "ACP request failed".into(),
+                        data: Some(details),
+                    }
                 } else if let Some(sid) = extract_session_not_found(err.data.as_ref()) {
                     AcpError::SessionNotFound { session_id: sid }
                 } else {
@@ -425,7 +451,28 @@ impl AcpError {
     }
 }
 
-/// Retain the fixed discriminants consumed by Studio's lock and refusal UI.
+/// Project a startup diagnostic from the ACP data object. Verified adapter
+/// example: aelix-acp@7a2ca0e/src/aelix_acp/session.py and src/aelix_acp/wire/errors.py.
+fn safe_startup_details(data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    use serde_json::{Value, json};
+
+    let data = data?;
+    if data.get("kind").and_then(Value::as_str) != Some("socket_path_too_long") {
+        return None;
+    }
+    let mut details = json!({"kind":"socket_path_too_long"});
+    if let Some(limit) = data
+        .get("limitBytes")
+        .and_then(Value::as_u64)
+        .and_then(|limit| u16::try_from(limit).ok())
+        .filter(|limit| *limit > 0)
+    {
+        details["limitBytes"] = json!(limit);
+    }
+    Some(details)
+}
+
+/// Retain the allowlisted diagnostics consumed by Studio.
 fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     use serde_json::{Value, json};
 
@@ -510,6 +557,65 @@ fn extract_resource_not_found(data: Option<&serde_json::Value>) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_startup_details_map_known_kind_and_optional_hint() {
+        let known = SdkError::new(-33004, "private message")
+            .data(serde_json::json!({"kind":"socket_path_too_long","limitBytes":104}));
+        let error = AcpError::from_sdk(known, "session/new").without_remote_detail("session/new");
+        assert_eq!(
+            error.public_startup_details(),
+            Some(serde_json::json!({"kind":"socket_path_too_long","limitBytes":104}))
+        );
+
+        let kind_only =
+            SdkError::new(-33005, "private message").data(serde_json::json!({"kind":"socket_path_too_long"}));
+        let error = AcpError::from_sdk(kind_only, "session/new");
+        assert_eq!(
+            error.public_startup_details(),
+            Some(serde_json::json!({"kind":"socket_path_too_long"}))
+        );
+    }
+
+    #[test]
+    fn acp_startup_details_omit_unknown_kind_and_missing_data() {
+        let unknown = SdkError::new(-33004, "socket_path_too_long")
+            .data(serde_json::json!({"kind":"/private/unknown","limitBytes":104}));
+        let missing = SdkError::new(-33004, "socket_path_too_long");
+        let unrelated = SdkError::new(-32602, "private message")
+            .data(serde_json::json!({"kind":"socket_path_too_long","limitBytes":104}));
+        let cancelled = SdkError::new(-32800, "cancelled").data(serde_json::json!({"kind":"socket_path_too_long"}));
+        for reply in [unknown, missing, unrelated, cancelled] {
+            assert_eq!(AcpError::from_sdk(reply, "session/new").public_startup_details(), None);
+        }
+    }
+
+    #[test]
+    fn acp_startup_details_discard_malicious_and_oversized_data() {
+        use serde_json::json;
+
+        for invalid_limit in [
+            json!(u64::MAX),
+            json!(0),
+            json!(-1),
+            json!("104"),
+            json!({"path":"/private"}),
+        ] {
+            let reply = SdkError::new(-33004, "/private/message").data(json!({
+                "kind":"socket_path_too_long",
+                "limitBytes":invalid_limit,
+                "error":"Session not found: /private/session",
+                "stderr":"/private/credential".repeat(16_384),
+                "nested":{"token":"fixture-secret"}
+            }));
+            let error = AcpError::from_sdk(reply, "session/new");
+            assert_eq!(
+                error.public_startup_details(),
+                Some(json!({"kind":"socket_path_too_long"}))
+            );
+            assert!(!error.to_string().contains("/private/"));
+        }
+    }
 
     // ── CloseReason ─────────────────────────────────────────────────────
 

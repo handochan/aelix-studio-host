@@ -2,12 +2,18 @@
 
 use aionui_common::ApiError;
 
-use crate::error::AgentError;
+use crate::error::{ACP_INITIALIZATION_FAILED, AgentError};
 use crate::protocol::error::AcpError;
 
 pub(crate) fn agent_error_to_api_error(err: AgentError) -> ApiError {
     match err {
         AgentError::BadRequest(message) => ApiError::BadRequest(message),
+        AgentError::AcpInitialization { details } => ApiError::coded(
+            axum::http::StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            ACP_INITIALIZATION_FAILED,
+            details,
+        ),
         AgentError::Unauthorized(message) => ApiError::Unauthorized(message),
         AgentError::Forbidden(message) => ApiError::Forbidden(message),
         AgentError::NotFound(message) => ApiError::NotFound(message),

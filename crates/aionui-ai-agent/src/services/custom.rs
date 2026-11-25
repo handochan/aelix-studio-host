@@ -6,8 +6,7 @@
 //! toggle enable).
 //!
 //! Test-on-save: create / update run `try_connect_custom_agent`
-//! before hitting the DB. Failures become `AgentError::BadRequest` with
-//! a prefixed marker (`cli_not_found:` / `acp_init_failed:`) that the
+//! before hitting the DB. HTTP 400 responses carry a prefixed marker (`cli_not_found:` / `acp_init_failed:`) that the
 //! frontend maps back to the same three Alert states it shows for the
 //! manual "Test connection" button.
 
@@ -248,23 +247,21 @@ async fn probe_or_reject(req: &CustomAgentUpsertRequest) -> Result<Option<serde_
     }
 
     let env_map: HashMap<String, String> = req.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect();
-    use crate::protocol::custom_agent_probe::try_connect_custom_agent_with_catalog;
-    let (outcome, catalog) = try_connect_custom_agent_with_catalog(&req.command, &req.args, &env_map, None).await;
-    match outcome {
-        TryConnectCustomAgentResponse::Success => Ok(catalog.and_then(|catalog| catalog.agent_capabilities)),
+    use crate::protocol::custom_agent_probe::{ProbeOutcome, probe_custom_agent};
+    match probe_custom_agent(&req.command, &req.args, &env_map, None).await {
+        ProbeOutcome::Ok(catalog) => Ok(catalog.and_then(|catalog| catalog.agent_capabilities)),
         // Reachable but not authorized is a valid agent the user simply hasn't
         // logged into yet — accept the save so it lands in the list (offline,
         // needs-login), where a later "test connection" confirms recovery.
-        TryConnectCustomAgentResponse::FailAuth { error } => {
+        ProbeOutcome::Auth(error) => {
             tracing::info!(%error, "custom agent reachable but requires auth; accepting save");
             Ok(None)
         }
-        TryConnectCustomAgentResponse::FailCli { error } => {
-            Err(AgentError::bad_request(format!("cli_not_found: {error}")))
-        }
-        TryConnectCustomAgentResponse::FailAcp { error } => {
-            Err(AgentError::bad_request(format!("acp_init_failed: {error}")))
-        }
+        ProbeOutcome::CliUnavailable(_) => Err(AgentError::bad_request("cli_not_found: Agent command unavailable")),
+        ProbeOutcome::Fail(_) => Err(AgentError::AcpInitialization { details: None }),
+        ProbeOutcome::RpcFailure { error, .. } => Err(AgentError::AcpInitialization {
+            details: error.public_startup_details(),
+        }),
     }
 }
 

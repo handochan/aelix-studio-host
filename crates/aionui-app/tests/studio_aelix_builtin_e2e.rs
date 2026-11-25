@@ -37,6 +37,9 @@ for raw in sys.stdin:
             'agentCapabilities': {'_meta': {'aelix/sessionRelay': {
                 'version': 1, 'requests': ['_aelix/session/state'], 'notifications': []}}}
         }
+        client_meta = params.get('clientCapabilities', {}).get('_meta', {})
+        if (here / 'socket-path-check').is_file() and client_meta.get('aelix/hostBytes') == {'version': 1}:
+            reply['result']['agentCapabilities']['_meta']['aelix/hostBytes'] = {'version': 1}
     elif method == 'session/new':
         if (here / 'terminal-check').is_file():
             marker = here / 'terminal-descriptor-visibility'
@@ -49,7 +52,12 @@ for raw in sys.stdin:
             deadline = time.monotonic() + 5
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
-        if fail:
+        if (here / 'socket-path-check').is_file():
+            reply['error'] = {'code': -33004, 'message': '/PRIVATE/HOST72_SENTINEL/peer-message',
+                              'data': {'kind': 'socket_path_too_long', 'limitBytes': 104,
+                                       'path': '/PRIVATE/HOST72_SENTINEL/socket', 'token': 'fixture-secret',
+                                       'stderr': '/PRIVATE/HOST72_SENTINEL/stderr'}}
+        elif fail:
             reply['error'] = {'code': -32603, 'message': '/PRIVATE/HOST67_SENTINEL/runtime/worker.py',
                               'data': {'code': 'FIXTURE_FAILURE', 'detail': '/PRIVATE/HOST67_SENTINEL/runtime/worker.py'}}
         else:
@@ -288,6 +296,52 @@ async fn aelix_private_probe_omits_peer_path_from_http_database_and_diagnostics(
             .await
             .unwrap();
     assert!(saved.is_none(), "a runtime health verdict was persisted");
+}
+
+#[tokio::test]
+async fn acp_socket_path_error_is_structured_on_runtime_ensure_and_custom_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (peer, descriptor) = runtime(dir.path(), "socket path failure", false);
+    std::fs::write(peer.join("socket-path-check"), "").unwrap();
+    let host = Host::start(dir.path(), &descriptor, true).await;
+    let conversation = host.conversation(ENTRY, dir.path()).await;
+    let (runtime_status, runtime_body) = host
+        .call(
+            Method::POST,
+            &format!("/api/conversations/{conversation}/runtime/ensure"),
+            Value::Null,
+            None,
+        )
+        .await;
+    let (registration_status, registration_body) = host
+        .call(
+            Method::POST,
+            "/api/agents/custom",
+            json!({
+                "name":"Socket path fixture", "command":"python3",
+                "args":[peer.join("launch.py")]
+            }),
+            None,
+        )
+        .await;
+
+    assert_eq!(runtime_status, StatusCode::BAD_GATEWAY, "{runtime_body}");
+    assert_eq!(
+        runtime_body,
+        json!({
+            "success":false, "code":"BAD_GATEWAY", "error":"ACP runtime initialization failed.",
+            "details":{"kind":"socket_path_too_long","limitBytes":104}
+        })
+    );
+    assert_eq!(registration_status, StatusCode::BAD_REQUEST, "{registration_body}");
+    assert_eq!(
+        registration_body,
+        json!({
+            "success":false, "code":"BAD_REQUEST", "error":"acp_init_failed: ACP initialization failed",
+            "details":{"kind":"socket_path_too_long","limitBytes":104}
+        })
+    );
+    host.stop().await;
 }
 
 #[tokio::test]

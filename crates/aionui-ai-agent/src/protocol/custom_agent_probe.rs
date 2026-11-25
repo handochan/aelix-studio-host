@@ -10,7 +10,7 @@
 //!   - `POST /api/agents/custom/try-connect`  (manual "test connection" button)
 //!   - `AgentService::create/update_custom_agent`   (test-on-save)
 //!
-//! Both paths produce identical outcomes / error text.
+//! Registration projects failures into a safe HTTP error.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -66,6 +66,15 @@ pub async fn try_connect_custom_agent_with_catalog(
     env: &HashMap<String, String>,
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+    probe_custom_agent(command, args, env, reporter).await.into_response()
+}
+
+pub(crate) async fn probe_custom_agent(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    reporter: Option<&dyn NodeRuntimeProgressReporter>,
+) -> ProbeOutcome {
     try_connect_with_policy(command, args, env, reporter, true, false).await
 }
 
@@ -76,7 +85,9 @@ pub(crate) async fn try_connect_builtin_agent_with_catalog(
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
     private: bool,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
-    try_connect_with_policy(command, args, env, reporter, false, private).await
+    try_connect_with_policy(command, args, env, reporter, false, private)
+        .await
+        .into_response()
 }
 
 async fn try_connect_with_policy(
@@ -86,7 +97,7 @@ async fn try_connect_with_policy(
     reporter: Option<&dyn NodeRuntimeProgressReporter>,
     user_configured: bool,
     private: bool,
-) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+) -> ProbeOutcome {
     // ── Step 1 — which check ────────────────────────────────────────
     let head = first_token(command);
     let plan = if user_configured {
@@ -97,16 +108,11 @@ async fn try_connect_with_policy(
     let resolved = match plan {
         Ok(resolved) => resolved,
         Err(error) => {
-            return (
-                TryConnectCustomAgentResponse::FailCli {
-                    error: if private {
-                        crate::studio_aelix::probe_failure_message("command_not_found").into()
-                    } else {
-                        error.to_string()
-                    },
-                },
-                None,
-            );
+            return ProbeOutcome::CliUnavailable(if private {
+                crate::studio_aelix::probe_failure_message("command_not_found").into()
+            } else {
+                error.to_string()
+            });
         }
     };
     if !private {
@@ -115,13 +121,17 @@ async fn try_connect_with_policy(
 
     // ── Step 2 — spawn + ACP initialize ─────────────────────────────
     let spec = probe_command_spec(resolved, args, env);
-    try_connect_resolved(spec, private).await
+    probe_resolved(spec, private).await
 }
 
 pub(crate) async fn try_connect_resolved(
     spec: CommandSpec,
     redact_launch: bool,
 ) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+    probe_resolved(spec, redact_launch).await.into_response()
+}
+
+async fn probe_resolved(spec: CommandSpec, redact_launch: bool) -> ProbeOutcome {
     let spawned = if redact_launch {
         CliAgentProcess::spawn_sdk(spec, false, true).await
     } else {
@@ -129,30 +139,15 @@ pub(crate) async fn try_connect_resolved(
     };
     let proc = match spawned {
         Ok(proc) => proc,
-        Err(error) => {
-            return (
-                TryConnectCustomAgentResponse::FailAcp {
-                    error: format!("spawn failed: {error}"),
-                },
-                None,
-            );
-        }
+        Err(error) => return ProbeOutcome::Fail(format!("spawn failed: {error}")),
     };
 
     let outcome = match tokio::time::timeout(STEP2_TIMEOUT, run_handshake(&proc, redact_launch)).await {
-        Ok(outcome) => {
-            let catalog = match &outcome {
-                ProbeOutcome::Ok(catalog) => catalog.clone(),
-                _ => None,
-            };
-            (outcome.into_response(), catalog)
-        }
-        Err(_) => (
-            TryConnectCustomAgentResponse::FailAcp {
-                error: format!("ACP handshake did not complete within {}s", STEP2_TIMEOUT.as_secs()),
-            },
-            None,
-        ),
+        Ok(outcome) => outcome,
+        Err(_) => ProbeOutcome::Fail(format!(
+            "ACP handshake did not complete within {}s",
+            STEP2_TIMEOUT.as_secs()
+        )),
     };
 
     // Always tear down the whole process group. `kill_on_drop(true)` only
@@ -204,23 +199,33 @@ fn probe_command_spec(resolved: ResolvedCommand, args: &[String], env: &HashMap<
 /// authorized" (`Auth`) apart from other ACP failures (`Fail`) — `initialize`
 /// alone returns `authMethods` even for already-authorized agents and cannot
 /// make this distinction.
-enum ProbeOutcome {
+pub(crate) enum ProbeOutcome {
     /// Carries the catalog the successful `session/new` advertised (modes /
     /// models / config options), already projected into the same shape the live
     /// session path persists. `None` when the agent advertised nothing. Boxed to
     /// keep the enum small: the success payload dwarfs the error strings.
     Ok(Option<Box<AgentHandshake>>),
     Auth(String),
+    CliUnavailable(String),
     Fail(String),
+    RpcFailure {
+        method: &'static str,
+        error: AcpError,
+    },
 }
 
 impl ProbeOutcome {
-    fn into_response(self) -> TryConnectCustomAgentResponse {
-        match self {
-            ProbeOutcome::Ok(_) => TryConnectCustomAgentResponse::Success,
-            ProbeOutcome::Auth(error) => TryConnectCustomAgentResponse::FailAuth { error },
-            ProbeOutcome::Fail(error) => TryConnectCustomAgentResponse::FailAcp { error },
-        }
+    fn into_response(self) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+        let response = match self {
+            Self::Ok(catalog) => return (TryConnectCustomAgentResponse::Success, catalog),
+            Self::Auth(error) => TryConnectCustomAgentResponse::FailAuth { error },
+            Self::CliUnavailable(error) => TryConnectCustomAgentResponse::FailCli { error },
+            Self::Fail(error) => TryConnectCustomAgentResponse::FailAcp { error },
+            Self::RpcFailure { method, error } => TryConnectCustomAgentResponse::FailAcp {
+                error: format!("ACP {method} failed: {error}"),
+            },
+        };
+        (response, None)
     }
 }
 
@@ -266,7 +271,7 @@ async fn run_handshake(proc: &CliAgentProcess, private: bool) -> ProbeOutcome {
         biased;
         res = connect => match res {
             Ok(protocol) => protocol,
-            Err(e) => return ProbeOutcome::Fail(format!("ACP initialize failed: {e}")),
+            Err(error) => return ProbeOutcome::RpcFailure { method: "initialize", error },
         },
         exit = proc.wait_for_exit() => {
             let stderr = proc.take_stderr().await;
@@ -312,7 +317,10 @@ async fn run_handshake(proc: &CliAgentProcess, private: bool) -> ProbeOutcome {
             ProbeOutcome::Auth("Agent reachable but requires login/authorization".to_string())
         }
         Err(_) if private => ProbeOutcome::Fail(crate::studio_aelix::probe_failure_message("acp_init_failed").into()),
-        Err(e) => ProbeOutcome::Fail(format!("ACP session/new failed: {e}")),
+        Err(error) => ProbeOutcome::RpcFailure {
+            method: "session/new",
+            error,
+        },
     };
 
     // Drop `protocol` so its shutdown oneshot fires before the outer cleanup
