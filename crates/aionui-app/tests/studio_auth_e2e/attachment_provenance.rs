@@ -39,8 +39,8 @@ async fn attachment_provenance_matches_normal_send_and_running_metadata_without_
     let workspace = tempfile::tempdir().unwrap();
     let base = workspace.path();
     std::fs::write(base.join("relay-calls.attachment-fixture"), "").unwrap();
-    let host = StudioHost::start_with_db(base, fixture(base).await, true).await;
-    let id = create(&host, base, "fixture-aelix").await;
+    let host = start_relay_host(base, fixture(base).await).await;
+    let id = create(&host, base, "builtin-aelix").await;
     let messages = format!("{}/api/conversations/{id}/messages", host.url);
     let metadata = format!("{}/api/fs/content/metadata", host.url);
     let post = |url| host.client.post(url).header(PRIVATE_HEADER, FIXTURE_TOKEN);

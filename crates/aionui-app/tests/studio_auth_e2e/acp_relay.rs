@@ -31,52 +31,38 @@ async fn code(response: reqwest::Response, status: StatusCode, code: &str) {
 async fn fixture(dir: &Path) -> aionui_db::Database {
     let db = init_database_memory().await.unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_relay.py");
-    for (id, backend, source, peer) in [
-        ("fixture-aelix", "aelix", "builtin", "aelix-acp"),
-        ("custom-aelix", "aelix", "custom", "aelix-acp"),
-        ("wrong-name-aelix", "aelix", "builtin", "another-agent"),
-        ("foreign-aelix", "aelix", "builtin", "aelix-acp"),
-    ] {
+    std::fs::copy(&script, dir.join("launch.py")).unwrap();
+    for (id, source) in [("custom-aelix", "custom"), ("legacy-builtin-aelix", "builtin")] {
         sqlx::query(
             "INSERT INTO agent_metadata
              (id, agent_id, user_id, name, backend, agent_type, agent_source, command, args, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'acp', ?, 'python3', ?, 1, 1)",
+             VALUES (?, ?, ?, ?, 'aelix', 'acp', ?, 'python3', ?, 1, 1)",
         )
         .bind(id)
         .bind(id)
         .bind((source == "custom").then_some("system_default_user"))
         .bind(id)
-        .bind(backend)
         .bind(source)
-        .bind(
-            json!([
-                script,
-                dir.join(if id == "foreign-aelix" {
-                    "foreign-calls"
-                } else {
-                    "relay-calls"
-                }),
-                peer
-            ])
-            .to_string(),
-        )
+        .bind(json!([script, dir.join("relay-calls"), "aelix-acp"]).to_string())
         .execute(db.pool())
         .await
         .unwrap();
     }
-    sqlx::query("INSERT INTO users (id, user_type, created_at, updated_at) VALUES ('other-owner', 'aionpro', 1, 1)")
-        .execute(db.pool())
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO conversations (id, user_id, name, type, extra, created_at, updated_at)
-                 VALUES ('other-conversation', 'other-owner', 'private', 'acp', ?, 1, 1)",
-    )
-    .bind(json!({"agent_id":"foreign-aelix","backend":"aelix","workspace": dir,"is_custom_workspace":true}).to_string())
-    .execute(db.pool())
-    .await
-    .unwrap();
     db
+}
+
+async fn start_relay_host(dir: &Path, db: aionui_db::Database) -> StudioHost {
+    let python = aionui_runtime::resolve_command_path("python3").unwrap();
+    let launch = json!({
+        "command": python,
+        "args": ["-I", "-S", "-B", "-X", "utf8", dir.join("launch.py"), "acp", "--profile", "coding"],
+        "env": {
+            "AELIX_CODING_AGENT_DIR": dir.join("agent"),
+            "AELIX_ACP_STUDIO_MANAGED": "1"
+        }
+    })
+    .to_string();
+    StudioHost::start_with_db_and_launch(dir, db, true, Some(&launch)).await
 }
 
 async fn create(host: &StudioHost, dir: &Path, agent_id: &str) -> String {
@@ -134,8 +120,11 @@ async fn acp_relay_unprotected_listener_has_no_route() {
 async fn acp_relay_requires_both_builtin_backend_and_initialize_identity() {
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path()).await;
-    let host = StudioHost::start_with_db(dir.path(), db, true).await;
-    for agent in ["custom-aelix", "wrong-name-aelix"] {
+    let host = start_relay_host(dir.path(), db).await;
+    for agent in ["custom-aelix", "legacy-builtin-aelix", "builtin-aelix"] {
+        if agent == "builtin-aelix" {
+            std::fs::write(dir.path().join("relay-calls.wrong-peer"), "").unwrap();
+        }
         let id = create(&host, dir.path(), agent).await;
         let root = format!("{}/api/conversations/{id}", host.url);
         read(
@@ -174,8 +163,26 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     let _capture = tracing::subscriber::set_default(subscriber);
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path()).await;
-    let host = StudioHost::start_with_db(dir.path(), db, true).await;
-    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let pool = db.pool().clone();
+    let foreign_workspace = dir.path().join("foreign-workspace");
+    std::fs::create_dir(&foreign_workspace).unwrap();
+    sqlx::query("INSERT INTO users (id, user_type, created_at, updated_at) VALUES ('other-owner', 'aionpro', 1, 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO conversations (id, user_id, name, type, extra, created_at, updated_at)
+         VALUES ('other-conversation', 'system_default_user', 'private', 'acp', ?, 1, 1)",
+    )
+    .bind(
+        json!({"agent_id":"builtin-aelix","backend":"aelix","workspace":foreign_workspace,"custom_workspace":true})
+            .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let host = start_relay_host(dir.path(), db).await;
+    let id = create(&host, dir.path(), "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     let endpoint = format!("{root}/acp-extensions");
     let get = || host.client.get(&endpoint);
@@ -244,7 +251,7 @@ async fn acp_relay_protected_router_and_stdio_contract() {
     )
     .await;
     host.conversations
-        .ensure_runtime("other-owner", "other-conversation", &host.tasks)
+        .ensure_runtime("system_default_user", "other-conversation", &host.tasks)
         .await
         .unwrap();
     let aionui_ai_agent::AgentInstance::Acp(foreign) = host.tasks.get_task("other-conversation").unwrap() else {
@@ -270,7 +277,14 @@ async fn acp_relay_protected_router_and_stdio_contract() {
         )
         .unwrap();
     assert_eq!(call.reply.await.unwrap().unwrap(), "owner positive control");
-    let foreign_calls = dir.path().join("foreign-calls");
+    // Move the conversation's database ownership while keeping the previous
+    // operator's live relay binding. An unauthorized request must not reach
+    // this live task even if it knows the binding.
+    sqlx::query("UPDATE conversations SET user_id = 'other-owner' WHERE id = 'other-conversation'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let foreign_calls = foreign_workspace.join("relay-calls");
     let baseline = std::fs::read(&foreign_calls).unwrap();
     let other = format!("{}/api/conversations/other-conversation/acp-extensions", host.url);
     assert_eq!(
@@ -784,17 +798,17 @@ async fn acp_relay_command_override_does_not_inherit_the_builtin_launch_identity
 
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path()).await;
-    let host = StudioHost::start_with_db(dir.path(), db, true).await;
+    let host = start_relay_host(dir.path(), db).await;
     let path = dir.path().join("override");
     std::fs::write(
         &path,
-        "#!/bin/sh\ntouch \"$(dirname \"$0\")/overridden-launch\"\nexec python3 \"$@\"\n",
+        "#!/bin/sh\ndir=$(dirname \"$0\")\ntouch \"$dir/overridden-launch\"\nexec python3 -I -S -B -X utf8 \"$dir/launch.py\" acp --profile coding\n",
     )
     .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     read(
         host.client
-            .put(format!("{}/api/agents/fixture-aelix/overrides", host.url))
+            .put(format!("{}/api/agents/builtin-aelix/overrides", host.url))
             .header(PRIVATE_HEADER, FIXTURE_TOKEN)
             .json(&json!({"command_override":path}))
             .send()
@@ -803,7 +817,7 @@ async fn acp_relay_command_override_does_not_inherit_the_builtin_launch_identity
         StatusCode::OK,
     )
     .await;
-    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let id = create(&host, dir.path(), "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     read(
         host.client
@@ -869,8 +883,8 @@ async fn acp_relay_generation_change_rejects_a_queued_request_with_a_still_valid
 #[tokio::test]
 async fn acp_relay_host_shutdown_drains_final_stop_before_reaping_the_process() {
     let dir = tempfile::tempdir().unwrap();
-    let host = StudioHost::start_with_db(dir.path(), fixture(dir.path()).await, true).await;
-    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let host = start_relay_host(dir.path(), fixture(dir.path()).await).await;
+    let id = create(&host, dir.path(), "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     let binding = ensure_and_discover(&host, &root).await;
     std::fs::write(dir.path().join("relay-calls.watch-shutdown"), "").unwrap();
@@ -937,8 +951,8 @@ async fn rejects_queued_request(revocation: QueuedRevocation) {
     let _capture = tracing::subscriber::set_default(subscriber);
     let dir = tempfile::tempdir().unwrap();
     let db = fixture(dir.path()).await;
-    let host = StudioHost::start_with_db(dir.path(), db, true).await;
-    let id = create(&host, dir.path(), "fixture-aelix").await;
+    let host = start_relay_host(dir.path(), db).await;
+    let id = create(&host, dir.path(), "builtin-aelix").await;
     let root = format!("{}/api/conversations/{id}", host.url);
     let binding = ensure_and_discover(&host, &root).await;
     let browser = host.login().await;
@@ -1065,8 +1079,8 @@ async fn acp_relay_turn_reports_input_loss_for_a_slow_database_and_for_an_insert
             .await
             .unwrap();
         }
-        let host = StudioHost::start_with_db(dir.path(), db, true).await;
-        let id = create(&host, dir.path(), "fixture-aelix").await;
+        let host = start_relay_host(dir.path(), db).await;
+        let id = create(&host, dir.path(), "builtin-aelix").await;
         let root = format!("{}/api/conversations/{id}", host.url);
         let binding = ensure_and_discover(&host, &root).await;
         let convo = host.conversations.clone();

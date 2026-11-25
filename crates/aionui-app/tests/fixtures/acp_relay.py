@@ -8,7 +8,14 @@ import sys
 import threading
 import time
 
-counter = Path(sys.argv[1])
+studio_launch = sys.argv[1:] == ["acp", "--profile", "coding"]
+if studio_launch:
+    fixture_dir = Path.cwd() if Path.cwd().name == "foreign-workspace" else Path(__file__).parent
+    counter = fixture_dir / "relay-calls"
+    peer = "another-agent" if counter.with_suffix(".wrong-peer").exists() else "aelix-acp"
+else:
+    counter = Path(sys.argv[1])
+    peer = sys.argv[2] if len(sys.argv) > 2 else "aelix-acp"
 binding = None
 session = "sdk-session"
 prompt = None
@@ -122,7 +129,6 @@ while True:
     frame = json.loads(line)
     method, params, rpc_id = frame.get("method"), frame.get("params", {}), frame.get("id")
     if method == "initialize":
-        peer = sys.argv[2] if len(sys.argv) > 2 else "aelix-acp"
         relay = params["clientCapabilities"].get("_meta", {}).get("aelix/sessionRelay")
         counter.with_suffix(".initialize").write_text("relay" if relay else "standard")
         if relay is not None:
