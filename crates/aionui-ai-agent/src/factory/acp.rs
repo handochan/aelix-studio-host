@@ -22,6 +22,10 @@ use tracing::{info, warn};
 
 use crate::runtime_status::conversation_runtime_reporter;
 
+#[cfg(all(test, unix))]
+#[path = "acp_studio_aelix_tests.rs"]
+mod studio_aelix_tests;
+
 /// Where a conversation that arrived on the ACP factory actually has to run.
 ///
 /// Conversations reach this factory by their *family*, not by how their agent
@@ -375,6 +379,11 @@ async fn resolve_agent_command_spec(
     conversation_id: &str,
     broadcaster: Arc<dyn aionui_realtime::EventBroadcaster>,
 ) -> Result<CommandSpec, AgentError> {
+    if crate::studio_aelix::uses_studio_launch(meta) {
+        return crate::studio_aelix::StudioAelixLaunch::load()
+            .and_then(|launch| launch.command_spec(meta, workspace.to_owned()))
+            .ok_or_else(|| AgentError::bad_request(crate::studio_aelix::RUNTIME_UNAVAILABLE));
+    }
     let command = meta
         .command
         .as_deref()

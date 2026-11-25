@@ -79,7 +79,9 @@ impl AgentAvailabilityService {
             AgentSnapshotCheckKind::Manual,
         )
         .await;
-        self.persist_snapshot_for_user(user_id, id, &snapshot).await?;
+        if let Some(snapshot) = snapshot {
+            self.persist_snapshot_for_user(user_id, id, &snapshot).await?;
+        }
         self.management_row_by_id(user_id, id)
             .await?
             .ok_or_else(|| AgentError::not_found(format!("Agent '{id}' not found")))
@@ -196,18 +198,26 @@ async fn run_probe(
     meta: &AgentMetadata,
     user_id: &str,
     kind: AgentSnapshotCheckKind,
-) -> AvailabilitySnapshot {
+) -> Option<AvailabilitySnapshot> {
     let started_at = now_ms();
     let start = Instant::now();
     // Advisory for an agent that probes ONLINE; stays None for every path that
     // has nothing extra to say.
     let mut guidance: Option<String> = None;
 
-    let (status, error_code, error_message) = if meta.agent_source == AgentSource::Builtin
+    let (status, error_code, error_message) = if crate::studio_aelix::uses_studio_launch(meta) {
+        // Availability already projects a missing runtime. Avoid persisting an
+        // offline handshake verdict for a host that had no runtime to probe.
+        let spec = crate::studio_aelix::StudioAelixLaunch::load()?
+            .command_spec(meta, std::env::temp_dir().to_string_lossy().into_owned())?;
+        let probe = custom_agent_probe::try_connect_resolved(spec, true).await;
+        apply_acp_probe_result(registry, meta, user_id, probe)
+    } else if meta.agent_source == AgentSource::Builtin
         && matches!(
             meta.backend.as_deref(),
             Some("claude") | Some("codex") | Some("antigravity")
-        ) {
+        )
+    {
         // These builtins are direct CLIs that do not speak ACP, so their deep
         // check is PATH + `--version` (integrity), never a session/new-style
         // handshake (#675). Without antigravity here, agy falls through to the
@@ -286,41 +296,7 @@ async fn run_probe(
                 } else {
                     custom_agent_probe::try_connect_custom_agent_with_catalog(command, &args, &env, None).await
                 };
-                match probe {
-                    // The probe opened a real session to reach this verdict, so its
-                    // `session/new` already carried whatever modes / models / config
-                    // options the agent advertises. Persist them through the same
-                    // channel a live conversation uses, so the pickers are populated
-                    // before the user ever opens one. Best-effort and additive:
-                    // `apply_handshake` skips `None` fields, so this never blanks a
-                    // catalog a real session had filled in, and an agent that
-                    // advertises nothing sends nothing.
-                    (TryConnectCustomAgentResponse::Success, catalog) => {
-                        if let Some(partial) = catalog {
-                            registry
-                                .catalog_sender()
-                                .send_partial(user_id.to_owned(), meta.id.clone(), *partial);
-                        }
-                        (AgentSnapshotCheckStatus::Online, None, None)
-                    }
-                    (TryConnectCustomAgentResponse::FailCli { error }, _) => (
-                        AgentSnapshotCheckStatus::Offline,
-                        Some("command_not_found".to_owned()),
-                        Some(error),
-                    ),
-                    (TryConnectCustomAgentResponse::FailAcp { error }, _) => (
-                        AgentSnapshotCheckStatus::Offline,
-                        Some("acp_init_failed".to_owned()),
-                        Some(error),
-                    ),
-                    // Reachable but not authorized: still offline (unusable), but a
-                    // dedicated code lets the UI guide the user to log in.
-                    (TryConnectCustomAgentResponse::FailAuth { error }, _) => (
-                        AgentSnapshotCheckStatus::Offline,
-                        Some("auth_required".to_owned()),
-                        Some(error),
-                    ),
-                }
+                apply_acp_probe_result(registry, meta, user_id, probe)
             }
         }
     } else if meta.backend.is_some() {
@@ -350,7 +326,7 @@ async fn run_probe(
         AgentSnapshotCheckStatus::Offline => "offline",
     };
 
-    AvailabilitySnapshot {
+    Some(AvailabilitySnapshot {
         status,
         kind: match kind {
             AgentSnapshotCheckKind::Startup => "startup",
@@ -363,6 +339,52 @@ async fn run_probe(
         guidance,
         latency_ms,
         checked_at: started_at,
+    })
+}
+
+fn apply_acp_probe_result(
+    registry: &AgentRegistry,
+    meta: &AgentMetadata,
+    user_id: &str,
+    probe: (
+        TryConnectCustomAgentResponse,
+        Option<Box<aionui_api_types::AgentHandshake>>,
+    ),
+) -> (AgentSnapshotCheckStatus, Option<String>, Option<String>) {
+    match probe {
+        // The probe opened a real session to reach this verdict, so its
+        // `session/new` already carried whatever modes / models / config
+        // options the agent advertises. Persist them through the same
+        // channel a live conversation uses, so the pickers are populated
+        // before the user ever opens one. Best-effort and additive:
+        // `apply_handshake` skips `None` fields, so this never blanks a
+        // catalog a real session had filled in, and an agent that
+        // advertises nothing sends nothing.
+        (TryConnectCustomAgentResponse::Success, catalog) => {
+            if let Some(partial) = catalog {
+                registry
+                    .catalog_sender()
+                    .send_partial(user_id.to_owned(), meta.id.clone(), *partial);
+            }
+            (AgentSnapshotCheckStatus::Online, None, None)
+        }
+        (TryConnectCustomAgentResponse::FailCli { error }, _) => (
+            AgentSnapshotCheckStatus::Offline,
+            Some("command_not_found".to_owned()),
+            Some(error),
+        ),
+        (TryConnectCustomAgentResponse::FailAcp { error }, _) => (
+            AgentSnapshotCheckStatus::Offline,
+            Some("acp_init_failed".to_owned()),
+            Some(error),
+        ),
+        // Reachable but not authorized: still offline (unusable), but a
+        // dedicated code lets the UI guide the user to log in.
+        (TryConnectCustomAgentResponse::FailAuth { error }, _) => (
+            AgentSnapshotCheckStatus::Offline,
+            Some("auth_required".to_owned()),
+            Some(error),
+        ),
     }
 }
 
@@ -688,7 +710,8 @@ mod tests {
             "system_default_user",
             AgentSnapshotCheckKind::Manual,
         )
-        .await;
+        .await
+        .unwrap();
 
         assert_eq!(snapshot.status, "offline");
         assert_eq!(snapshot.error_code.as_deref(), Some("command_not_found"));
@@ -957,7 +980,8 @@ mod tests {
             TEST_USER_ID,
             AgentSnapshotCheckKind::Manual,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(snapshot.status, "offline");
         assert_eq!(snapshot.error_code.as_deref(), Some("version_probe_failed"));
         assert!(

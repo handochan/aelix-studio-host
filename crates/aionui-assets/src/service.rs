@@ -117,6 +117,17 @@ mod tests {
     }
 
     #[test]
+    fn aelix_catalog_mark_is_embedded() {
+        let asset = AssetService.get_logo("brand/aelix.svg").unwrap();
+        assert_eq!(asset.content_type, HeaderValue::from_static("image/svg+xml"));
+        assert!(
+            std::str::from_utf8(&asset.bytes)
+                .unwrap()
+                .contains("aria-label=\"Aelix mark\"")
+        );
+    }
+
+    #[test]
     fn registry_agent_logos_are_embedded_as_svg() {
         let service = AssetService;
         for name in [

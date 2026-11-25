@@ -106,9 +106,29 @@ async fn try_connect_with_policy(
     debug!(program = %resolved.program.display(), "probe step 1 ok");
 
     // ── Step 2 — spawn + ACP initialize ─────────────────────────────
-    let proc = match spawn_probe_process(resolved, args, env).await {
+    let spec = probe_command_spec(resolved, args, env);
+    try_connect_resolved(spec, false).await
+}
+
+pub(crate) async fn try_connect_resolved(
+    spec: CommandSpec,
+    redact_launch: bool,
+) -> (TryConnectCustomAgentResponse, Option<Box<AgentHandshake>>) {
+    let spawned = if redact_launch {
+        CliAgentProcess::spawn_sdk(spec, false, true).await
+    } else {
+        CliAgentProcess::spawn_for_sdk(spec).await
+    };
+    let proc = match spawned {
         Ok(proc) => proc,
-        Err(msg) => return (TryConnectCustomAgentResponse::FailAcp { error: msg }, None),
+        Err(error) => {
+            return (
+                TryConnectCustomAgentResponse::FailAcp {
+                    error: format!("spawn failed: {error}"),
+                },
+                None,
+            );
+        }
     };
 
     let outcome = match tokio::time::timeout(STEP2_TIMEOUT, run_handshake(&proc)).await {
@@ -142,11 +162,7 @@ fn first_token(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or(command)
 }
 
-async fn spawn_probe_process(
-    resolved: ResolvedCommand,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> Result<CliAgentProcess, String> {
+fn probe_command_spec(resolved: ResolvedCommand, args: &[String], env: &HashMap<String, String>) -> CommandSpec {
     let mut final_args: Vec<String> = resolved
         .args_prefix
         .iter()
@@ -166,16 +182,12 @@ async fn spawn_probe_process(
         value: value.to_string_lossy().into_owned(),
     }));
 
-    let spec = CommandSpec {
+    CommandSpec {
         command: resolved.program,
         args: final_args,
         env: final_env,
         cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
-    };
-
-    CliAgentProcess::spawn_for_sdk(spec)
-        .await
-        .map_err(|e| format!("spawn failed: {e}"))
+    }
 }
 
 /// Result of the Step 2 probe (`initialize` + `session/new`).

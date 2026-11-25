@@ -711,7 +711,10 @@ fn overlay_hydrated_availability(
     let Some(cached_meta) = cached_meta else {
         return (meta, reason);
     };
-    if has_availability_snapshot(&meta) || !same_runtime_availability_inputs(&meta, cached_meta) {
+    if crate::studio_aelix::uses_studio_launch(&meta)
+        || has_availability_snapshot(&meta)
+        || !same_runtime_availability_inputs(&meta, cached_meta)
+    {
         return (meta, reason);
     }
 
@@ -1012,6 +1015,11 @@ fn apply_cached_availability(meta: &mut AgentMetadata) -> Option<UnavailableReas
         meta.available = true;
         return None;
     }
+    if crate::studio_aelix::uses_studio_launch(meta) {
+        // A prior host run may have used a different installation or had no
+        // runtime at all. Project presence from this host's startup environment.
+        return apply_probe_availability(meta);
+    }
     if cached_snapshot_indicates_missing(meta) {
         meta.available = false;
         return cached_unavailable_reason(meta);
@@ -1231,6 +1239,7 @@ fn derive_management_status(meta: &AgentMetadata, reason: Option<&UnavailableRea
     match meta.last_check_status {
         Some(AgentSnapshotCheckStatus::Offline) => AgentManagementStatus::Offline,
         Some(AgentSnapshotCheckStatus::Online) => AgentManagementStatus::Online,
+        None if crate::studio_aelix::uses_studio_launch(meta) => AgentManagementStatus::Online,
         None => AgentManagementStatus::Unchecked,
     }
 }
@@ -1576,6 +1585,15 @@ fn probe_resolved_command(meta: &AgentMetadata) -> Result<PathBuf, UnavailableRe
         return Err(UnavailableReason::Disabled);
     }
 
+    if crate::studio_aelix::uses_studio_launch(meta) {
+        return crate::studio_aelix::StudioAelixLaunch::load()
+            .and_then(|launch| launch.resolve_command())
+            .ok_or_else(|| UnavailableReason::ManagedRuntimeUnavailable {
+                resource: "Aelix".to_owned(),
+                detail: crate::studio_aelix::RUNTIME_UNAVAILABLE.to_owned(),
+            });
+    }
+
     // Builtin claude/codex run as direct CLIs now: availability is a PATH-only
     // probe of the primary command (packaged app ships the binary, but PATH
     // presence is our proxy for "user installed + authenticated" — see
@@ -1644,7 +1662,7 @@ mod tests {
         // when none of the CLIs are installed on the test host.
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
-        assert_eq!(all.len(), 43, "seed rows: 42 pre-existing + antigravity");
+        assert_eq!(all.len(), 44, "seed rows: 43 pre-existing + Aelix");
     }
 
     #[tokio::test]
@@ -1807,7 +1825,7 @@ mod tests {
         let reg = registry().await;
         let all = reg.list_all_including_hidden().await;
         let count = |t: AgentType| all.iter().filter(|m| m.agent_type == t).count();
-        assert_eq!(count(AgentType::Acp), 39);
+        assert_eq!(count(AgentType::Acp), 40);
         assert_eq!(count(AgentType::Nanobot), 1);
         assert_eq!(count(AgentType::OpenclawGateway), 1);
         assert_eq!(count(AgentType::Aionrs), 1);
@@ -2029,7 +2047,7 @@ mod tests {
     async fn diagnostic_snapshot_pairs_rows_with_reasons() {
         let reg = registry().await;
         let snapshot = reg.diagnostic_snapshot().await;
-        assert_eq!(snapshot.len(), 43, "every row appears once");
+        assert_eq!(snapshot.len(), 44, "every row appears once");
 
         for (meta, reason) in &snapshot {
             match (meta.available, reason) {

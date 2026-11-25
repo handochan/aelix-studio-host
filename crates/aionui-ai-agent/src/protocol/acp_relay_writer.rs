@@ -998,6 +998,7 @@ mod tests {
                     cwd: None,
                 },
                 true,
+                false,
             )
             .await
             .unwrap();
