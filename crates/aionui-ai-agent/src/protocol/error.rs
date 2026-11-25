@@ -285,6 +285,14 @@ impl std::fmt::Display for AcpError {
 }
 
 impl AcpError {
+    pub(crate) fn is_model_selection_required(&self) -> bool {
+        matches!(
+            self,
+            Self::ApplicationError { code: -32004, data: Some(data), .. }
+                if model_selection_count(data).is_some()
+        )
+    }
+
     /// Apply only after prompt dispatch. Do not infer delivery from the absence
     /// of streamed output, or classify ordinary agent error replies as EOF.
     pub(crate) fn after_prompt_dispatch(self, transport_closed: bool) -> Self {
@@ -439,6 +447,18 @@ impl AcpError {
 
 pub(super) const MODEL_SELECTION_REQUIRED: &str = "model_selection_required";
 
+fn model_selection_count(data: &serde_json::Value) -> Option<u32> {
+    if data.as_object()?.len() != 4
+        || data.get("kind")?.as_str() != Some(MODEL_SELECTION_REQUIRED)
+        || data.get("configId")?.as_str() != Some("model")
+        || data.get("retryable")?.as_bool() != Some(false)
+    {
+        return None;
+    }
+    // A u32 count is exactly representable by Studio's JavaScript numbers.
+    u32::try_from(data.get("availableModels")?.as_u64()?).ok()
+}
+
 /// Retain the fixed discriminants consumed by Studio's lock and refusal UI.
 fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     use serde_json::{Value, json};
@@ -457,14 +477,7 @@ fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<
         (-32000, "session_changing") => Some(json!({"kind":kind})),
         (-32004, MODEL_SELECTION_REQUIRED) => {
             // aelix-acp@a6545f0b/src/aelix_acp/wire/errors.py defines this refusal.
-            if data.as_object()?.len() != 4
-                || data.get("configId")?.as_str() != Some("model")
-                || data.get("retryable")?.as_bool() != Some(false)
-            {
-                return None;
-            }
-            // A u32 count is exactly representable by Studio's JavaScript numbers.
-            let available_models = u32::try_from(data.get("availableModels")?.as_u64()?).ok()?;
+            let available_models = model_selection_count(data)?;
             Some(json!({"kind":kind,"configId":"model","availableModels":available_models,"retryable":false}))
         }
         (-32004, "studio_extension_management_required") => {

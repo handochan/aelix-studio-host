@@ -90,7 +90,8 @@ for line in sys.stdin:
             with open(trace, 'a') as output:
                 output.write(entry + '\n')
             sys.exit(0)
-        if body in ('Report activity then reject', 'Report activity then busy'):
+        if body in ('Report activity then reject', 'Report activity then busy',
+                    'Report activity then require model'):
             print(json.dumps({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
                 'sessionId': params['sessionId'], 'update': {'sessionUpdate': 'agent_message_chunk',
                 'content': {'type': 'text', 'text': 'Already started'}}}}), flush=True)
@@ -98,6 +99,10 @@ for line in sys.stdin:
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
+        elif body in ('Choose a model first', 'Report activity then require model'):
+            response['error'] = {'code': -32004, 'message': 'Fixture refusal', 'data': {
+                'kind': 'model_selection_required', 'configId': 'model',
+                'availableModels': 2, 'retryable': False}}
         elif body in ('Refuse with duplicate count', 'Refuse with object count'):
             count = ('0,"availableModels":2' if body == 'Refuse with duplicate count'
                      else '{"$serde_json::private::RawValue":"2"}')
@@ -508,6 +513,37 @@ async fn malformed_model_refusal_counts_on_stdio_keep_the_code_and_drop_data() {
 }
 
 #[tokio::test]
+async fn model_selection_refusal_restores_the_prelude_for_the_next_explicit_send() {
+    let (temp, registry, sync) = setup().await;
+    let first = open_session(temp.path(), &registry, &sync, "aelix-acp", "refused.txt", "generic").await;
+    prompt(&first, "/help").await.unwrap();
+    assert!(prelude_pending(&sync).await);
+
+    let error = prompt(&first, "Choose a model first").await.unwrap_err();
+    assert_eq!(error.code(), Some(AgentErrorCode::UserAgentOperationRefused));
+    assert_eq!(error.stream_error().retryable, Some(false));
+    let sent = prompt_trace(temp.path(), "refused.txt");
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], "/help");
+    assert!(sent[1].contains("Fixture conversation rules"));
+    first.kill_and_wait(None).await;
+
+    let reopened = open_session(temp.path(), &registry, &sync, "aelix-acp", "selected.txt", "generic").await;
+    prompt(&reopened, "Explicit send after reopening").await.unwrap();
+    prompt(&reopened, "Second explicit send").await.unwrap();
+    let sent = prompt_trace(temp.path(), "selected.txt");
+    reopened.kill_and_wait(None).await;
+    assert_eq!(
+        sent,
+        [
+            "[Assistant Rules]\nFixture conversation rules\n[/Assistant Rules]\n\nExplicit send after reopening",
+            "Second explicit send",
+        ]
+    );
+    assert!(!prelude_pending(&sync).await);
+}
+
+#[tokio::test]
 async fn aelix_keeps_its_deferred_prelude_after_a_confirmed_request_rejection() {
     for (text, code) in [
         ("Reject before work", AgentErrorCode::UserAgentInvalidParams),
@@ -545,6 +581,11 @@ async fn aelix_does_not_restore_a_deferred_prelude_after_activity_or_transport_l
     for (text, code) in [
         ("Report activity then reject", AgentErrorCode::UserAgentInvalidParams),
         ("Report activity then busy", AgentErrorCode::UserAgentBusy),
+        (
+            "Report activity then require model",
+            AgentErrorCode::UserAgentOperationRefused,
+        ),
+        ("Refuse with duplicate count", AgentErrorCode::UserAgentOperationRefused),
         (
             "Close after receiving prompt",
             AgentErrorCode::UserAgentPromptOutcomeUnknown,

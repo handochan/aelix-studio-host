@@ -768,6 +768,8 @@ struct TurnObservations {
     /// The tolerant transport absorbed at least one CodeBuddy dialect signal
     /// (`session_end` or token-pressure/compaction) during this turn/near-window.
     dialect_signal: bool,
+    /// The peer reported additional user input consumed by this turn.
+    consumed_user_input: bool,
 }
 
 fn prompt_was_rejected(error: &AcpError, rx: &mut tokio::sync::broadcast::Receiver<AgentStreamEvent>) -> bool {
@@ -778,7 +780,7 @@ fn prompt_was_rejected(error: &AcpError, rx: &mut tokio::sync::broadcast::Receiv
     }
     // Require an explicit request rejection and disqualify it if the peer
     // reported activity before that reply or if the receiver fell behind.
-    if !matches!(
+    let confirmed_rejection = matches!(
         error,
         AcpError::InvalidRequest { .. }
             | AcpError::InvalidParams { .. }
@@ -787,11 +789,12 @@ fn prompt_was_rejected(error: &AcpError, rx: &mut tokio::sync::broadcast::Receiv
             // failures, including the activity lease before dispatch_request.
             // Other ACP peers map -32000 to AuthRequired.
             | AcpError::ApplicationError { code: -32000, .. }
-    ) {
+    ) || error.is_model_selection_required();
+    if !confirmed_rejection {
         return false;
     }
     let observations = drain_turn_observations(rx);
-    observations.empty && !observations.dialect_signal
+    observations.empty && !observations.dialect_signal && !observations.consumed_user_input
 }
 
 /// Drain the turn-scoped receiver once, recording both the empty-turn condition
@@ -802,9 +805,11 @@ fn prompt_was_rejected(error: &AcpError, rx: &mut tokio::sync::broadcast::Receiv
 fn drain_turn_observations(rx: &mut tokio::sync::broadcast::Receiver<AgentStreamEvent>) -> TurnObservations {
     let mut empty = true;
     let mut dialect_signal = false;
+    let mut consumed_user_input = false;
     loop {
         match rx.try_recv() {
             Ok(AgentStreamEvent::AcpDialectSignal(_)) => dialect_signal = true,
+            Ok(AgentStreamEvent::AcpConsumedUserInput { .. }) => consumed_user_input = true,
             Ok(event) => {
                 if event_is_user_visible_output(&event) {
                     empty = false;
@@ -816,7 +821,11 @@ fn drain_turn_observations(rx: &mut tokio::sync::broadcast::Receiver<AgentStream
             Err(TryRecvError::Lagged(_)) => empty = false,
         }
     }
-    TurnObservations { empty, dialect_signal }
+    TurnObservations {
+        empty,
+        dialect_signal,
+        consumed_user_input,
+    }
 }
 
 /// Whether a stream event represents user-visible output produced by the
@@ -1639,6 +1648,25 @@ mod tests {
             &super::AcpError::PromptOutcomeUnknown,
             &mut rx
         ));
+    }
+
+    #[test]
+    fn model_refusal_cannot_restore_the_prelude_after_consumed_input() {
+        let (tx, mut rx) = broadcast::channel::<AgentStreamEvent>(8);
+        tx.send(AgentStreamEvent::AcpConsumedUserInput {
+            turn_id: "turn".into(),
+            text: "already consumed".into(),
+        })
+        .unwrap();
+        let refusal = super::AcpError::ApplicationError {
+            code: -32004,
+            message: "ACP request failed".into(),
+            data: Some(serde_json::json!({
+                "kind": "model_selection_required", "configId": "model",
+                "availableModels": 2, "retryable": false,
+            })),
+        };
+        assert!(!super::prompt_was_rejected(&refusal, &mut rx));
     }
 
     #[tokio::test]
