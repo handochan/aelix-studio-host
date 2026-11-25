@@ -163,6 +163,10 @@ for line in sys.stdin:
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
+        elif body == 'Fail after dispatch without activity':
+            response['error'] = {'code': -33002, 'message': 'Fixture dispatched failure', 'data': {
+                'kind': 'turn_failed_after_dispatch', 'retryable': False,
+                'cause': {'kind': 'provider_auth', 'retryable': False}}}
         elif body == 'Report missing session with a vendor error':
             response['error'] = {'code': -33002, 'message': 'Vendor request failed', 'data': {
                 'kind': 'turn_failed_after_dispatch', 'retryable': False,
@@ -684,6 +688,10 @@ async fn check_fresh_model_refusal_preserves_rules(reopen: bool) {
 #[tokio::test]
 async fn fresh_prelude_is_not_restored_for_other_refusals_or_after_activity() {
     for (text, code) in [
+        (
+            "Fail after dispatch without activity",
+            AgentErrorCode::UserAgentTurnFailedAfterDispatch,
+        ),
         ("Busy before work", AgentErrorCode::UserAgentBusy),
         ("Reject before work", AgentErrorCode::UserAgentInvalidParams),
         (
@@ -782,6 +790,10 @@ async fn aelix_keeps_its_deferred_prelude_after_a_confirmed_request_rejection() 
 #[tokio::test]
 async fn aelix_does_not_restore_a_deferred_prelude_after_activity_or_transport_loss() {
     for (text, code) in [
+        (
+            "Fail after dispatch without activity",
+            AgentErrorCode::UserAgentTurnFailedAfterDispatch,
+        ),
         ("Report activity then reject", AgentErrorCode::UserAgentInvalidParams),
         ("Report activity then busy", AgentErrorCode::UserAgentBusy),
         (
