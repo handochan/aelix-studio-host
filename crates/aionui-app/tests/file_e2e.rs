@@ -1092,6 +1092,49 @@ async fn content_read_base64_local_ref() {
 }
 
 #[tokio::test]
+async fn content_download_streams_raw_bytes_with_binary_accept_header() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let dir = tempfile::tempdir().unwrap();
+    let fp = dir.path().join("original.json");
+    let bytes = br#"{"original":true}"#;
+    std::fs::write(&fp, bytes).unwrap();
+
+    let mut req = json_with_token(
+        "POST",
+        "/api/fs/content",
+        json!({ "file": local_ref(&fp), "encoding": "base64" }),
+        &token,
+        &csrf,
+    );
+    req.headers_mut()
+        .insert("accept", "application/octet-stream".parse().unwrap());
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "application/octet-stream");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), bytes);
+}
+
+#[tokio::test]
+async fn content_download_without_csrf_returns_403() {
+    let (app, _) = build_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/fs/content")
+        .header("accept", "application/octet-stream")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "file": { "kind": "project", "pe_id": "private", "relative_path": "private.json" },
+                    "encoding": "base64" })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn content_read_dataurl_local_ref() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;

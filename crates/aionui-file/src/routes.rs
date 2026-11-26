@@ -3,6 +3,7 @@
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Json, Multipart, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use std::path::{Path, PathBuf};
@@ -455,13 +456,14 @@ fn parse_if_match(headers: &axum::http::HeaderMap) -> Option<i64> {
 
 /// `POST /api/fs/content` — read a file addressed by `ChatFileRef` identity.
 /// Collapses the old `read` + `image-base64`: body carries the ref plus an
-/// `encoding` (utf8|base64|dataurl). Resolves per-variant (op = Read) then reads
-/// the trusted absolute path.
+/// `encoding` (utf8|base64|dataurl). An explicit binary Accept header streams
+/// the authorized file directly. Older Hosts answer with the requested encoding.
 async fn read_content(
     State(state): State<FileRouterState>,
     Extension(user): Extension<CurrentUser>,
+    headers: HeaderMap,
     body: Result<Json<ReadContentRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<String>>, ApiError> {
+) -> Result<Response, ApiError> {
     let Json(req) = body.map_err(ApiError::from)?;
     let abs = state
         .project
@@ -473,11 +475,28 @@ async fn read_content(
         )
         .await
         .map_err(chat_file_resolve_error)?;
+    if headers
+        .get(header::ACCEPT)
+        .is_some_and(|value| value == "application/octet-stream")
+    {
+        // ServeFile expects a GET. The client uses POST so the file reference can
+        // travel in the JSON body. Original downloads always read the whole file.
+        let mut response = serve_resolved_file(&abs, Request::new(axum::body::Body::empty())).await?;
+        if response.status().is_success() {
+            let headers = response.headers_mut();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            headers.remove(header::ACCEPT_RANGES);
+        }
+        return Ok(response);
+    }
     let content = state
         .file_service
         .read_resolved_content(Path::new(&abs), req.encoding)
         .await?;
-    Ok(Json(ApiResponse::ok(content)))
+    Ok(Json(ApiResponse::ok(content)).into_response())
 }
 
 /// `PUT /api/fs/content` — write a file addressed by `ChatFileRef` identity
@@ -574,9 +593,12 @@ async fn stream_file(
         )
         .await
         .map_err(chat_file_resolve_error)?;
-    // ServeFile owns Range/If-Range/Content-Type; the path is already
-    // containment-checked by resolve_chat_file_ref, so no re-sandbox here.
-    let response = ServeFile::new(&abs)
+    serve_resolved_file(&abs, request).await
+}
+
+/// Serve bytes from a path already authorized by the file reference resolver.
+async fn serve_resolved_file(path: &str, request: Request) -> Result<Response, ApiError> {
+    let response = ServeFile::new(path)
         .oneshot(request)
         .await
         .map_err(|e| ApiError::Internal(format!("stream task failed: {e}")))?;
