@@ -103,6 +103,7 @@ pub(crate) struct RelayConnection {
     pub(crate) candidate: bool,
     pub(super) offer_host_bytes: bool,
     requests: OnceLock<Vec<String>>,
+    aelix_peer: AtomicBool,
     host_bytes: AtomicBool,
     session: Mutex<RelaySession>,
     wire: Mutex<HashMap<RequestId, WireRequest>>,
@@ -222,6 +223,7 @@ impl AcpInputHistory {
 
 pub(super) enum IncomingFrame {
     Sdk(String),
+    StandardReply(RequestId, String),
     Reverse(ReverseRequest),
 }
 
@@ -301,6 +303,7 @@ impl RelayConnection {
             candidate,
             offer_host_bytes: candidate && standalone,
             requests: OnceLock::new(),
+            aelix_peer: AtomicBool::new(false),
             host_bytes: AtomicBool::new(false),
             session: Mutex::new(RelaySession {
                 open: false,
@@ -317,6 +320,13 @@ impl RelayConnection {
     }
 
     pub(crate) fn negotiate(&self, response: &InitializeResponse) {
+        self.aelix_peer.store(
+            response
+                .agent_info
+                .as_ref()
+                .is_some_and(|info| info.name == "aelix-acp"),
+            Ordering::Release,
+        );
         if self.candidate
             && let Some(requests) = advertisement(response)
         {
@@ -333,6 +343,10 @@ impl RelayConnection {
             );
             tracing::info!("ACP session extension requests negotiated");
         }
+    }
+
+    pub(super) fn is_aelix_peer(&self) -> bool {
+        self.aelix_peer.load(Ordering::Acquire)
     }
 
     pub(crate) fn prepare_open(&self, meta: &mut Option<Meta>) -> OpenAttempt {
@@ -524,6 +538,28 @@ impl RelayConnection {
         }))
     }
 
+    pub(super) fn observe_legacy_request(&self, line: &str) {
+        if self.is_aelix_peer()
+            && let Ok(header) = serde_json::from_str::<FrameHeader>(line)
+            && let (Some(id), Some(_)) = (header.id, header.method)
+        {
+            self.standard_pending.lock().unwrap().insert(id);
+        }
+    }
+
+    pub(super) fn legacy_request_pending(&self, id: &RequestId) -> bool {
+        self.standard_pending.lock().unwrap().contains(id)
+    }
+
+    pub(super) fn complete_legacy_requests(&self, ids: HashSet<RequestId>) {
+        if !self.candidate && !ids.is_empty() {
+            let mut pending = self.standard_pending.lock().unwrap();
+            for id in ids {
+                pending.remove(&id);
+            }
+        }
+    }
+
     pub(super) fn write_prompt_delimiter(
         &self,
         id: &RequestId,
@@ -583,6 +619,9 @@ impl RelayConnection {
             .is_some_and(|prompt| prompt.receiving_on_wire);
         let frame_bytes = line.len();
         let Ok(header) = serde_json::from_str::<FrameHeader>(&line) else {
+            if let Some(id) = self.provider_reply_id_without_wire_id(&line) {
+                return self.finish_standard_reply(&id, line);
+            }
             // ACP stdio uses one JSON object per line. Never pass a batch or
             // malformed raw line into the SDK's tracing or parse-error data.
             if line.trim().is_empty() {
@@ -619,6 +658,9 @@ impl RelayConnection {
             return Some(IncomingFrame::Sdk(line));
         }
         let Some(id) = header.id else {
+            if let Some(id) = self.provider_reply_id_without_wire_id(&line) {
+                return self.finish_standard_reply(&id, line);
+            }
             return Some(IncomingFrame::Sdk(line));
         };
         let request = {
@@ -631,18 +673,7 @@ impl RelayConnection {
                 // after the extension's correlation entry has been reclaimed.
                 None => {
                     drop(wire);
-                    if !self.standard_pending.lock().unwrap().remove(&id) {
-                        return None;
-                    }
-                    let mut session = self.session.lock().unwrap();
-                    if let Some(prompt) = session.prompt.as_mut()
-                        && prompt.request_id == id
-                    {
-                        // Keep written for updates that already entered the
-                        // ordered SDK queue before this response.
-                        prompt.receiving_on_wire = false;
-                    }
-                    return Some(IncomingFrame::Sdk(line));
+                    return self.finish_standard_reply(&id, line);
                 }
             }
         };
@@ -657,10 +688,39 @@ impl RelayConnection {
         Some(IncomingFrame::Sdk(sdk_ack(&id)))
     }
 
+    fn provider_reply_id_without_wire_id(&self, line: &str) -> Option<RequestId> {
+        if !self.is_aelix_peer() {
+            return None;
+        }
+        // When strict header parsing leaves no ID, only an Aelix provider
+        // reply can use the fallback, and its ID must be a standard request.
+        match serde_json::from_str::<Value>(line) {
+            Ok(reply) if reply.get("method").is_none() && reply.get("result").is_none() => {
+                super::acp_error_wire::normalized_provider_reply_id(&reply, Some(line))
+            }
+            Err(_) => super::acp_error_wire::undecodable_provider_reply_id(line),
+            Ok(_) => None,
+        }
+    }
+
+    fn finish_standard_reply(&self, id: &RequestId, line: String) -> Option<IncomingFrame> {
+        if !self.standard_pending.lock().unwrap().remove(id) {
+            return None;
+        }
+        let mut session = self.session.lock().unwrap();
+        if let Some(prompt) = session.prompt.as_mut()
+            && &prompt.request_id == id
+        {
+            // Keep written for updates that already entered the ordered SDK queue.
+            prompt.receiving_on_wire = false;
+        }
+        Some(IncomingFrame::StandardReply(id.clone(), line))
+    }
+
     #[cfg(test)]
     pub(crate) fn incoming(&self, line: String) -> Option<String> {
         match self.classify_incoming(line)? {
-            IncomingFrame::Sdk(line) => Some(line),
+            IncomingFrame::Sdk(line) | IncomingFrame::StandardReply(_, line) => Some(line),
             IncomingFrame::Reverse(_) => None,
         }
     }

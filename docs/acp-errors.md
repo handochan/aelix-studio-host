@@ -29,6 +29,14 @@ from structured fields.
   `USER_AGENT_PROMPT_OUTCOME_UNKNOWN` remains the distinct non-retryable
   transport-loss outcome from host #6.
 
+For `-33002` with `data.kind = "turn_failed_after_dispatch"`, both protected
+and legacy connections use `detail: "ACP request failed"`. The host retains
+`data.cause` only when the wire object contains exactly `kind` and
+`retryable: false`. Accepted kinds are `provider_auth`, `provider_rate_limit`,
+`provider_unavailable`, `provider_bad_request`, `provider_network`, and
+`unknown`. A missing or invalid cause leaves the generic turn-failure data.
+[ACP provider failure contract](https://github.com/handochan/aelix-acp/blob/e87954b86393f2d6503fd6bed518973ddba6d588/docs/studio-integration.md#native-provider-failures-acp-64-host-71)
+
 Standard ACP reserves `-32000` for authentication (verified:
 `agent-client-protocol-schema-1.5.0/src/v1/error.rs`). These application interpretations
 apply only after initialization identifies `agentInfo.name` as `aelix-acp`.

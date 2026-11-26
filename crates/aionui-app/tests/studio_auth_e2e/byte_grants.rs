@@ -633,6 +633,230 @@ fn model_selection_refusal() -> Value {
 }
 
 async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Value) {
+    assert_studio_turn_error(
+        host,
+        id,
+        json!({
+            "message": "The Agent cannot perform this operation",
+            "protocol_code": -32004,
+            "data": refusal,
+            "code": "USER_AGENT_OPERATION_REFUSED",
+            "ownership": "user_agent",
+            "detail": "ACP request failed",
+            "retryable": false,
+            "feedback_recommended": false,
+        }),
+    )
+    .await;
+}
+
+const PROVIDER_CAUSE_KINDS: [&str; 6] = [
+    "provider_auth",
+    "provider_rate_limit",
+    "provider_unavailable",
+    "provider_bad_request",
+    "provider_network",
+    "unknown",
+];
+
+fn provider_failure_data(kind: Option<&str>) -> Value {
+    let mut data = json!({"kind": "turn_failed_after_dispatch", "retryable": false});
+    if let Some(kind) = kind {
+        data["cause"] = json!({"kind": kind, "retryable": false});
+    }
+    data
+}
+
+fn provider_failure_body(kind: Option<&str>) -> Value {
+    json!({
+        "message": "The turn failed after the Agent accepted it",
+        "protocol_code": -33002,
+        "data": provider_failure_data(kind),
+        "code": "USER_AGENT_TURN_FAILED_AFTER_DISPATCH",
+        "ownership": "user_agent",
+        "detail": "ACP request failed",
+        "retryable": false,
+        "feedback_recommended": false,
+    })
+}
+
+#[tokio::test]
+async fn provider_causes_reach_studio_live_and_history_without_redispatch() {
+    let trace = ByteTrace::default();
+    let capture = trace.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || capture.clone())
+            .finish(),
+    );
+    for (backend, initialize) in [("custom-aelix", "standard"), ("builtin-aelix", "relay")] {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        if initialize == "relay" {
+            std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+        }
+        let host = start_relay_host(dir, fixture(dir).await).await;
+        let mut cases: Vec<_> = PROVIDER_CAUSE_KINDS
+            .into_iter()
+            .map(|kind| (provider_failure_data(Some(kind)).to_string(), Some(kind), false))
+            .collect();
+        cases.extend([
+            r#"{"kind":"turn_failed_after_dispatch","retryable":false,"cause":{"kind":"private-h1-standard-cause","kind":"provider_auth","retryable":false}}"#,
+            r#"{"kind":false,"private":"private-h1-standard-data"}"#,
+            r#"{"kind":"unrelated","kind":"turn_failed_after_dispatch","retryable":false,"cause":{"kind":"provider_auth","retryable":1e400}}"#,
+        ].map(|wire| (wire.into(), None, false)));
+        cases.push((provider_failure_data(Some("provider_auth")).to_string(), None, true));
+        for (index, (wire, kind, wrapped)) in cases.into_iter().enumerate() {
+            if wrapped {
+                std::fs::write(dir.join("relay-calls.provider-wrapped-reply"), "").unwrap();
+            }
+            std::fs::write(dir.join("relay-calls.provider-prompt-failure"), wire).unwrap();
+            let id = create(&host, dir, backend).await;
+            if initialize == "relay" {
+                let root = format!("{}/api/conversations/{id}", host.url);
+                ensure_and_discover(&host, &root).await;
+                let discovery = read(
+                    host.client
+                        .get(format!("{root}/acp-extensions"))
+                        .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                        .send()
+                        .await
+                        .unwrap(),
+                    StatusCode::OK,
+                )
+                .await;
+                assert_eq!(discovery["data"]["hostBytes"], true);
+            }
+            assert_studio_turn_error(&host, &id, provider_failure_body(kind)).await;
+            let requests = std::fs::read_to_string(dir.join("relay-calls.prompt-requests")).unwrap();
+            assert_eq!(
+                requests.lines().count(),
+                index + 1,
+                "{backend} with {kind:?}: {requests}"
+            );
+            host.tasks.kill_and_wait(&id, None).await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("relay-calls.initialize")).unwrap(),
+            initialize
+        );
+        if initialize == "standard" {
+            let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                log.lines().any(|line| {
+                    line.contains("Received JSON-RPC message") && line.contains("turn_failed_after_dispatch")
+                }),
+                "legacy SDK tracing must include the sanitized provider reply"
+            );
+        }
+    }
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !log.contains("private-h1-standard"),
+        "provider text reached SDK tracing"
+    );
+}
+
+#[tokio::test]
+async fn provider_reply_with_duplicate_message_is_redacted() {
+    assert_raw_provider_reply_is_redacted(
+        r#"{"jsonrpc":"2.0","id":"fixture-rpc-id","error":{"code":-33002,"message":"first","message":"private-h1-standard-message","data":{"kind":false,"private":"private-h1-standard-data"}}}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_reply_with_duplicate_id_is_redacted() {
+    assert_raw_provider_reply_is_redacted(
+        r#"{"jsonrpc":"2.0","id":"different-id","id":"fixture-rpc-id","error":{"code":-33002,"message":"private-h1-standard-id"}}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_reply_with_duplicate_header_and_overflow_completes_prompt() {
+    assert_raw_provider_reply_is_redacted(
+        r#"{"jsonrpc":"2.0","id":"different-id","id":"fixture-rpc-id","error":{"code":-33002,"message":"first","message":"private-h1-standard-overflow","data":{"kind":false,"number":1e400}}}"#,
+    )
+    .await;
+}
+
+async fn assert_raw_provider_reply_is_redacted(reply: &str) {
+    let trace = ByteTrace::default();
+    let capture = trace.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || capture.clone())
+            .finish(),
+    );
+    for backend in ["custom-aelix", "builtin-aelix"] {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        if backend == "builtin-aelix" {
+            std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+        }
+        std::fs::write(dir.join("relay-calls.provider-raw-prompt-reply"), reply).unwrap();
+        let host = start_relay_host(dir, fixture(dir).await).await;
+        let id = create(&host, dir, backend).await;
+        if backend == "builtin-aelix" {
+            ensure_and_discover(&host, &format!("{}/api/conversations/{id}", host.url)).await;
+        }
+        assert_studio_turn_error(&host, &id, provider_failure_body(None)).await;
+        let requests = std::fs::read_to_string(dir.join("relay-calls.prompt-requests")).unwrap();
+        assert_eq!(requests.lines().count(), 1, "{backend}: {requests}");
+        host.tasks.kill_and_wait(&id, None).await;
+        if backend == "custom-aelix" {
+            let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+            assert!(log.lines().any(|line| {
+                line.contains("Received JSON-RPC message") && line.contains("turn_failed_after_dispatch")
+            }));
+        }
+    }
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !log.contains("private-h1-standard"),
+        "provider text reached SDK tracing"
+    );
+}
+
+#[tokio::test]
+async fn provider_causes_survive_studio_http_error_mapping() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+    let host = start_relay_host(dir, fixture(dir).await).await;
+    for kind in PROVIDER_CAUSE_KINDS {
+        std::fs::write(
+            dir.join("relay-calls.provider-setup-failure"),
+            provider_failure_data(Some(kind)).to_string(),
+        )
+        .unwrap();
+        let id = create(&host, dir, "builtin-aelix").await;
+        let response = read(
+            host.client
+                .post(format!("{}/api/conversations/{id}/runtime/ensure", host.url))
+                .header(PRIVATE_HEADER, FIXTURE_TOKEN)
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        let expected = provider_failure_body(Some(kind));
+        assert_eq!(
+            response,
+            json!({"success": false, "error": expected["message"],
+                                   "code": expected["code"], "details": expected})
+        );
+        host.tasks.kill_and_wait(&id, None).await;
+    }
+}
+
+async fn assert_studio_turn_error(host: &StudioHost, id: &str, expected: Value) {
     let root = format!("{}/api/conversations/{id}", host.url);
     let mut upgrade = host.upgrade();
     upgrade
@@ -643,7 +867,7 @@ async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Va
         host.client
             .post(format!("{root}/messages"))
             .header(PRIVATE_HEADER, FIXTURE_TOKEN)
-            .json(&json!({"content": "Choose a model first"}))
+            .json(&json!({"content": "Fixture prompt"}))
             .send()
             .await
             .unwrap(),
@@ -651,18 +875,8 @@ async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Va
     )
     .await;
     let turn_id = accepted["data"]["turn_id"].as_str().unwrap();
-    let expected = json!({
-        "message": "The Agent cannot perform this operation",
-        "protocol_code": -32004,
-        "data": refusal,
-        "code": "USER_AGENT_OPERATION_REFUSED",
-        "ownership": "user_agent",
-        "detail": "ACP request failed",
-        "retryable": false,
-        "feedback_recommended": false,
-    });
     let live_error = tokio::time::timeout(Duration::from_secs(30), async {
-        let mut refusal = None;
+        let mut error = None;
         loop {
             let frame = websocket.next().await.unwrap().unwrap();
             if let Ok(text) = frame.to_text() {
@@ -673,9 +887,12 @@ async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Va
                 }
                 match event["name"].as_str() {
                     Some("message.stream") if event["data"]["type"] == "error" => {
-                        refusal = Some(event["data"]["data"].clone());
+                        assert!(
+                            error.replace(event["data"]["data"].clone()).is_none(),
+                            "duplicate error frame"
+                        );
                     }
-                    Some("turn.completed") => break refusal.expect("turn completed without an error frame"),
+                    Some("turn.completed") => break error.expect("turn completed without an error frame"),
                     _ => {}
                 }
             }
@@ -698,12 +915,13 @@ async fn assert_model_selection_refusal(host: &StudioHost, id: &str, refusal: Va
         !history.to_string().contains("private-h1-standard"),
         "peer text reached history"
     );
-    let tip = history["data"]["items"]
+    let mut tips = history["data"]["items"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| row["type"] == "tips")
-        .expect("the completed refusal must be in history");
+        .filter(|row| row["type"] == "tips");
+    let tip = tips.next().expect("the completed error must be in history");
+    assert!(tips.next().is_none(), "duplicate error tip");
     assert_eq!(live_error, expected);
     assert_eq!(
         tip["content"],

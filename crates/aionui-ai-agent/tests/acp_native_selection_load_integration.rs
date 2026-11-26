@@ -163,6 +163,14 @@ for line in sys.stdin:
             response['error'] = {'code': -32000, 'message': 'Session is busy'}
         elif body in ('Reject before work', 'Report activity then reject'):
             response['error'] = {'code': -32602, 'message': 'Fixture invalid params'}
+        elif body == 'Fail after dispatch without activity':
+            response['error'] = {'code': -33002, 'message': 'Fixture dispatched failure', 'data': {
+                'kind': 'turn_failed_after_dispatch', 'retryable': False,
+                'cause': {'kind': 'provider_auth', 'retryable': False}}}
+        elif body == 'Report missing session with a vendor error':
+            response['error'] = {'code': -33002, 'message': 'Vendor request failed', 'data': {
+                'kind': 'turn_failed_after_dispatch', 'retryable': False,
+                'error': 'Session not found: ' + params['sessionId']}}
         elif body in ('Choose a model first', 'Report activity then require model'):
             response['error'] = {'code': -32004, 'message': 'Fixture refusal', 'data': {
                 'kind': 'model_selection_required', 'configId': 'model',
@@ -573,6 +581,29 @@ async fn aelix_delivers_the_deferred_prelude_once_after_the_session_is_reopened(
 }
 
 #[tokio::test]
+async fn other_acp_peer_keeps_stale_session_classification_for_vendor_error() {
+    let (temp, registry, sync) = setup().await;
+    let instance = open_session(
+        temp.path(),
+        &registry,
+        &sync,
+        "other-acp",
+        "vendor-error.txt",
+        "generic",
+    )
+    .await;
+    let error = prompt(&instance, "Report missing session with a vendor error")
+        .await
+        .unwrap_err();
+    instance.kill_and_wait(None).await;
+    assert_eq!(
+        error.code(),
+        Some(AgentErrorCode::UserAgentSessionNotFound),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn malformed_model_refusal_counts_on_stdio_keep_the_code_and_drop_data() {
     let (temp, registry, sync) = setup().await;
     let instance = open_session(temp.path(), &registry, &sync, "aelix-acp", "raw-refusal.txt", "generic").await;
@@ -657,6 +688,10 @@ async fn check_fresh_model_refusal_preserves_rules(reopen: bool) {
 #[tokio::test]
 async fn fresh_prelude_is_not_restored_for_other_refusals_or_after_activity() {
     for (text, code) in [
+        (
+            "Fail after dispatch without activity",
+            AgentErrorCode::UserAgentTurnFailedAfterDispatch,
+        ),
         ("Busy before work", AgentErrorCode::UserAgentBusy),
         ("Reject before work", AgentErrorCode::UserAgentInvalidParams),
         (
@@ -755,6 +790,10 @@ async fn aelix_keeps_its_deferred_prelude_after_a_confirmed_request_rejection() 
 #[tokio::test]
 async fn aelix_does_not_restore_a_deferred_prelude_after_activity_or_transport_loss() {
     for (text, code) in [
+        (
+            "Fail after dispatch without activity",
+            AgentErrorCode::UserAgentTurnFailedAfterDispatch,
+        ),
         ("Report activity then reject", AgentErrorCode::UserAgentInvalidParams),
         ("Report activity then busy", AgentErrorCode::UserAgentBusy),
         (

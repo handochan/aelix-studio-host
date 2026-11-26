@@ -115,6 +115,16 @@ def accept_byte_reply(line, frame):
         assert False, "Unexpected byte exchange phase"
 
 
+def send_provider_failure(rpc_id, path):
+    frame = encode({"jsonrpc": "2.0", "id": rpc_id, "error": {
+        "code": -33002, "message": escaped_marker, "data": "fixture-raw-data",
+    }, "diagnostic": "private-h1-standard-envelope"})
+    frame = frame.replace('"fixture-raw-data"', path.read_text(encoding="utf-8"))
+    if path.with_suffix(".provider-wrapped-reply").exists():
+        frame = encode({"$serde_json::private::RawValue": frame})
+    print(frame, flush=True)
+
+
 while True:
     first = ""
     if pause_next:
@@ -154,6 +164,10 @@ while True:
                 "notifications": []}}},
         })
     elif method in ("session/new", "session/load", "session/fork"):
+        provider_failure = counter.with_suffix(".provider-setup-failure")
+        if provider_failure.exists():
+            send_provider_failure(rpc_id, provider_failure)
+            continue
         refusal = counter.with_suffix(".recovery-fixture")
         if host_bytes_enabled and refusal.exists():
             send({"id": rpc_id, "error": {"code": -32004,
@@ -182,6 +196,14 @@ while True:
     elif method == "session/prompt":
         with counter.with_suffix(".prompt-requests").open("a", encoding="utf-8") as requests:
             requests.write(f"{os.getpid()}\n")
+        raw_reply = counter.with_suffix(".provider-raw-prompt-reply")
+        if raw_reply.exists():
+            print(raw_reply.read_text(encoding="utf-8").replace('"fixture-rpc-id"', encode(rpc_id)), flush=True)
+            continue
+        provider_failure = counter.with_suffix(".provider-prompt-failure")
+        if provider_failure.exists():
+            send_provider_failure(rpc_id, provider_failure)
+            continue
         refusal = counter.with_suffix(".prompt-refusal")
         if refusal.exists():
             send({"id": rpc_id, "error": {"code": -32004,

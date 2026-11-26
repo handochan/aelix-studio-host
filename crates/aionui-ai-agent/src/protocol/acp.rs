@@ -916,10 +916,15 @@ async fn run_sdk_background(
             let reverse = reverse_tx.clone();
             let transcript = transcript.clone();
             async move {
+                let mut standard_reply = None;
                 let line = match line {
                     Ok(line) if transcript.observe(&line) => return None,
                     Ok(line) if wire.candidate => match wire.classify_incoming(line)? {
                         acp_relay::IncomingFrame::Sdk(line) => Ok(line),
+                        acp_relay::IncomingFrame::StandardReply(id, line) => {
+                            standard_reply = Some(id);
+                            Ok(line)
+                        }
                         acp_relay::IncomingFrame::Reverse(request) => {
                             if reverse.try_send(request).is_err() {
                                 return Some(Err(std::io::Error::other("ACP reverse request queue full")));
@@ -942,7 +947,17 @@ async fn run_sdk_background(
                             ));
                             None
                         } else {
-                            Some(Ok(super::acp_error_wire::sanitize_model_refusals(line, normalized)))
+                            let pending = |id: &agent_client_protocol::schema::v1::RequestId| {
+                                standard_reply.as_ref() == Some(id)
+                                    || (!wire.candidate && wire.legacy_request_pending(id))
+                            };
+                            let (line, completed) = super::acp_error_wire::sanitize_public_errors(
+                                line,
+                                normalized,
+                                wire.is_aelix_peer().then_some(&pending),
+                            );
+                            wire.complete_legacy_requests(completed);
+                            Some(Ok(line))
                         }
                     }
                     Err(err) => Some(Err(err)),
@@ -966,13 +981,15 @@ async fn run_sdk_background(
         Box::pin(sink)
     } else {
         let alive = alive.clone();
-        Box::pin(SinkExt::<String>::sink_map_err(
-            FramedWrite::new(stdin, LinesCodec::new()),
-            move |error| {
-                alive.store(false, Ordering::Release);
-                std::io::Error::other(error)
-            },
-        ))
+        let legacy = relay.clone();
+        let sink = SinkExt::<String>::sink_map_err(FramedWrite::new(stdin, LinesCodec::new()), move |error| {
+            alive.store(false, Ordering::Release);
+            std::io::Error::other(error)
+        });
+        Box::pin(sink.with(move |line: String| {
+            legacy.observe_legacy_request(&line);
+            std::future::ready(Ok::<_, std::io::Error>(line))
+        }))
     };
     let transport = Lines::new(outgoing, Box::pin(incoming));
 
