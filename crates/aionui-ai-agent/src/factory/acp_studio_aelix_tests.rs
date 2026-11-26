@@ -35,8 +35,10 @@ assert os.environ.get('HOST67_OVERRIDE') == ('set' if case == 'env-override' els
 for line in sys.stdin:
     req = json.loads(line)
     if req['method'] == 'initialize':
-        offered = req['params'].get('clientCapabilities', {}).get('_meta', {}).get('aelix/sessionRelay')
-        assert bool(offered) == (case in ('original', 'moved', 'wrong-name'))
+        meta = req['params'].get('clientCapabilities', {}).get('_meta', {})
+        managed = case in ('original', 'moved', 'wrong-name')
+        assert bool(meta.get('aelix/sessionRelay')) == managed
+        assert meta.get('aelix/sessionLockHolder') == (1 if managed else None)
         result = {
             'protocolVersion': 1,
             'agentInfo': {'name': 'other-acp' if case == 'wrong-name' else 'aelix-acp', 'version': '0.0.0'},
