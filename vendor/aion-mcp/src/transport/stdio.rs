@@ -27,6 +27,7 @@ impl StdioTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .envs(env);
+        aionui_common::host_env::strip_from_command(cmd.as_std_mut());
 
         let mut child = cmd
             .spawn()

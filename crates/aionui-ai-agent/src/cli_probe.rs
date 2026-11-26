@@ -154,6 +154,47 @@ fn first_nonempty_line(bytes: &[u8]) -> Option<String> {
         .map(|line| line.chars().take(500).collect())
 }
 
+#[cfg(all(test, any(unix, windows)))]
+#[tokio::test]
+async fn version_probe_filters_host_env() {
+    use aionui_common::host_env::HostEnv;
+
+    const CHILD: &str = "HOST78_VERSION_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli_probe::version_probe_filters_host_env"])
+            .env(CHILD, "1")
+            .envs(HostEnv::ALL.iter().map(|setting| (setting.name(), "host sentinel")))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let (name, mut script) = ("version.sh", "#!/bin/sh\n".to_owned());
+    #[cfg(windows)]
+    let (name, mut script) = ("version.cmd", "@echo off\r\n".to_owned());
+    for setting in HostEnv::ALL {
+        let name = setting.name();
+        #[cfg(unix)]
+        script.push_str(&format!("if [ \"${{{name}+x}}\" = x ]; then exit 1; fi\n"));
+        #[cfg(windows)]
+        script.push_str(&format!("if defined {name} exit /b 1\r\n"));
+    }
+    script.push_str("echo env-fixture 1.0\n");
+    let path = dir.path().join(name);
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let result = validate_version_with_timeout(&path, CLI_VERSION_TIMEOUT).await.unwrap();
+    assert_eq!(result.reported_version.as_deref(), Some("env-fixture 1.0"));
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;

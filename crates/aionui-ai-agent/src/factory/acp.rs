@@ -681,6 +681,7 @@ async fn ensure_stdio_launch(
 
     let mut final_env: Vec<EnvVariable> = env
         .iter()
+        .filter(|(name, _)| !aionui_common::host_env::is_host_env(name.as_ref()))
         .map(|(name, value)| EnvVariable::new(name.clone(), value.clone()))
         .collect();
     final_env.extend(resolved.env.iter().map(|(name, value)| {

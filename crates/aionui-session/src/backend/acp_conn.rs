@@ -210,7 +210,7 @@ fn build_mcp_servers(servers: &[crate::backend::McpServerSpec]) -> Vec<Value> {
                 "name": s.name,
                 "command": command,
                 "args": args,
-                "env": kv(env),
+                "env": super::stdio_mcp_env(env).map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
             }),
             McpTransport::Http { url, headers } => json!({
                 "type": "http",
@@ -2679,6 +2679,35 @@ mod tests {
     // SessionConfig.init are serialized into the session/new + session/load frames,
     // byte-identical to the ACP SDK `McpServer` wire shape (verified empirically:
     // Stdio is untagged {name,command,args,env:[{name,value}]}).
+
+    #[test]
+    fn mcp_config_filters_reserved_stdio_env() {
+        use crate::backend::{McpServerSpec, McpTransport};
+        use serde_json::json;
+        let env = aionui_common::host_env::HostEnv::ALL
+            .iter()
+            .map(|setting| (setting.name().to_owned(), "reserved fixture".to_owned()))
+            .chain([
+                ("USER_OVERRIDE".into(), "user".into()),
+                ("TEAM_MCP_TOKEN".into(), "scoped".into()),
+            ])
+            .collect();
+        let server = McpServerSpec {
+            name: "fixture".into(),
+            transport: McpTransport::Stdio {
+                command: "/fixture".into(),
+                args: vec![],
+                env,
+            },
+        };
+        let mut config = SessionConfig::default();
+        config.init.mcp_servers.push(server);
+        let payload = new_session_params(&config);
+        assert_eq!(
+            payload["mcpServers"][0]["env"],
+            json!([{"name": "USER_OVERRIDE", "value": "user"}, {"name": "TEAM_MCP_TOKEN", "value": "scoped"}])
+        );
+    }
 
     fn cfg_with_mcp() -> SessionConfig {
         SessionConfig {

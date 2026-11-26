@@ -11,8 +11,8 @@ pub(crate) fn resolve_officecli_path() -> Option<PathBuf> {
 
 fn resolve_known_officecli_install_path() -> Option<PathBuf> {
     resolve_known_officecli_install_path_from_env(
-        std::env::var_os("HOME").as_deref(),
-        std::env::var_os("LOCALAPPDATA").as_deref(),
+        aionui_common::host_env::SharedEnv::Home.read_os().as_deref(),
+        aionui_common::host_env::SharedEnv::LocalAppData.read_os().as_deref(),
     )
 }
 

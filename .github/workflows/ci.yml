@@ -148,6 +148,8 @@ jobs:
           HOST60_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         shell: pwsh
         run: ./scripts/just/test-windows-attachment-provenance.ps1
+      - name: Workspace production Clippy on Windows
+        run: cargo clippy --locked --workspace --target x86_64-pc-windows-msvc -- -D warnings
       - name: Project file URI compatibility and Clippy
         run: |
           cargo clippy --locked --target x86_64-pc-windows-msvc -p aionui-project --all-targets -- -D warnings
@@ -170,6 +172,14 @@ jobs:
       - name: Builtin Aelix launch descriptor on Windows
         run: |
           cargo test --locked -p aionui-ai-agent --lib studio_aelix::tests:: -- --test-threads=1
+      - name: Host-only child environment on Windows
+        run: |
+          cargo test --locked -p aionui-common --test startup_environment
+          cargo test --locked -p aionui-app --test startup_smoke standalone_entry_captures_environment_before_cli_parsing
+          cargo test --locked -p aionui-ai-agent --lib sdk_child_filters_host_only_settings
+          cargo test --locked -p aionui-ai-agent --lib version_probe_filters_host_env
+          cargo test --locked -p aionui-app --test child_process_env_e2e
+          cargo test --locked -p aionui-app --test studio_aelix_builtin_e2e host_start_consumes_the_signing_key_without_forwarding_it
 
   release-scripts:
     name: Release scripts

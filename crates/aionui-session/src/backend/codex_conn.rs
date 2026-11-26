@@ -636,7 +636,8 @@ fn build_codex_mcp_servers(servers: &[crate::backend::McpServerSpec]) -> Value {
     for s in servers {
         let entry = match &s.transport {
             McpTransport::Stdio { command, args, env } => {
-                let env_map: serde_json::Map<String, Value> = env.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+                let env_map: serde_json::Map<String, Value> =
+                    super::stdio_mcp_env(env).map(|(k, v)| (k.clone(), json!(v))).collect();
                 json!({ "command": command, "args": args, "env": Value::Object(env_map) })
             }
             // codex streamable-http MCP: url + (optional) bearer token env var. The
@@ -8139,6 +8140,33 @@ mod tests {
         );
         // sandbox keeps its default when only approval_policy is set.
         assert_eq!(frame["params"]["sandbox"], "workspace-write");
+    }
+
+    #[test]
+    fn mcp_config_filters_reserved_stdio_env() {
+        use crate::backend::{McpServerSpec, McpTransport};
+        use serde_json::json;
+        let env = aionui_common::host_env::HostEnv::ALL
+            .iter()
+            .map(|setting| (setting.name().to_owned(), "reserved fixture".to_owned()))
+            .chain([
+                ("USER_OVERRIDE".into(), "user".into()),
+                ("TEAM_MCP_TOKEN".into(), "scoped".into()),
+            ])
+            .collect();
+        let server = McpServerSpec {
+            name: "fixture".into(),
+            transport: McpTransport::Stdio {
+                command: "/fixture".into(),
+                args: vec![],
+                env,
+            },
+        };
+        let config = build_codex_mcp_servers(&[server]);
+        assert_eq!(
+            config["fixture"]["env"],
+            json!({"USER_OVERRIDE": "user", "TEAM_MCP_TOKEN": "scoped"})
+        );
     }
 
     /// Wave 0c: MCP servers reach codex via `config.mcp_servers` (a MAP keyed by

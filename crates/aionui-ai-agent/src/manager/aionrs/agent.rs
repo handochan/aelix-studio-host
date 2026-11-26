@@ -153,7 +153,8 @@ impl AionrsAgentManager {
     ) -> Result<Self, AgentError> {
         let runtime = AgentRuntime::new(conversation_id.clone(), workspace.clone(), 128);
         let sink: Arc<dyn OutputSink> = Arc::new(BackendOutputSink::new(runtime.event_sender()));
-        let runtime_env = config_extra.runtime_env.clone();
+        let mut runtime_env = config_extra.runtime_env.clone();
+        runtime_env.retain(|(key, _)| !aionui_common::host_env::is_host_env(key.as_ref()));
         let image_input_override = config_extra.compat_overrides.image_input;
         let image_input_capability = image_input_override.unwrap_or_else(|| {
             resolve_image_input_capability(
@@ -228,6 +229,12 @@ impl AionrsAgentManager {
 
         if !config_extra.extra_mcp_servers.is_empty() {
             config.mcp.servers.extend(config_extra.extra_mcp_servers.clone());
+        }
+        // Cover both per-session MCP servers and those supplied by SDK config.
+        for server in config.mcp.servers.values_mut() {
+            if let Some(env) = &mut server.env {
+                env.retain(|key, _| !aionui_common::host_env::is_host_env(key.as_ref()));
+            }
         }
 
         let is_resume = resume_session.is_some();

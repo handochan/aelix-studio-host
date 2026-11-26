@@ -26,17 +26,14 @@ use std::process::ExitCode;
 use aionui_auth::{
     SecretError, SecretSource, SecretStatus, SecretWriteOutcome, generate_secret, read_secret_status, set_secret,
 };
+use aionui_common::host_env::HostEnv;
 use aionui_db::{Database, SqliteUserRepository, init_database, maybe_copy_legacy_database};
 
 use crate::cli::{Cli, SecretArgs, SecretCommand, SetSecretArgs};
 use crate::commands::error::{CliBoundaryCode, CliBoundaryError};
 
 const SUBCOMMAND: &str = "secret";
-const ENCRYPTION_SECRET_ENV: &str = "AIONUI_ENCRYPTION_SECRET";
-/// The signing-secret env var the server reads (`services.rs`). Passed to the
-/// domain so the CLI's "effective root" judgement matches the server's seed
-/// fallback for env-signing nodes whose `jwt_secret` column is still empty.
-const JWT_SECRET_ENV: &str = "JWT_SECRET";
+const ENCRYPTION_SECRET_ENV: &str = HostEnv::EncryptionSecret.name();
 
 pub async fn run_secret(cli: &Cli, args: &SecretArgs) -> Result<ExitCode, CliBoundaryError> {
     match &args.command {
@@ -98,7 +95,7 @@ async fn set_from_input(cli: &Cli, args: &SetSecretArgs) -> Result<ExitCode, Cli
 /// an empty value to "absent"). Returns an owned `String` so the borrow
 /// outlives the database await points.
 fn env_secret() -> Option<String> {
-    std::env::var(ENCRYPTION_SECRET_ENV).ok()
+    HostEnv::EncryptionSecret.read()
 }
 
 /// Read the `JWT_SECRET` env var verbatim, so the domain can fold it into the
@@ -106,7 +103,7 @@ fn env_secret() -> Option<String> {
 /// root is seeded from the *effective* signing secret, which is this env value
 /// when set). Owned `String` for the same borrow-lifetime reason as `env_secret`.
 fn jwt_env_secret() -> Option<String> {
-    std::env::var(JWT_SECRET_ENV).ok()
+    HostEnv::JwtSecret.read()
 }
 
 /// Render the non-sensitive status report. Prints only presence, fingerprints,

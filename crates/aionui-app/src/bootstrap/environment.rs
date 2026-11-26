@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use aionui_common::host_env::HostEnv;
 use tracing::{info, warn};
 
 use aionui_app::{AppConfig, IdentityMode};
@@ -61,18 +62,13 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
 
     let work_dir = resolve_work_dir(cli.work_dir.clone(), &cli.data_dir);
 
-    // SAFETY: called before any service initialization; no concurrent reads.
-    unsafe {
-        std::env::set_var("AIONUI_WORK_DIR", &work_dir);
-    }
+    aionui_system::sysinfo::set_work_dir(&work_dir);
 
     let mut identity_mode: IdentityMode = cli.identity_mode.into();
     if cli.local {
         identity_mode = IdentityMode::Local;
     }
-    let bootstrap_secret = std::env::var("AIONCORE_BOOTSTRAP_SECRET")
-        .ok()
-        .filter(|secret| !secret.is_empty());
+    let bootstrap_secret = HostEnv::BootstrapSecret.read().filter(|secret| !secret.is_empty());
     validate_identity_environment(identity_mode, bootstrap_secret.as_deref())?;
 
     let config = AppConfig {

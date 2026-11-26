@@ -10,6 +10,7 @@ use aionui_ai_agent::{
 };
 use aionui_auth::{CookieConfig, JwtService, QrTokenStore, resolve_encryption_secret, resolve_jwt_secret};
 use aionui_common::OnConversationDelete;
+use aionui_common::host_env::HostEnv;
 use aionui_conversation::{ConversationService, runtime_state::ConversationRuntimeStateService};
 use aionui_db::{
     Database, IAcpSessionRepository, IAgentMetadataRepository, IConversationRepository, IMcpServerRepository,
@@ -138,6 +139,14 @@ impl AppServices {
         self
     }
 
+    /// Construct services for the standalone host or a test.
+    ///
+    /// The supported deployment is the standalone binary, which captures
+    /// host settings and removes them from the process environment before
+    /// launching children. Embedders must remove host secrets from their own
+    /// process environment before launching children. The startup capture
+    /// function can retain those settings for host readers when called before
+    /// any threads are started.
     pub async fn from_config(database: Database, config: &AppConfig) -> anyhow::Result<Self> {
         let backend_binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aelix-studio-host"));
         Self::from_config_with_backend_binary_path(database, config, backend_binary_path).await
@@ -148,6 +157,7 @@ impl AppServices {
     /// Runtime entry points should use [`Self::from_config`]. This variant lets
     /// integration tests run the real `aioncore` MCP/helper subcommands instead
     /// of accidentally respawning the test harness returned by `current_exe()`.
+    /// The process environment requirements in [`Self::from_config`] also apply.
     pub async fn from_config_with_backend_binary_path(
         database: Database,
         config: &AppConfig,
@@ -201,7 +211,7 @@ impl AppServices {
         // `resolve_jwt_secret` treats an empty value from either source as absent
         // (an empty string is never a usable secret), so both are passed through
         // raw — the empty-handling invariant lives in one place.
-        let env_secret = std::env::var("JWT_SECRET").ok();
+        let env_secret = HostEnv::JwtSecret.read();
         let system_user = user_repo
             .get_system_user()
             .await
@@ -257,7 +267,7 @@ impl AppServices {
         // decryption regression. The ELECTRON-3T0 guard above already refuses to
         // proceed on the one dangerous state (fresh-generated signing secret
         // masking an existing-but-unreadable row).
-        let env_encryption_secret = std::env::var("AIONUI_ENCRYPTION_SECRET").ok();
+        let env_encryption_secret = HostEnv::EncryptionSecret.read();
         let db_encryption_secret = system_user.as_ref().and_then(|u| u.encryption_secret.as_deref());
         let (encryption_secret, encryption_is_new) =
             resolve_encryption_secret(env_encryption_secret.as_deref(), db_encryption_secret, &secret);

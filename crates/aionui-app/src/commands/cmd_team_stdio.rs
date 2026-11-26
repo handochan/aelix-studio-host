@@ -87,12 +87,15 @@ struct TeamStdioEnv {
 
 impl TeamStdioEnv {
     fn from_env() -> Result<Self, CliBoundaryError> {
-        let port_raw = std::env::var(TeamMcpStdioConfig::ENV_PORT)
-            .map_err(|_| missing_env(SUBCOMMAND, TeamMcpStdioConfig::ENV_PORT))?;
-        let token = std::env::var(TeamMcpStdioConfig::ENV_TOKEN)
-            .map_err(|_| missing_env(SUBCOMMAND, TeamMcpStdioConfig::ENV_TOKEN))?;
-        let slot_id = std::env::var(TeamMcpStdioConfig::ENV_SLOT_ID)
-            .map_err(|_| missing_env(SUBCOMMAND, TeamMcpStdioConfig::ENV_SLOT_ID))?;
+        let port_raw = aionui_common::host_env::SharedEnv::TeamMcpPort
+            .read()
+            .ok_or_else(|| missing_env(SUBCOMMAND, TeamMcpStdioConfig::ENV_PORT))?;
+        let token = aionui_common::host_env::SharedEnv::TeamMcpToken
+            .read()
+            .ok_or_else(|| missing_env(SUBCOMMAND, TeamMcpStdioConfig::ENV_TOKEN))?;
+        let slot_id = aionui_common::host_env::SharedEnv::TeamMcpSlot
+            .read()
+            .ok_or_else(|| missing_env(SUBCOMMAND, TeamMcpStdioConfig::ENV_SLOT_ID))?;
         Self::from_values(&port_raw, token, slot_id)
     }
 

@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aionui_common::host_env::HostEnv;
 use include_dir::{Dir, include_dir};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -28,7 +29,7 @@ static BUILTIN_SKILLS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../aionu
 /// Name of the environment variable that, when set, overrides the embedded
 /// corpus with an on-disk directory. Consumed by
 /// [`resolve_skill_paths`] when building [`SkillPaths`].
-pub const BUILTIN_SKILLS_ENV_VAR: &str = "AIONUI_BUILTIN_SKILLS_PATH";
+pub const BUILTIN_SKILLS_ENV_VAR: &str = HostEnv::BuiltinSkills.name();
 const MAX_SKILL_IMPORT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_SKILL_IMPORT_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
 const IMPORT_STAGING_PREFIX: &str = ".import-staging-";
@@ -143,8 +144,8 @@ pub struct SkillPaths {
 /// agent skills are no longer materialized on disk — see
 /// [`materialize_skills_for_agent`] for the symlink contract.
 pub fn resolve_skill_paths(app_resource_dir: &Path, data_dir: &Path) -> SkillPaths {
-    let builtin_skills_dir = std::env::var(BUILTIN_SKILLS_ENV_VAR)
-        .ok()
+    let builtin_skills_dir = HostEnv::BuiltinSkills
+        .read()
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join(crate::constants::BUILTIN_SKILLS_DIR_NAME));

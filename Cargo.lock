@@ -201,6 +201,7 @@ dependencies = [
  "aion-protocol",
  "aion-tools",
  "aion-types",
+ "aionui-common",
  "aionui-mcp-http",
  "anyhow",
  "async-trait",
@@ -410,6 +411,7 @@ name = "aionui-app"
 version = "0.2.2"
 dependencies = [
  "aion-config",
+ "aion-mcp",
  "aionui-ai-agent",
  "aionui-api-types",
  "aionui-assets",
@@ -753,7 +755,6 @@ dependencies = [
  "dashmap",
  "dirs",
  "oauth2",
- "open",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -873,11 +874,13 @@ dependencies = [
 name = "aionui-runtime"
 version = "0.2.2"
 dependencies = [
+ "aionui-common",
  "dirs",
  "flate2",
  "fs2",
  "hex",
  "libc",
+ "open",
  "reqwest 0.12.28",
  "semver",
  "serde",
@@ -955,7 +958,6 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "http-body-util",
- "open",
  "reqwest 0.12.28",
  "rustls",
  "rustls-native-certs",

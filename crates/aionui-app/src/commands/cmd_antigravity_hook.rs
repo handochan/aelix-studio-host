@@ -42,15 +42,15 @@ async fn decide() -> AntigravityHookOutput {
         Err(e) => return AntigravityHookOutput::deny(format!("aionui hook could not parse the request: {e}")),
     };
 
-    let base_url = match std::env::var(AntigravityHookConfig::ENV_BASE_URL) {
-        Ok(v) if !v.trim().is_empty() => v,
+    let base_url = match aionui_common::host_env::SharedEnv::HookBaseUrl.read() {
+        Some(v) if !v.trim().is_empty() => v,
         _ => {
             return AntigravityHookOutput::deny("aionui hook is not configured (missing callback address)");
         }
     };
-    let token = std::env::var(AntigravityHookConfig::ENV_TOKEN).unwrap_or_default();
-    let conversation_id = std::env::var(AntigravityHookConfig::ENV_CONVERSATION_ID)
-        .ok()
+    let token = aionui_common::host_env::SharedEnv::HookToken.read().unwrap_or_default();
+    let conversation_id = aionui_common::host_env::SharedEnv::HookConversationId
+        .read()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| input.conversation_id.clone());
 

@@ -102,7 +102,7 @@ fn runtime_env(command: &str) -> Result<RuntimeEnv, ExitCode> {
 }
 
 fn required_env(command: &str, name: &'static str) -> Result<String, ExitCode> {
-    std::env::var(name).map_err(|_| {
+    aionui_common::host_env::read_session_env(name).ok_or_else(|| {
         print_failure(
             command,
             "CONVERSATION_CLI_ENV_MISSING",

@@ -717,12 +717,27 @@ tokio runtime starts, so every downstream `which::which(...)` and
 workspace — inherits an enriched `PATH`. Three layers are merged in priority
 order: interactive login-shell `$PATH` (Unix, 3 s timeout) → current inherited
 PATH → platform fallback bins (`~/.cargo/bin`, `~/.local/bin`, version-manager
-installations, Windows `%APPDATA%\npm`, Git, Scoop, …). The call is
-`unsafe` because Rust 2024 requires a single-threaded precondition for
-`env::set_var`; `main()` runs this as its very first statement to
-satisfy the invariant. A `startup: PATH ready path_segments=… path_len=…`
-info log confirms the enhancement at each run (no full PATH content is
-logged at `info` level).
+installations, Windows `%APPDATA%\npm`, Git, Scoop, …). The standalone
+entry point captures host settings while startup is single-threaded, then
+enhances PATH before starting Tokio. On Unix, the PATH probe can leave its
+reader thread parked after a timeout. The `startup: PATH ready` info log
+reports the segment count and length.
+
+### Host Environment at Startup
+
+The shipped standalone host captures host-only settings and scoped helper
+credentials before startup probes or child launches. It removes them from
+the process environment and retains the values for typed host readers. This
+covers ambient inheritance through SDK and vendored launchers. Host-managed
+launchers and MCP serializers also remove explicit overrides of reserved
+host-only names. Ordinary user overrides and shell AWS credentials keep their
+existing behavior. Explicit delivery of host-issued runtime tokens to MCP
+servers is tracked in [#83](https://github.com/handochan/aelix-studio-host/issues/83).
+
+Support covers the standalone binary. Callers embedding
+`AppServices::from_config` must remove host secrets from their own process
+environment before launching children. The standalone capture function
+preserves the values for host readers and requires single-threaded startup.
 
 ### Subprocess Spawn Builder
 

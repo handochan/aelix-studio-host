@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use aionui_common::host_env::HostEnv;
 use aionui_process::Spawner;
 use tokio::sync::{Mutex, broadcast};
 
@@ -289,7 +290,7 @@ fn build_claude_mcp_config(servers: &[super::McpServerSpec]) -> Option<String> {
             McpTransport::Stdio { command, args, env } => json!({
                 "command": command,
                 "args": args,
-                "env": Value::Object(kv(env)),
+                "env": Value::Object(super::stdio_mcp_env(env).map(|(name, value)| (name.clone(), Value::String(value.clone()))).collect()),
             }),
             McpTransport::Http { url, headers } => json!({
                 "type": "http",
@@ -1611,7 +1612,9 @@ fn idle_check_interval_ms(idle_ttl_ms: Option<i64>) -> u64 {
 /// rule forbids that in normal production); it is a deliberate debugging switch a
 /// developer turns on to reproduce, never enabled by default.
 fn claude_wire_dump_enabled() -> bool {
-    std::env::var("AIONUI_CLAUDE_WIRE_DUMP").is_ok_and(|v| v != "0" && !v.is_empty())
+    HostEnv::ClaudeWireDump
+        .read()
+        .is_some_and(|v| v != "0" && !v.is_empty())
 }
 
 /// Emit one raw-bytes wire line (direction + conv + turn_gen + byte count + a
@@ -3941,6 +3944,33 @@ mod tests {
                 "invalid mode {invalid:?} must fall back to `default` (not crash the spawn)"
             );
         }
+    }
+
+    #[test]
+    fn mcp_config_filters_reserved_stdio_env() {
+        use crate::backend::{McpServerSpec, McpTransport};
+        use serde_json::json;
+        let env = aionui_common::host_env::HostEnv::ALL
+            .iter()
+            .map(|setting| (setting.name().to_owned(), "reserved fixture".to_owned()))
+            .chain([
+                ("USER_OVERRIDE".into(), "user".into()),
+                ("TEAM_MCP_TOKEN".into(), "scoped".into()),
+            ])
+            .collect();
+        let server = McpServerSpec {
+            name: "fixture".into(),
+            transport: McpTransport::Stdio {
+                command: "/fixture".into(),
+                args: vec![],
+                env,
+            },
+        };
+        let config: serde_json::Value = serde_json::from_str(&build_claude_mcp_config(&[server]).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["fixture"]["env"],
+            json!({"USER_OVERRIDE": "user", "TEAM_MCP_TOKEN": "scoped"})
+        );
     }
 
     /// http/sse MCP transports map to claude's `{type,url,headers}` entry shape.

@@ -120,6 +120,31 @@ def mutated(description, old, new):
     return RELEASE.replace(old, new)
 
 
+class HostEnvironmentJobTests(unittest.TestCase):
+    def test_windows_lints_production_workspace(self):
+        job = reader.read((WORKFLOWS / 'ci.yml').read_text())['jobs']['windows-staging']
+        command = 'cargo clippy --locked --workspace --target x86_64-pc-windows-msvc -- -D warnings'
+        self.assertTrue(any(command in step.get('run', '') for step in job['steps']))
+
+    def test_windows_observes_startup_capture(self):
+        job = reader.read((WORKFLOWS / 'ci.yml').read_text())['jobs']['windows-staging']
+        command = 'cargo test --locked -p aionui-common --test startup_environment'
+        self.assertTrue(any(command in step.get('run', '') for step in job['steps']))
+
+    def test_windows_runs_the_standalone_entry_capture_regression(self):
+        job = reader.read((WORKFLOWS / 'ci.yml').read_text())['jobs']['windows-staging']
+        command = '--test startup_smoke standalone_entry_captures_environment_before_cli_parsing'
+        self.assertTrue(any(command in step.get('run', '') for step in job['steps']))
+
+    def test_windows_runs_host_start_environment_regression(self):
+        job = reader.read((WORKFLOWS / 'ci.yml').read_text())['jobs']['windows-staging']
+        self.assertTrue(job['runs-on'].startswith('windows-'))
+        self.assertTrue(any(
+            '--test studio_aelix_builtin_e2e host_start_consumes_the_signing_key_without_forwarding_it'
+            in step.get('run', '') for step in job['steps']
+        ), 'Windows CI must run the real-host environment regression')
+
+
 class ReleaseGateTests(unittest.TestCase):
     def check(self, text):
         """Fail unless `text` publishes a release only after the advisory check passed, twice."""

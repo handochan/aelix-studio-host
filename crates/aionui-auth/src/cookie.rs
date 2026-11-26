@@ -2,6 +2,7 @@ use aionui_common::constants::{
     COOKIE_MAX_AGE_DAYS, COOKIE_NAME, CSRF_COOKIE_NAME, REFRESH_COOKIE_MAX_AGE_DAYS, REFRESH_COOKIE_NAME,
     REFRESH_COOKIE_PATH,
 };
+use aionui_common::host_env::HostEnv;
 
 /// Cookie security configuration derived from the deployment environment.
 #[derive(Debug, Clone)]
@@ -18,7 +19,8 @@ impl CookieConfig {
     /// - `AIONUI_HTTPS=true` → Secure flag, SameSite=Strict
     /// - Otherwise → no Secure flag, SameSite=Lax (for remote HTTP access)
     pub fn from_env() -> Self {
-        let https = std::env::var("AIONUI_HTTPS")
+        let https = HostEnv::Https
+            .read()
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         Self {

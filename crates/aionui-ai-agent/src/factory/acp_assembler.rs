@@ -103,6 +103,14 @@ fn resolve_mcp_servers(config: &AcpBuildExtra, user_mcp_servers: Vec<McpServer>)
         servers.push(team_mcp_server(cfg));
     }
     servers.extend(user_mcp_servers);
+    // The assembled list is sent by the new, load, and fork request paths.
+    for server in &mut servers {
+        if let McpServer::Stdio(stdio) = server {
+            stdio
+                .env
+                .retain(|entry| !aionui_common::host_env::is_host_env(entry.name.as_ref()));
+        }
+    }
     servers
 }
 
@@ -323,6 +331,32 @@ mod tests {
     /// The pre-fix bug: with no team configured and an empty
     /// user-server list, the payload is empty. This is the *no-fix*
     /// scenario and remains valid (no MCP configured anywhere).
+    #[test]
+    fn legacy_acp_assembly_filters_reserved_stdio_env() {
+        use aionui_common::host_env::HostEnv;
+
+        let env = HostEnv::ALL
+            .iter()
+            .map(|setting| EnvVariable::new(setting.name(), "reserved fixture"))
+            .chain([EnvVariable::new("USER_OVERRIDE", "user fixture")])
+            .collect();
+        let user = McpServer::Stdio(McpServerStdio::new("fixture", "/fixture").env(env));
+        let cfg = AcpBuildExtra {
+            team_mcp_stdio_config: Some(team_cfg()),
+            ..Default::default()
+        };
+        let servers = resolve_mcp_servers(&cfg, vec![user]);
+        let [McpServer::Stdio(team), McpServer::Stdio(user)] = servers.as_slice() else {
+            panic!("expected the team and user stdio servers");
+        };
+        assert!(
+            team.env
+                .iter()
+                .any(|entry| entry.name == TeamMcpStdioConfig::ENV_TOKEN && entry.value == "tok")
+        );
+        assert_eq!(user.env, [EnvVariable::new("USER_OVERRIDE", "user fixture")]);
+    }
+
     #[test]
     fn resolve_mcp_servers_empty_when_nothing_configured() {
         let config = AcpBuildExtra {

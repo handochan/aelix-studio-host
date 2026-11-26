@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use aionui_common::chat_attachment::{ChatAttachment, ManagedUploadRoot};
+use aionui_common::host_env::HostEnv;
 use base64::Engine;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
@@ -73,7 +74,7 @@ impl FileService {
     pub fn new(broadcaster: Arc<dyn EventBroadcaster>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
         Self {
             remote_image_client: None,
-            remote_images_enabled: std::env::var("AELIX_STUDIO_HOST_REMOTE_IMAGES").as_deref() == Ok("1"),
+            remote_images_enabled: HostEnv::RemoteImages.read().as_deref() == Some("1"),
             broadcaster,
             allowed_roots,
             workspace_files_cache: DashMap::new(),

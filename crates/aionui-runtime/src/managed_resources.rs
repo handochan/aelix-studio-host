@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
+use aionui_common::host_env::HostEnv;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +22,8 @@ pub struct ManagedResourceSource {
     pub root: PathBuf,
 }
 
-const BUNDLED_RESOURCES_ENV: &str = "AIONUI_BUNDLED_MANAGED_RESOURCES";
+#[cfg(test)]
+const BUNDLED_RESOURCES_ENV: &str = HostEnv::BundledResources.name();
 
 pub fn set_managed_resources_mode(mode: ManagedResourcesMode) {
     *mode_lock().write().expect("managed resources mode lock poisoned") = mode;
@@ -183,13 +185,11 @@ fn default_managed_resources_mode() -> ManagedResourcesMode {
 }
 
 fn bundled_root() -> Option<PathBuf> {
-    configured_root(BUNDLED_RESOURCES_ENV).or_else(default_bundled_root)
-}
-
-fn configured_root(env_key: &str) -> Option<PathBuf> {
-    std::env::var_os(env_key)
+    HostEnv::BundledResources
+        .read_os()
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
+        .or_else(default_bundled_root)
 }
 
 fn default_bundled_root() -> Option<PathBuf> {

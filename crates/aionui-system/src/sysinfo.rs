@@ -1,4 +1,14 @@
+use std::{path::Path, sync::OnceLock};
+
 use aionui_api_types::SystemInfoResponse;
+use aionui_common::host_env::HostEnv;
+
+static WORK_DIR: OnceLock<Option<String>> = OnceLock::new();
+
+/// Record the effective work directory resolved by the host at startup.
+pub fn set_work_dir(work_dir: &Path) {
+    let _ = WORK_DIR.set(work_dir.to_str().map(str::to_owned));
+}
 
 /// Map Rust `std::env::consts::OS` to the Node.js-compatible platform name
 /// used by the API contract.
@@ -23,7 +33,7 @@ fn map_arch() -> &'static str {
 ///
 /// Priority: `AIONUI_CACHE_DIR` env → `dirs::cache_dir()/aionui`.
 fn resolve_cache_dir() -> String {
-    if let Ok(v) = std::env::var("AIONUI_CACHE_DIR")
+    if let Some(v) = HostEnv::CacheDir.read()
         && !v.is_empty()
     {
         return v;
@@ -35,9 +45,10 @@ fn resolve_cache_dir() -> String {
 
 /// Resolve the work (data) directory for AionUI.
 ///
-/// Priority: `AIONUI_WORK_DIR` env → `dirs::data_dir()/aionui`.
+/// Priority: effective server work directory → `AIONUI_WORK_DIR` →
+/// `dirs::data_dir()/aionui`.
 fn resolve_work_dir() -> String {
-    if let Ok(v) = std::env::var("AIONUI_WORK_DIR")
+    if let Some(v) = WORK_DIR.get().cloned().unwrap_or_else(|| HostEnv::WorkDir.read())
         && !v.is_empty()
     {
         return v;
@@ -54,7 +65,7 @@ fn resolve_work_dir() -> String {
 ///   Linux: `dirs::state_dir()/aionui/logs` (XDG_STATE_HOME)
 ///   Windows: `dirs::data_dir()/aionui/logs`
 fn resolve_log_dir() -> String {
-    if let Ok(v) = std::env::var("AIONUI_LOG_DIR")
+    if let Some(v) = aionui_common::host_env::SharedEnv::LogDir.read()
         && !v.is_empty()
     {
         return v;

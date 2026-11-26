@@ -17,7 +17,7 @@ mod resolver;
 mod shell_env;
 
 pub use agent_env::agent_process_env;
-pub const STUDIO_AELIX_LAUNCH_ENV: &str = "AIONUI_STUDIO_AELIX_LAUNCH";
+pub const STUDIO_AELIX_LAUNCH_ENV: &str = aionui_common::host_env::HostEnv::StudioAelixLaunch.name();
 pub use cache::init;
 pub use managed_resources::{ManagedResourcesMode, managed_resources_mode, set_managed_resources_mode};
 pub use node_runtime::{
@@ -32,7 +32,9 @@ pub use registry_npx_lock::{RegistryNpxLockError, pin_registry_npx_args, should_
 pub use resolver::{resolve_command_in, resolve_command_path};
 pub use shell_env::{ShellProbeReport, ShellProbeStatus, enhance_process_path, login_shell_probe_report};
 mod spawn;
+mod system_open;
 pub use spawn::{Builder, kill_process_tree};
+pub use system_open::{open_target, open_target_detached};
 
 #[cfg(test)]
 mod test_support;

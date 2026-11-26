@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use aionui_common::host_env::read_template_env;
+
 use crate::error::ExtensionError;
 
 /// Resolve `${ENV_VAR}` placeholders in a string value.
@@ -19,12 +21,12 @@ pub fn resolve_env_templates(value: &str, strict: bool) -> Result<String, Extens
                 result.push_str("${}");
                 continue;
             }
-            match std::env::var(&var_name) {
-                Ok(val) => result.push_str(&val),
-                Err(_) if strict => {
+            match read_template_env(&var_name) {
+                Some(val) => result.push_str(&val),
+                None if strict => {
                     return Err(ExtensionError::UndefinedEnvVariable(var_name));
                 }
-                Err(_) => { /* lenient: replace with empty string */ }
+                None => { /* lenient: replace with empty string */ }
             }
         } else {
             result.push(ch);

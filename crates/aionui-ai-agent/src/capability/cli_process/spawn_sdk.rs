@@ -165,6 +165,61 @@ mod tests {
     use aionui_common::EnvVar;
     use std::time::Duration;
 
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn sdk_child_filters_host_only_settings() {
+        use aionui_common::host_env::HostEnv;
+        use tokio::io::AsyncReadExt as _;
+
+        const CHILD_ENV: &str = "HOST78_SDK_TEST_CHILD";
+        let names: Vec<_> = HostEnv::ALL.iter().map(|setting| setting.name()).collect();
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "capability::cli_process::spawn_sdk::tests::sdk_child_filters_host_only_settings",
+                ])
+                .env(CHILD_ENV, "1")
+                .env_remove("SHELL")
+                .envs(names.iter().map(|name| (name, "host sentinel")))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+
+        assert!(
+            names
+                .iter()
+                .all(|name| std::env::var(name).as_deref() == Ok("host sentinel"))
+        );
+        let command = aionui_runtime::resolve_command_path(if cfg!(windows) { "python" } else { "python3" })
+            .expect("Python for the subprocess fixture");
+        let process = CliAgentProcess::spawn_for_sdk(CommandSpec {
+            command,
+            args: vec![
+                "-c".into(),
+                format!(
+                    "import os\nassert not [name for name in {names:?} if name in os.environ]\nprint(os.environ['AIONUI_RUNTIME_TOKEN'])"
+                ),
+            ],
+            env: vec![
+                EnvVar { name: HostEnv::JwtSecret.name().into(), value: "explicit sentinel".into() },
+                EnvVar { name: "AIONUI_RUNTIME_TOKEN".into(), value: "scoped fixture token".into() },
+            ],
+            cwd: None,
+        })
+        .await
+        .unwrap();
+        let (_stdin, mut stdout) = process.take_stdio().await.unwrap();
+        let mut output = String::new();
+        tokio::time::timeout(Duration::from_secs(10), stdout.read_to_string(&mut output))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(output.trim(), "scoped fixture token");
+    }
+
     // ── SDK mode tests ───────────────────────────────────────────────
 
     #[cfg(unix)]

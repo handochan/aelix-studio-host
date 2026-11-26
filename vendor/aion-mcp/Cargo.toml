@@ -7,6 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/iOfficeAI/aionrs.git"
 
 [dependencies]
+aionui-common = { path = "../../crates/aionui-common", version = "0.2.2" }
 aionui-mcp-http = { path = "../../crates/aionui-mcp-http", version = "0.2.2" }
 aion-types = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
 aion-protocol = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }

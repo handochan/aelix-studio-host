@@ -68,9 +68,9 @@ pub(super) fn force_kill(pid: u32, process_group_id: Option<u32>) -> Result<(), 
         //   128 — "not found" (already exited): treat as success, identical to
         //         the unix branch's behaviour
         //   other — unexpected; surface as Internal so callers can log
-        let result = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
+        let mut command = std::process::Command::new("taskkill");
+        aionui_common::host_env::strip_from_command(&mut command);
+        let result = command.args(["/F", "/T", "/PID", &pid.to_string()]).output();
 
         match result {
             Ok(output) if output.status.success() => {

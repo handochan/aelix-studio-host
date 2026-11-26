@@ -2,9 +2,10 @@
 use std::ffi::OsString;
 
 use crate::node_runtime::NodeRuntimeError;
+use aionui_common::host_env::HostEnv;
 
-pub const NODE_MIRROR_ENV: &str = "AELIX_STUDIO_HOST_NODE_MIRROR";
-pub const NPM_REGISTRY_ENV: &str = "AELIX_STUDIO_HOST_NPM_REGISTRY";
+pub const NODE_MIRROR_ENV: &str = HostEnv::NodeMirror.name();
+pub const NPM_REGISTRY_ENV: &str = HostEnv::NpmRegistry.name();
 
 /// Recognize registry tools even when a caller supplies an explicit path or a
 /// Windows launcher. Arbitrary custom scripts remain outside this policy.
@@ -35,8 +36,8 @@ pub fn is_registry_tool_command(command: &str) -> bool {
     )
 }
 
-pub(crate) fn configured_url(key: &str) -> Result<reqwest::Url, NodeRuntimeError> {
-    parse_url(key, std::env::var(key).ok().as_deref())
+pub(crate) fn configured_url(setting: HostEnv) -> Result<reqwest::Url, NodeRuntimeError> {
+    parse_url(setting.name(), setting.read().as_deref())
 }
 
 fn parse_url(key: &str, value: Option<&str>) -> Result<reqwest::Url, NodeRuntimeError> {
@@ -77,9 +78,7 @@ pub(crate) fn npm_env() -> Result<Vec<(OsString, OsString)>, NodeRuntimeError> {
 }
 
 pub(crate) fn npm_env_for(user_configured: bool) -> Result<Vec<(OsString, OsString)>, NodeRuntimeError> {
-    let mirror_set = std::env::var(NPM_REGISTRY_ENV)
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty());
+    let mirror_set = HostEnv::NpmRegistry.read().is_some_and(|v| !v.trim().is_empty());
     let mut env: Vec<(OsString, OsString)> = [
         ("npm_config_offline", "false"),
         ("npm_config_update_notifier", "false"),
@@ -90,7 +89,7 @@ pub(crate) fn npm_env_for(user_configured: bool) -> Result<Vec<(OsString, OsStri
     .map(|(key, value)| (key.into(), value.into()))
     .collect();
     if !user_configured || mirror_set {
-        let registry = configured_url(NPM_REGISTRY_ENV)?;
+        let registry = configured_url(HostEnv::NpmRegistry)?;
         env.push(("npm_config_registry".into(), registry.as_str().into()));
         env.push(("npm_config_replace_registry_host".into(), "always".into()));
     }
