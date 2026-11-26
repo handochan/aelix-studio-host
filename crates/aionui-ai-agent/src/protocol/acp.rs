@@ -1099,6 +1099,8 @@ async fn run_sdk_background(
                         acp_relay::META_KEY.into(),
                         serde_json::json!({ "version": 1, "notifications": false }),
                     );
+                    // ADR-0316. Only the managed Aelix launch may report a known lock holder.
+                    meta.insert("aelix/sessionLockHolder".into(), serde_json::json!(1));
                     if handshake_relay.offer_host_bytes {
                         meta.insert(super::byte_grants::META_KEY.into(), serde_json::json!({ "version": 1 }));
                     }

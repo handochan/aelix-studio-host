@@ -521,7 +521,11 @@ fn safe_application_data(code: i32, data: Option<&serde_json::Value>) -> Option<
             if !matches!(locked_by, "native" | "acp") {
                 return None;
             }
-            Some(json!({"kind":kind,"lockedBy":locked_by,"holder":null,"retryable":false}))
+            let holder = match (locked_by, data.get("holder").and_then(Value::as_str)) {
+                ("native", Some(holder @ ("cli" | "studio"))) => Some(holder),
+                _ => None,
+            };
+            Some(json!({"kind":kind,"lockedBy":locked_by,"holder":holder,"retryable":false}))
         }
         (-33002, "turn_failed_after_dispatch") => Some(json!({"kind":kind,"retryable":false})),
         (-32000, "session_changing") => Some(json!({"kind":kind})),
