@@ -176,6 +176,13 @@ pub struct McpServerSpec {
     pub transport: McpTransport,
 }
 
+/// Stdio settings are forwarded after the CLI starts, so the environment
+/// filter on its outer process cannot protect this boundary.
+fn stdio_mcp_env(env: &[(String, String)]) -> impl Iterator<Item = &(String, String)> {
+    env.iter()
+        .filter(|(key, _)| !aionui_common::host_env::is_host_env(key.as_ref()))
+}
+
 /// MCP transport variants (SDK-free mirror of the neutral session-snapshot shape).
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpTransport {

@@ -2292,11 +2292,15 @@ fn session_server_to_spec(server: &aionui_api_types::SessionMcpServer) -> aionui
         v
     };
     let transport = match &server.transport {
-        T::Stdio { command, args, env } => McpTransport::Stdio {
-            command: command.clone(),
-            args: args.clone(),
-            env: sorted(env),
-        },
+        T::Stdio { command, args, env } => {
+            let mut env = sorted(env);
+            env.retain(|(name, _)| !aionui_common::host_env::is_host_env(name.as_ref()));
+            McpTransport::Stdio {
+                command: command.clone(),
+                args: args.clone(),
+                env,
+            }
+        }
         T::Http { url, headers } | T::StreamableHttp { url, headers } => McpTransport::Http {
             url: url.clone(),
             headers: sorted(headers),
