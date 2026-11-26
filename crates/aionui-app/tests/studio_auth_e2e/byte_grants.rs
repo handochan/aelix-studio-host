@@ -760,6 +760,70 @@ async fn provider_causes_reach_studio_live_and_history_without_redispatch() {
 }
 
 #[tokio::test]
+async fn provider_reply_with_duplicate_message_is_redacted() {
+    assert_raw_provider_reply_is_redacted(
+        r#"{"jsonrpc":"2.0","id":"fixture-rpc-id","error":{"code":-33002,"message":"first","message":"private-h1-standard-message","data":{"kind":false,"private":"private-h1-standard-data"}}}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_reply_with_duplicate_id_is_redacted() {
+    assert_raw_provider_reply_is_redacted(
+        r#"{"jsonrpc":"2.0","id":"different-id","id":"fixture-rpc-id","error":{"code":-33002,"message":"private-h1-standard-id"}}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn provider_reply_with_duplicate_header_and_overflow_completes_prompt() {
+    assert_raw_provider_reply_is_redacted(
+        r#"{"jsonrpc":"2.0","id":"different-id","id":"fixture-rpc-id","error":{"code":-33002,"message":"first","message":"private-h1-standard-overflow","data":{"kind":false,"number":1e400}}}"#,
+    )
+    .await;
+}
+
+async fn assert_raw_provider_reply_is_redacted(reply: &str) {
+    let trace = ByteTrace::default();
+    let capture = trace.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || capture.clone())
+            .finish(),
+    );
+    for backend in ["custom-aelix", "builtin-aelix"] {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        if backend == "builtin-aelix" {
+            std::fs::write(dir.join("relay-calls.host-bytes-enabled"), "").unwrap();
+        }
+        std::fs::write(dir.join("relay-calls.provider-raw-prompt-reply"), reply).unwrap();
+        let host = start_relay_host(dir, fixture(dir).await).await;
+        let id = create(&host, dir, backend).await;
+        if backend == "builtin-aelix" {
+            ensure_and_discover(&host, &format!("{}/api/conversations/{id}", host.url)).await;
+        }
+        assert_studio_turn_error(&host, &id, provider_failure_body(None)).await;
+        let requests = std::fs::read_to_string(dir.join("relay-calls.prompt-requests")).unwrap();
+        assert_eq!(requests.lines().count(), 1, "{backend}: {requests}");
+        host.tasks.kill_and_wait(&id, None).await;
+        if backend == "custom-aelix" {
+            let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+            assert!(log.lines().any(|line| {
+                line.contains("Received JSON-RPC message") && line.contains("turn_failed_after_dispatch")
+            }));
+        }
+    }
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !log.contains("private-h1-standard"),
+        "provider text reached SDK tracing"
+    );
+}
+
+#[tokio::test]
 async fn provider_causes_survive_studio_http_error_mapping() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();

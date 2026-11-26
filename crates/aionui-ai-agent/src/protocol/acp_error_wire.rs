@@ -90,6 +90,22 @@ struct ErrorTag {
     kind: String,
 }
 
+fn raw_provider_data(error: &RawValue) -> Option<&RawValue> {
+    serde_json::from_str::<ErrorData<'_>>(error.get()).ok()?.data
+}
+
+fn raw_provider_kind(data: Option<&RawValue>) -> Option<String> {
+    let data = data?.get();
+    if !data.trim_start().starts_with('{') {
+        return None;
+    }
+    Some(serde_json::from_str::<ErrorTag>(data).ok()?.kind)
+}
+
+fn is_unrelated_provider_kind(kind: Option<&str>) -> bool {
+    kind.is_some_and(|kind| !kind.is_empty() && kind != TURN_FAILED_AFTER_DISPATCH)
+}
+
 fn wire_reply(raw: &str, code: i32) -> Option<WireReply<'_>> {
     let reply: WireReply<'_> = serde_json::from_str(raw).ok()?;
     (reply.error.code == code).then_some(reply)
@@ -140,15 +156,9 @@ fn sanitize_provider_reply(
     // Identify the error from the raw code independently of data. A duplicated
     // data member or tag is ambiguous, so it cannot opt out of redaction.
     let header: ErrorHeader = serde_json::from_str(error.get()).ok()?;
-    let data = serde_json::from_str::<ErrorData<'_>>(error.get())
-        .ok()
-        .and_then(|error| error.data);
-    let unrelated = data
-        .filter(|data| data.get().trim_start().starts_with('{'))
-        .and_then(|data| serde_json::from_str::<ErrorTag>(data.get()).ok())
-        .is_some_and(|tag| !tag.kind.is_empty() && tag.kind != TURN_FAILED_AFTER_DISPATCH);
+    let data = raw_provider_data(error);
     let hybrid = envelope.method || envelope.result;
-    if header.code != -33002 || unrelated {
+    if header.code != -33002 || is_unrelated_provider_kind(raw_provider_kind(data).as_deref()) {
         if !hybrid && normalized.is_some_and(|value| value["error"]["message"].is_string()) {
             correlate(&envelope.id);
         }
@@ -182,11 +192,15 @@ fn provider_reply(id: RequestId, method: bool, result: bool, cause: Option<Value
     reply
 }
 
-pub(super) fn normalized_provider_reply_id(reply: &Value) -> Option<RequestId> {
+pub(super) fn normalized_provider_reply_id(reply: &Value, raw: Option<&str>) -> Option<RequestId> {
     if reply["jsonrpc"] != "2.0"
         || reply["error"]["code"].as_i64() != Some(-33002)
         || !reply["error"]["message"].is_string()
-        || reply["error"]["data"]["kind"].as_str() != Some(TURN_FAILED_AFTER_DISPATCH)
+    {
+        return None;
+    }
+    if is_unrelated_provider_kind(reply["error"]["data"]["kind"].as_str())
+        && raw.is_none_or(raw_reply_allows_unrelated_provider_kind)
     {
         return None;
     }
@@ -194,8 +208,43 @@ pub(super) fn normalized_provider_reply_id(reply: &Value) -> Option<RequestId> {
     (id != RequestId::Null).then_some(id)
 }
 
-fn sanitize_normalized_provider_reply(reply: &mut Value, correlate: &mut dyn FnMut(&RequestId) -> bool) -> bool {
-    let Some(id) = normalized_provider_reply_id(reply) else {
+fn raw_reply_allows_unrelated_provider_kind(line: &str) -> bool {
+    let error = serde_json::from_str::<BTreeMap<String, &RawValue>>(line)
+        .ok()
+        .and_then(|envelope| envelope.get("error").copied());
+    // The normalized view may synthesize a reply with no direct raw error.
+    // When raw data is available, duplicated data or kind cannot opt out.
+    error.is_none_or(|error| is_unrelated_provider_kind(raw_provider_kind(raw_provider_data(error)).as_deref()))
+}
+
+pub(super) fn undecodable_provider_reply_id(line: &str) -> Option<RequestId> {
+    // Like the SDK's Value decoder, the maps keep the last occurrence of a
+    // header member. RawValue lets us read those headers even when a number
+    // inside the error data is out of range for Value.
+    let envelope: BTreeMap<String, &RawValue> = serde_json::from_str(line).ok()?;
+    if envelope.contains_key("method") || envelope.contains_key("result") {
+        return None;
+    }
+    let raw_error = envelope.get("error")?;
+    let error: BTreeMap<String, &RawValue> = serde_json::from_str(raw_error.get()).ok()?;
+    let member = |object: &BTreeMap<String, &RawValue>, key| serde_json::from_str::<Value>(object.get(key)?.get()).ok();
+    if member(&envelope, "jsonrpc")? != "2.0"
+        || member(&error, "code")?.as_i64() != Some(-33002)
+        || !member(&error, "message")?.is_string()
+        || is_unrelated_provider_kind(raw_provider_kind(raw_provider_data(raw_error)).as_deref())
+    {
+        return None;
+    }
+    let id = RequestId::deserialize(member(&envelope, "id")?).ok()?;
+    (id != RequestId::Null).then_some(id)
+}
+
+fn sanitize_normalized_provider_reply(
+    reply: &mut Value,
+    raw: Option<&str>,
+    correlate: &mut dyn FnMut(&RequestId) -> bool,
+) -> bool {
+    let Some(id) = normalized_provider_reply_id(reply, raw) else {
         return false;
     };
     let method = reply.get("method").is_some();
@@ -250,6 +299,11 @@ fn recover_undecodable_model_refusal(line: &str) -> Option<String> {
     serde_json::to_string(&reply).ok()
 }
 
+fn recover_undecodable_provider_reply(line: &str, correlate: &mut dyn FnMut(&RequestId) -> bool) -> Option<String> {
+    let id = undecodable_provider_reply_id(line)?;
+    correlate(&id).then(|| provider_reply(id, false, false, None).to_string())
+}
+
 /// Project provider failures from raw replies for the initialized Aelix peer.
 /// Use the SDK's normalized view to identify model refusals, but validate their
 /// data against the original JSON, which retains duplicate keys and types.
@@ -296,12 +350,14 @@ fn project_public_errors(
                     .as_mut()
                     .and_then(|correlate| sanitize_provider_reply(raw, normalized.as_ref(), *correlate))
                     .or_else(|| match normalized {
-                        Some(mut reply) => (correlate_aelix_reply
-                            .as_mut()
-                            .is_some_and(|correlate| sanitize_normalized_provider_reply(&mut reply, *correlate))
-                            || sanitize_model_refusal(&mut reply, Some(raw)))
+                        Some(mut reply) => (correlate_aelix_reply.as_mut().is_some_and(|correlate| {
+                            sanitize_normalized_provider_reply(&mut reply, Some(raw), *correlate)
+                        }) || sanitize_model_refusal(&mut reply, Some(raw)))
                         .then(|| reply.to_string()),
-                        None => recover_undecodable_model_refusal(raw),
+                        None => correlate_aelix_reply
+                            .as_mut()
+                            .and_then(|correlate| recover_undecodable_provider_reply(raw, *correlate))
+                            .or_else(|| recover_undecodable_model_refusal(raw)),
                     });
                 match rewritten {
                     Some(entry) => {
@@ -324,7 +380,10 @@ fn project_public_errors(
     }
     let Some(mut normalized) = normalized else {
         // A syntactically valid data object can also fail Value decoding.
-        return recover_undecodable_model_refusal(&line).unwrap_or(line);
+        return correlate_aelix_reply
+            .and_then(|correlate| recover_undecodable_provider_reply(&line, correlate))
+            .or_else(|| recover_undecodable_model_refusal(&line))
+            .unwrap_or(line);
     };
     let changed = if let Some(entries) = normalized.as_array_mut() {
         // The normalized view can expose a batch synthesized from a raw
@@ -333,12 +392,13 @@ fn project_public_errors(
         for reply in entries {
             changed |= correlate_aelix_reply
                 .as_mut()
-                .is_some_and(|correlate| sanitize_normalized_provider_reply(reply, *correlate))
+                .is_some_and(|correlate| sanitize_normalized_provider_reply(reply, None, *correlate))
                 || sanitize_model_refusal(reply, None);
         }
         changed
     } else {
-        correlate_aelix_reply.is_some_and(|correlate| sanitize_normalized_provider_reply(&mut normalized, correlate))
+        correlate_aelix_reply
+            .is_some_and(|correlate| sanitize_normalized_provider_reply(&mut normalized, Some(&line), correlate))
             || sanitize_model_refusal(&mut normalized, Some(&line))
     };
     if changed { normalized.to_string() } else { line }
@@ -404,11 +464,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_rewrite_does_not_claim_invalid_or_ambiguous_reply_headers() {
+    fn provider_rewrite_does_not_claim_invalid_reply_headers() {
         for reply in [
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"data":{"kind":false}}}"#,
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":null,"data":{"kind":false}}}"#,
-            r#"{"jsonrpc":"2.0","id":2,"id":1,"error":{"code":-33002,"message":"peer text","data":{"kind":false}}}"#,
         ] {
             let (rewritten, completed) = sanitize_public_errors(
                 reply.into(),
@@ -417,6 +476,63 @@ mod tests {
             );
             assert_eq!(rewritten, reply);
             assert!(completed.is_empty());
+        }
+    }
+
+    fn assert_generic_provider_reply(line: &str) {
+        let pending = |id: &RequestId| id == &RequestId::Number(1);
+        let (rewritten, completed) =
+            sanitize_public_errors(line.into(), serde_json::from_str(line).ok(), Some(&pending));
+        assert_eq!(completed, HashSet::from([RequestId::Number(1)]), "{line}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&rewritten).unwrap(),
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":ACP_REQUEST_FAILED,
+                "data":{"kind":"turn_failed_after_dispatch","retryable":false}}}),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn provider_rewrite_redacts_sdk_accepted_duplicate_headers_with_malformed_tags() {
+        for line in [
+            r#"{"jsonrpc":"2.0","id":2,"id":1,"error":{"code":-33002,"message":"peer text","data":{"kind":false}}}"#,
+            r#"{"jsonrpc":"1.0","jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"peer text","data":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":null,"error":{"code":-33002,"message":"peer text","data":{"kind":17}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"code":-33002,"message":"peer text"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"first","message":"peer text","data":{"kind":""}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"first","message":"peer text","data":{"kind":"turn_failed_after_dispatch","kind":"other_failure"}}}"#,
+        ] {
+            assert_generic_provider_reply(line);
+        }
+        let wrapped = json!({"$serde_json::private::RawValue":
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"peer text","data":{"kind":false}}}"#
+        });
+        assert_generic_provider_reply(&wrapped.to_string());
+    }
+
+    #[test]
+    fn provider_rewrite_recovers_duplicate_headers_when_data_cannot_normalize() {
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"first","message":"peer text","data":{"kind":false,"private":1e400}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"id":1,"error":{"code":-33002,"message":"peer text","data":{"private":1e400}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"id":1,"error":{"code":-33002,"message":"peer text","data":{"private":1e400},"data":{"kind":"other_failure"}}}"#,
+        ] {
+            assert!(serde_json::from_str::<Value>(line).is_err());
+            assert_generic_provider_reply(line);
+        }
+    }
+
+    #[test]
+    fn provider_rewrite_preserves_explicit_unrelated_kinds_and_uncorrelated_replies() {
+        let pending = |id: &RequestId| id == &RequestId::Number(1);
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"first","message":"other failure","data":{"kind":"other_failure"}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-33002,"message":"first","message":"other failure","data":{"kind":"other_failure","number":1e400}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"id":2,"error":{"code":-33002,"message":"peer text","data":{"kind":false}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"id":null,"error":{"code":-33002,"message":"peer text","data":{"kind":false}}}"#,
+        ] {
+            let (rewritten, _) = sanitize_public_errors(line.into(), serde_json::from_str(line).ok(), Some(&pending));
+            assert_eq!(rewritten, line);
         }
     }
 

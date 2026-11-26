@@ -196,6 +196,10 @@ while True:
     elif method == "session/prompt":
         with counter.with_suffix(".prompt-requests").open("a", encoding="utf-8") as requests:
             requests.write(f"{os.getpid()}\n")
+        raw_reply = counter.with_suffix(".provider-raw-prompt-reply")
+        if raw_reply.exists():
+            print(raw_reply.read_text(encoding="utf-8").replace('"fixture-rpc-id"', encode(rpc_id)), flush=True)
+            continue
         provider_failure = counter.with_suffix(".provider-prompt-failure")
         if provider_failure.exists():
             send_provider_failure(rpc_id, provider_failure)

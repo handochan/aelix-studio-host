@@ -619,6 +619,9 @@ impl RelayConnection {
             .is_some_and(|prompt| prompt.receiving_on_wire);
         let frame_bytes = line.len();
         let Ok(header) = serde_json::from_str::<FrameHeader>(&line) else {
+            if let Some(id) = self.provider_reply_id_without_wire_id(&line) {
+                return self.finish_standard_reply(&id, line);
+            }
             // ACP stdio uses one JSON object per line. Never pass a batch or
             // malformed raw line into the SDK's tracing or parse-error data.
             if line.trim().is_empty() {
@@ -655,15 +658,7 @@ impl RelayConnection {
             return Some(IncomingFrame::Sdk(line));
         }
         let Some(id) = header.id else {
-            // A Value-normalized reply can expose an ID absent from its raw
-            // object. Only admit it through an existing standard request;
-            // extension replies still require a directly parsed wire ID.
-            if self.is_aelix_peer()
-                && let Ok(reply) = serde_json::from_str::<Value>(&line)
-                && reply.get("method").is_none()
-                && reply.get("result").is_none()
-                && let Some(id) = super::acp_error_wire::normalized_provider_reply_id(&reply)
-            {
+            if let Some(id) = self.provider_reply_id_without_wire_id(&line) {
                 return self.finish_standard_reply(&id, line);
             }
             return Some(IncomingFrame::Sdk(line));
@@ -691,6 +686,21 @@ impl RelayConnection {
         // Resolve the SDK's correlation slot without sending agent data into
         // its tracing, error mapping, or serde diagnostics.
         Some(IncomingFrame::Sdk(sdk_ack(&id)))
+    }
+
+    fn provider_reply_id_without_wire_id(&self, line: &str) -> Option<RequestId> {
+        if !self.is_aelix_peer() {
+            return None;
+        }
+        // When strict header parsing leaves no ID, only an Aelix provider
+        // reply can use the fallback, and its ID must be a standard request.
+        match serde_json::from_str::<Value>(line) {
+            Ok(reply) if reply.get("method").is_none() && reply.get("result").is_none() => {
+                super::acp_error_wire::normalized_provider_reply_id(&reply, Some(line))
+            }
+            Err(_) => super::acp_error_wire::undecodable_provider_reply_id(line),
+            Ok(_) => None,
+        }
     }
 
     fn finish_standard_reply(&self, id: &RequestId, line: String) -> Option<IncomingFrame> {
