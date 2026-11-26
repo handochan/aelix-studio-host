@@ -23,6 +23,7 @@ import json, os, pathlib, sys, time
 here = pathlib.Path(__file__).parent
 (here / 'spawned').write_text('private' if 'AIONUI_STUDIO_AELIX_LAUNCH' not in os.environ else 'inherited')
 fail = (here / 'fail-check').is_file()
+holder_fixture = here / 'session-lock-holder-check'
 for raw in sys.stdin:
     request = json.loads(raw)
     method = request.get('method')
@@ -38,10 +39,10 @@ for raw in sys.stdin:
                 'version': 1, 'requests': ['_aelix/session/state'], 'notifications': []}}}
         }
         client_meta = params.get('clientCapabilities', {}).get('_meta', {})
-        if (here / 'session-lock-holder-check').is_file():
+        if holder_fixture.is_file():
             assert type(client_meta.get('aelix/sessionLockHolder')) is int
             assert client_meta['aelix/sessionLockHolder'] == 1
-        uses_host_bytes = any((here / check).is_file() for check in ('socket-path-check', 'session-lock-holder-check'))
+        uses_host_bytes = (here / 'socket-path-check').is_file() or holder_fixture.is_file()
         if uses_host_bytes and client_meta.get('aelix/hostBytes') == {'version': 1}:
             reply['result']['agentCapabilities']['_meta']['aelix/hostBytes'] = {'version': 1}
     elif method == 'session/new':
@@ -61,10 +62,11 @@ for raw in sys.stdin:
                               'data': {'kind': 'socket_path_too_long', 'limitBytes': 104,
                                        'path': '/PRIVATE/HOST72_SENTINEL/socket', 'token': 'fixture-secret',
                                        'stderr': '/PRIVATE/HOST72_SENTINEL/stderr'}}
-        elif (here / 'session-lock-holder-check').is_file():
+        elif holder_fixture.is_file():
+            locked_by, holder = json.loads(holder_fixture.read_text(encoding='utf-8'))
             reply['error'] = {'code': -33001, 'message': '/PRIVATE/HOST67_SENTINEL/worker',
                               'data': {'kind': 'session_locked', 'sessionId': 'private-session-id',
-                                       'lockedBy': 'native', 'holder': 'cli', 'retryable': False}}
+                                       'lockedBy': locked_by, 'holder': holder, 'retryable': False}}
         elif (here / 'session-lock-check').is_file():
             reply['error'] = {'code': -33001, 'message': 'Session lock held by native peer',
                               'data': {'kind': 'session_locked', 'sessionId': 'fixture-locked-session',
@@ -413,29 +415,41 @@ async fn runtime_ensure_session_locked_matches_base_response_without_host_bytes(
 }
 
 #[tokio::test]
-async fn runtime_ensure_forwards_a_known_native_lock_holder_without_private_details() {
-    let dir = tempfile::tempdir().unwrap();
-    let (peer, descriptor) = runtime(dir.path(), "attributed session lock", false);
-    std::fs::write(peer.join("session-lock-holder-check"), "").unwrap();
-    let host = Host::start(dir.path(), &descriptor, true).await;
-    let conversation = host.conversation(ENTRY, dir.path()).await;
-    let (status, body) = host
-        .call(
-            Method::POST,
-            &format!("/api/conversations/{conversation}/runtime/ensure"),
-            Value::Null,
-            None,
+async fn runtime_ensure_reports_only_known_native_lock_holders_in_protected_response() {
+    for (locked_by, holder, expected) in [
+        ("native", "cli", Some("cli")),
+        ("native", "studio", Some("studio")),
+        ("acp", "cli", None),
+        ("acp", "studio", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (peer, descriptor) = runtime(dir.path(), "attributed session lock", false);
+        std::fs::write(
+            peer.join("session-lock-holder-check"),
+            json!([locked_by, holder]).to_string(),
         )
-        .await;
+        .unwrap();
+        let host = Host::start(dir.path(), &descriptor, true).await;
+        let conversation = host.conversation(ENTRY, dir.path()).await;
+        let (status, body) = host
+            .call(
+                Method::POST,
+                &format!("/api/conversations/{conversation}/runtime/ensure"),
+                Value::Null,
+                None,
+            )
+            .await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert_eq!(body["code"], "USER_AGENT_SESSION_LOCKED");
-    assert_eq!(
-        body["details"]["data"],
-        json!({"kind":"session_locked", "lockedBy":"native", "holder":"cli", "retryable":false})
-    );
-    assert!(!body.to_string().contains("/PRIVATE/"));
-    host.stop().await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{locked_by}/{holder}: {body}");
+        assert_eq!(body["code"], "USER_AGENT_SESSION_LOCKED", "{locked_by}/{holder}");
+        assert_eq!(
+            body["details"]["data"],
+            json!({"kind":"session_locked", "lockedBy":locked_by, "holder":expected, "retryable":false}),
+            "{locked_by}/{holder}"
+        );
+        assert!(!body.to_string().contains("/PRIVATE/"), "{locked_by}/{holder}: {body}");
+        host.stop().await;
+    }
 }
 
 #[tokio::test]
