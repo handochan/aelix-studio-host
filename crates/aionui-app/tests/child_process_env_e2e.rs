@@ -20,26 +20,6 @@ use aionui_runtime::{Builder, ResolvedCommand};
 const HOST_FIXTURE: &str = "HOST78_ENV_FIXTURE";
 const USER_VAR: &str = "HOST78_USER_VAR";
 
-#[test]
-fn authentication_settings_use_the_child_environment_policy() {
-    // Raw environment reads in the authentication configuration paths would
-    // allow a new host credential to bypass HostEnv's shared declaration.
-    for (module, source) in [
-        ("startup", include_str!("../src/main.rs")),
-        ("bootstrap", include_str!("../src/bootstrap/environment.rs")),
-        ("services", include_str!("../src/services.rs")),
-        ("secret CLI", include_str!("../src/commands/cmd_secret.rs")),
-        ("cookies", include_str!("../../aionui-auth/src/cookie.rs")),
-        ("CSRF", include_str!("../../aionui-auth/src/csrf.rs")),
-        ("JWT", include_str!("../../aionui-auth/src/jwt.rs")),
-    ] {
-        assert!(
-            !source.contains("env::var") && !source.contains("std::env::{"),
-            "use HostEnv when reading host settings in {module}"
-        );
-    }
-}
-
 fn run_in_host_env(test: &str) -> bool {
     if std::env::var_os(HOST_FIXTURE).is_some() {
         assert!(

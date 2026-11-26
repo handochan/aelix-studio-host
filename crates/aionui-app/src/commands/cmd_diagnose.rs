@@ -62,7 +62,7 @@ fn run_context() -> Result<(), DiagnoseError> {
             "user_id": env.user_id,
             "conversation_id": env.conversation_id,
             "base_url": env.base_url,
-            "log_dir": std::env::var(ENV_LOG_DIR).ok().filter(|value| !value.trim().is_empty()),
+            "log_dir": aionui_common::host_env::SharedEnv::LogDir.read().filter(|value| !value.trim().is_empty()),
         }),
         meta_from_map(Map::new()),
         command,
@@ -211,7 +211,7 @@ fn run_logs_tail() -> Result<(), DiagnoseError> {
     let mut selectors = SelectorMeta::default();
     resolve_optional_log_conversation_selector(command, &mut payload, &mut selectors)?;
     let log_dir = optional_string_field(&payload, "log_dir")
-        .or_else(|| std::env::var(ENV_LOG_DIR).ok())
+        .or_else(|| aionui_common::host_env::SharedEnv::LogDir.read())
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
@@ -278,15 +278,13 @@ impl DiagnoseEnv {
 }
 
 fn optional_env(name: &'static str) -> Option<String> {
-    std::env::var(name)
-        .ok()
+    aionui_common::host_env::read_session_env(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
 fn required_env(command: &str, name: &'static str) -> Result<String, DiagnoseError> {
-    std::env::var(name)
-        .ok()
+    aionui_common::host_env::read_session_env(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {

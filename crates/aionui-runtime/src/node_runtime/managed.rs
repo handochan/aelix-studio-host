@@ -853,7 +853,7 @@ fn managed_env(root: &Path) -> Result<Vec<(OsString, OsString)>, NodeRuntimeErro
     let node_bin = managed_bin_dir(root);
     let global_bin = managed_prefix_bin_dir(root);
     let mut paths = vec![node_bin, global_bin];
-    if let Some(current_path) = std::env::var_os("PATH") {
+    if let Some(current_path) = aionui_common::host_env::SharedEnv::Path.read_os() {
         paths.extend(std::env::split_paths(&current_path));
     }
     let path = std::env::join_paths(paths)

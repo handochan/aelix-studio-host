@@ -613,3 +613,39 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn unrelated_children_do_not_inherit_scoped_tokens() {
+    const TOKENS: [&str; 3] = [
+        "AIONUI_RUNTIME_TOKEN",
+        "TEAM_MCP_TOKEN",
+        "AIONUI_ANTIGRAVITY_HOOK_TOKEN",
+    ];
+    if !crate::test_support::run_in_env_child("spawn::unrelated_children_do_not_inherit_scoped_tokens", |command| {
+        command
+            .env_remove("SHELL")
+            .envs(TOKENS.map(|name| (name, "ambient-fixture")));
+    }) {
+        return;
+    }
+    let agent_env = crate::agent_process_env().await;
+    assert!(
+        agent_env
+            .iter()
+            .all(|(name, _)| !TOKENS.iter().any(|token| name == token))
+    );
+    let mut probe = Builder::clean_cli("/bin/sh");
+    probe.args([
+        "-c",
+        r#"test -z "${AIONUI_RUNTIME_TOKEN+x}${TEAM_MCP_TOKEN+x}${AIONUI_ANTIGRAVITY_HOOK_TOKEN+x}""#,
+    ]);
+    assert!(probe.output().await.unwrap().status.success());
+    let mut configured = Builder::clean_cli("/bin/sh");
+    configured.envs(TOKENS.map(|name| (name, "explicit")));
+    configured.args([
+        "-c",
+        "test \"$AIONUI_RUNTIME_TOKEN/$TEAM_MCP_TOKEN/$AIONUI_ANTIGRAVITY_HOOK_TOKEN\" = explicit/explicit/explicit",
+    ]);
+    assert!(configured.output().await.unwrap().status.success());
+}

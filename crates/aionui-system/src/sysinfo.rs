@@ -65,7 +65,7 @@ fn resolve_work_dir() -> String {
 ///   Linux: `dirs::state_dir()/aionui/logs` (XDG_STATE_HOME)
 ///   Windows: `dirs::data_dir()/aionui/logs`
 fn resolve_log_dir() -> String {
-    if let Ok(v) = std::env::var("AIONUI_LOG_DIR")
+    if let Some(v) = aionui_common::host_env::SharedEnv::LogDir.read()
         && !v.is_empty()
     {
         return v;

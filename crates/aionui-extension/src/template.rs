@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use aionui_common::host_env::is_host_env;
+use aionui_common::host_env::read_template_env;
 
 use crate::error::ExtensionError;
 
@@ -21,12 +21,7 @@ pub fn resolve_env_templates(value: &str, strict: bool) -> Result<String, Extens
                 result.push_str("${}");
                 continue;
             }
-            let value = if is_host_env(var_name.as_ref()) {
-                None
-            } else {
-                std::env::var(&var_name).ok()
-            };
-            match value {
+            match read_template_env(&var_name) {
                 Some(val) => result.push_str(&val),
                 None if strict => {
                     return Err(ExtensionError::UndefinedEnvVariable(var_name));

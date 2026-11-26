@@ -20,7 +20,7 @@ static FULL_SHELL_ENV: OnceCell<Vec<(OsString, OsString)>> = OnceCell::const_new
 /// Electron `spawn(..., { env })` behavior without spreading shell variables to
 /// unrelated backend code.
 pub async fn agent_process_env() -> Vec<(OsString, OsString)> {
-    let current_env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let current_env: Vec<(OsString, OsString)> = aionui_common::host_env::ambient_environment();
     let shell_env = full_shell_env().await.to_vec();
     let env = build_agent_process_env(current_env.clone(), shell_env.clone());
     tracing::info!(
@@ -70,7 +70,7 @@ fn clean_agent_env(env: &mut BTreeMap<OsString, OsString>) {
     ] {
         remove_env_key(env, key);
     }
-    env.retain(|key, _| !aionui_common::host_env::is_host_env(key) && !env_key_starts_with(key, "npm_"));
+    env.retain(|key, _| aionui_common::host_env::is_inheritable(key) && !env_key_starts_with(key, "npm_"));
 }
 
 fn get_env_value<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsString> {
@@ -160,7 +160,7 @@ fn path_entry_count(path: Option<&std::ffi::OsStr>) -> usize {
 
 #[cfg(unix)]
 async fn load_full_shell_env() -> Vec<(OsString, OsString)> {
-    let Some(shell) = std::env::var_os("SHELL") else {
+    let Some(shell) = aionui_common::host_env::SharedEnv::Shell.read_os() else {
         tracing::info!("SHELL is not set; skipping full shell env probe for agent subprocesses");
         return Vec::new();
     };

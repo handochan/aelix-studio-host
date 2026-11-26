@@ -1260,15 +1260,13 @@ impl ConfigEnv {
 }
 
 fn optional_env(name: &'static str) -> Option<String> {
-    std::env::var(name)
-        .ok()
+    aionui_common::host_env::read_session_env(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
 fn required_env(command: &str, name: &'static str) -> Result<String, ConfigError> {
-    std::env::var(name)
-        .ok()
+    aionui_common::host_env::read_session_env(name)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {

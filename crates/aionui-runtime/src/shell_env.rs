@@ -2,7 +2,7 @@
 //!
 //! Call [`enhance_process_path`] from `main()` **before any worker thread
 //! is spawned** (including the tokio runtime). It rewrites
-//! `std::env::var("PATH")` to include:
+//! `PATH` to include:
 //!
 //! 1. The interactive login-shell `PATH` (Unix only, bounded by a 3s
 //!    end-to-end budget) — fixes launchd / Finder / systemd-service starts.
@@ -91,7 +91,7 @@ pub fn login_shell_probe_report() -> Option<ShellProbeReport> {
 /// tokio runtime). Internally calls `std::env::set_var` which is
 /// `unsafe` on Rust 2024.
 pub unsafe fn enhance_process_path() -> String {
-    let current = std::env::var("PATH").unwrap_or_default();
+    let current = aionui_common::host_env::SharedEnv::Path.read().unwrap_or_default();
     let (login, probe) = login_shell_path();
     // Nothing here can be logged yet; stash the outcome for the bootstrap
     // layer to emit once `init_tracing` has installed a subscriber.
@@ -186,10 +186,10 @@ fn platform_extra_bins_at(home: Option<&Path>) -> Vec<PathBuf> {
 
     #[cfg(windows)]
     {
-        if let Ok(appdata) = std::env::var("APPDATA") {
+        if let Some(appdata) = aionui_common::host_env::SharedEnv::AppData.read() {
             push_if_dir(PathBuf::from(&appdata).join("npm"));
         }
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if let Some(local) = aionui_common::host_env::SharedEnv::LocalAppData.read() {
             push_if_dir(PathBuf::from(&local).join("pnpm"));
             push_if_dir(PathBuf::from(&local).join("fnm_multishells"));
             // winget package shims (stable since App Installer 1.4).
@@ -203,15 +203,15 @@ fn platform_extra_bins_at(home: Option<&Path>) -> Vec<PathBuf> {
             // PATH is the whole search space.
             push_if_dir(PathBuf::from(&local).join("omp"));
         }
-        if let Ok(pf) = std::env::var("ProgramFiles") {
+        if let Some(pf) = aionui_common::host_env::SharedEnv::ProgramFiles.read() {
             push_if_dir(PathBuf::from(&pf).join("Git").join("cmd"));
             push_if_dir(PathBuf::from(&pf).join("Git").join("bin"));
             push_if_dir(PathBuf::from(&pf).join("nodejs"));
         }
-        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+        if let Some(pf86) = aionui_common::host_env::SharedEnv::ProgramFilesX86.read() {
             push_if_dir(PathBuf::from(&pf86).join("nodejs"));
         }
-        if let Ok(scoop) = std::env::var("SCOOP") {
+        if let Some(scoop) = aionui_common::host_env::SharedEnv::Scoop.read() {
             push_if_dir(PathBuf::from(&scoop).join("shims"));
         } else if let Some(h) = home {
             push_if_dir(h.join("scoop").join("shims"));
@@ -247,7 +247,7 @@ fn login_shell_path() -> (Option<String>, ShellProbeReport) {
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     };
 
-    let Ok(shell) = std::env::var("SHELL") else {
+    let Some(shell) = aionui_common::host_env::SharedEnv::Shell.read() else {
         return (None, report(ShellProbeStatus::Skipped));
     };
     if !Path::new(&shell).is_absolute() {

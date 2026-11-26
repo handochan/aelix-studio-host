@@ -1,3 +1,9 @@
 disallowed-types = [
     { path = "aionui_common::ApiError", reason = "ApiError is an HTTP/API boundary error; map crate-owned errors to it only in routes or middleware." },
 ]
+disallowed-methods = [
+    { path = "std::env::var", reason = "Use the typed host or shared environment policy in aionui-common." },
+    { path = "std::env::var_os", reason = "Use the typed host or shared environment policy in aionui-common." },
+    { path = "std::env::vars", reason = "Use the child environment policy in aionui-common." },
+    { path = "std::env::vars_os", reason = "Use the child environment policy in aionui-common." },
+]
