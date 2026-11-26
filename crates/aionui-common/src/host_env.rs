@@ -150,6 +150,14 @@ pub unsafe fn capture_at_startup() {
     });
 }
 
+/// Check the entry point's startup invariant before CLI parsing or any spawn.
+#[cfg(debug_assertions)]
+pub fn startup_environment_is_scrubbed() -> bool {
+    STARTUP_VALUES
+        .get()
+        .is_some_and(|values| values.keys().all(|name| std::env::var_os(name).is_none()))
+}
+
 fn matches_name(key: &OsStr, name: &str) -> bool {
     if cfg!(windows) {
         key.eq_ignore_ascii_case(OsStr::new(name))

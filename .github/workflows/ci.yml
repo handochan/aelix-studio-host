@@ -175,6 +175,7 @@ jobs:
       - name: Host-only child environment on Windows
         run: |
           cargo test --locked -p aionui-common --test startup_environment
+          cargo test --locked -p aionui-app --test startup_smoke standalone_entry_captures_environment_before_cli_parsing
           cargo test --locked -p aionui-ai-agent --lib sdk_child_filters_host_only_settings
           cargo test --locked -p aionui-ai-agent --lib version_probe_filters_host_env
           cargo test --locked -p aionui-app --test child_process_env_e2e

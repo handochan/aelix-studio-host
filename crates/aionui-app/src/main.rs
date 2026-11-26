@@ -29,8 +29,13 @@ fn main() -> ExitCode {
 
 fn run_main() -> Result<ExitCode, MainError> {
     // SAFETY: startup is single-threaded here, before runtime setup or any
-    // child spawn. This is the same boundary used for the PATH update below.
+    // child spawn.
     unsafe { capture_at_startup() };
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        aionui_common::host_env::startup_environment_is_scrubbed(),
+        "host startup must capture and scrub the environment before parsing arguments"
+    );
     let cli = Cli::parse();
     let studio_launch = HostEnv::StudioAelixLaunch.read();
 

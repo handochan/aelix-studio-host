@@ -718,10 +718,10 @@ workspace — inherits an enriched `PATH`. Three layers are merged in priority
 order: interactive login-shell `$PATH` (Unix, 3 s timeout) → current inherited
 PATH → platform fallback bins (`~/.cargo/bin`, `~/.local/bin`, version-manager
 installations, Windows `%APPDATA%\npm`, Git, Scoop, …). The standalone
-entry point captures host settings, then enhances PATH before starting the
-runtime. Both steps modify the process environment and run while startup
-is single-threaded. The `startup: PATH ready` info log reports the segment
-count and length.
+entry point captures host settings while startup is single-threaded, then
+enhances PATH before starting Tokio. On Unix, the PATH probe can leave its
+reader thread parked after a timeout. The `startup: PATH ready` info log
+reports the segment count and length.
 
 ### Host Environment at Startup
 
