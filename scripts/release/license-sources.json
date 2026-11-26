@@ -1679,6 +1679,12 @@
   },
   "vendoredPackages": [
     {
+      "crate": "aws-config",
+      "version": "1.13.0",
+      "manifest": "vendor/aws-config/Cargo.toml",
+      "upstreamSource": "registry+https://github.com/rust-lang/crates.io-index (aws-config 1.13.0)"
+    },
+    {
       "crate": "aion-mcp",
       "version": "0.2.11",
       "manifest": "vendor/aion-mcp/Cargo.toml",

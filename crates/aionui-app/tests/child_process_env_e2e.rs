@@ -144,6 +144,55 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
+async fn embedded_mcp_filters_host_env() {
+    use aion_mcp::{
+        protocol::JsonRpcRequest,
+        transport::{McpTransport, stdio::StdioTransport},
+    };
+
+    if !run_in_host_env("embedded_mcp_filters_host_env") {
+        return;
+    }
+
+    // The app library still consumes the ambient key without the binary's scrub.
+    let dir = tempfile::tempdir().unwrap();
+    let config = aionui_app::AppConfig {
+        data_dir: dir.path().into(),
+        work_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let db = aionui_db::init_database_memory().await.unwrap();
+    let services = aionui_app::AppServices::from_config(db, &config).await.unwrap();
+    let token = aionui_auth::JwtService::new("host sentinel".into())
+        .sign("system_default_user", "fixture")
+        .unwrap();
+    assert!(services.jwt_service.verify(&token).is_ok());
+
+    let script = format!(
+        "{}assert os.environ[{USER_VAR:?}] == 'from config'\n{}",
+        env_check(),
+        r#"import sys, json
+request = json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}), flush=True)"#
+    );
+    let transport = StdioTransport::spawn(
+        python().to_str().unwrap(),
+        &["-c".into(), script],
+        &HashMap::from_iter(overrides()),
+    )
+    .await
+    .unwrap();
+    let reply = tokio::time::timeout(
+        Duration::from_secs(10),
+        transport.request(&JsonRpcRequest::new(1, "initialize", None)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(reply.result.is_some());
+}
+
+#[tokio::test]
 async fn utility_and_extension_commands_filter_host_env() {
     if !run_in_host_env("utility_and_extension_commands_filter_host_env") {
         return;

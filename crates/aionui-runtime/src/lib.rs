@@ -32,7 +32,9 @@ pub use registry_npx_lock::{RegistryNpxLockError, pin_registry_npx_args, should_
 pub use resolver::{resolve_command_in, resolve_command_path};
 pub use shell_env::{ShellProbeReport, ShellProbeStatus, enhance_process_path, login_shell_probe_report};
 mod spawn;
+mod system_open;
 pub use spawn::{Builder, kill_process_tree};
+pub use system_open::{open_target, open_target_detached};
 
 #[cfg(test)]
 mod test_support;

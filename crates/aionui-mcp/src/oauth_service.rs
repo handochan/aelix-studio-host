@@ -153,7 +153,7 @@ impl McpOAuthService {
 
         // Open browser.
         debug!(url = %authorize_url, "Opening browser for OAuth authorization");
-        if let Err(e) = open::that(&authorize_url) {
+        if let Err(e) = aionui_runtime::open_target(&authorize_url) {
             warn!("Failed to open browser: {e}");
         }
 

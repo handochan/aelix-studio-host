@@ -7,6 +7,7 @@ The source is `crates/aion-mcp` from [iOfficeAI/aionrs v0.2.11](https://github.c
 | File | Changed hunks |
 | --- | --- |
 | `Cargo.toml` | Resolve inherited package fields and workspace dependencies from the pinned aionrs manifest. Keep sibling crates on the same tag and depend on the shared Host HTTP readers. |
+| `src/transport/stdio.rs` | Apply the Host child-environment policy after stdio overrides. |
 | `src/transport/types.rs` | Add the typed transport read error. |
 | `src/transport/streamable_http.rs` | Use the body/frame readers for Streamable HTTP, retaining session headers and RPC handling. Use bounded, payload-free errors for failed reads and avoid echoing raw malformed JSON. |
 | `src/transport/sse.rs` | Cap endpoint negotiation and active RPC windows. Dispatch only matching replies and surface terminal read errors during POST acknowledgement. Stop the listener when its transport is dropped. |

@@ -201,6 +201,7 @@ dependencies = [
  "aion-protocol",
  "aion-tools",
  "aion-types",
+ "aionui-common",
  "aionui-mcp-http",
  "anyhow",
  "async-trait",
@@ -410,6 +411,7 @@ name = "aionui-app"
 version = "0.2.2"
 dependencies = [
  "aion-config",
+ "aion-mcp",
  "aionui-ai-agent",
  "aionui-api-types",
  "aionui-assets",
@@ -753,7 +755,6 @@ dependencies = [
  "dashmap",
  "dirs",
  "oauth2",
- "open",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -879,6 +880,7 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "open",
  "reqwest 0.12.28",
  "semver",
  "serde",
@@ -956,7 +958,6 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "http-body-util",
- "open",
  "reqwest 0.12.28",
  "rustls",
  "rustls-native-certs",
@@ -1042,6 +1043,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -1324,9 +1326,8 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "aws-config"
 version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "939e256cfe0ed68e96d32f194339d88210d5c10685cff0787400158f852c6819"
 dependencies = [
+ "aionui-common",
  "aws-credential-types",
  "aws-runtime",
  "aws-sdk-sso",

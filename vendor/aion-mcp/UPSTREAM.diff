@@ -1,5 +1,5 @@
 diff --git a/aion-mcp-v0.2.11/Cargo.toml b/aion-mcp-host/Cargo.toml
-index 46cc4d7045a4213ac476eca976cc608d51985821..7e690fae5bbd98a5413d7a53e770da1bf2289b09 100644
+index 46cc4d7045a4213ac476eca976cc608d51985821..a2dd2aec758035acdc80d4e30ddf992ace9786af 100644
 --- a/aion-mcp-v0.2.11/Cargo.toml
 +++ b/aion-mcp-host/Cargo.toml
 @@ -4,4 +4,4 @@ description = "MCP (Model Context Protocol) client implementation for aionrs"
@@ -11,17 +11,18 @@ index 46cc4d7045a4213ac476eca976cc608d51985821..7e690fae5bbd98a5413d7a53e770da1b
 +edition = "2024"
 +license = "Apache-2.0"
 +repository = "https://github.com/iOfficeAI/aionrs.git"
-@@ -10,4 +10,5 @@ repository.workspace = true
+@@ -10,4 +10,6 @@ repository.workspace = true
 -aion-types.workspace    = true
 -aion-protocol.workspace = true
 -aion-tools.workspace    = true
 -aion-config.workspace   = true
++aionui-common = { path = "../../crates/aionui-common", version = "0.2.2" }
 +aionui-mcp-http = { path = "../../crates/aionui-mcp-http", version = "0.2.2" }
 +aion-types = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
 +aion-protocol = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
 +aion-tools = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
 +aion-config = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11", version = "0.2.11" }
-@@ -15,10 +16,10 @@ aion-config.workspace   = true
+@@ -15,10 +17,10 @@ aion-config.workspace   = true
 -tracing.workspace     = true
 -tokio.workspace       = true
 -serde.workspace       = true
@@ -240,10 +241,10 @@ index 0000000000000000000000000000000000000000..b3c7c4765ead45fbc6832f2087d0b491
 +   limitations under the License.
 diff --git a/aion-mcp-host/UPSTREAM.md b/aion-mcp-host/UPSTREAM.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..c72d5d154c7a5189c9877dedab7ec36d2bcdfa7f
+index 0000000000000000000000000000000000000000..35c934abd7413b1dd3658f1d69616c9702342f6f
 --- /dev/null
 +++ b/aion-mcp-host/UPSTREAM.md
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +# aion-mcp source and Host changes
 +
 +The source is `crates/aion-mcp` from [iOfficeAI/aionrs v0.2.11](https://github.com/iOfficeAI/aionrs/tree/8e61a90329fa9f67c4fdf7e97fe02c24dba33f75/crates/aion-mcp), commit `8e61a90329fa9f67c4fdf7e97fe02c24dba33f75`. `LICENSE` is the byte-for-byte repository-root Apache-2.0 license. The source tag has no root or package NOTICE file. Host issue #29 tracks the modification. Host issue #64 tracks proposing it upstream.
@@ -253,6 +254,7 @@ index 0000000000000000000000000000000000000000..c72d5d154c7a5189c9877dedab7ec36d
 +| File | Changed hunks |
 +| --- | --- |
 +| `Cargo.toml` | Resolve inherited package fields and workspace dependencies from the pinned aionrs manifest. Keep sibling crates on the same tag and depend on the shared Host HTTP readers. |
++| `src/transport/stdio.rs` | Apply the Host child-environment policy after stdio overrides. |
 +| `src/transport/types.rs` | Add the typed transport read error. |
 +| `src/transport/streamable_http.rs` | Use the body/frame readers for Streamable HTTP, retaining session headers and RPC handling. Use bounded, payload-free errors for failed reads and avoid echoing raw malformed JSON. |
 +| `src/transport/sse.rs` | Cap endpoint negotiation and active RPC windows. Dispatch only matching replies and surface terminal read errors during POST acknowledgement. Stop the listener when its transport is dropped. |
@@ -507,6 +509,12 @@ index a88ed6e32c4c62fe72bf12abe962bd300c332bb9..4a6ec63f5c1c4754f11e9ccdebc4954e
 +        ));
 +    }
 +}
+diff --git a/aion-mcp-v0.2.11/src/transport/stdio.rs b/aion-mcp-host/src/transport/stdio.rs
+index 599f25dcf499f2cbff681ae72a3adc6537ac5d68..0977d074a6051fad7995da6232ff5648d7f28542 100644
+--- a/aion-mcp-v0.2.11/src/transport/stdio.rs
++++ b/aion-mcp-host/src/transport/stdio.rs
+@@ -29,0 +30 @@ impl StdioTransport {
++        aionui_common::host_env::strip_from_command(cmd.as_std_mut());
 diff --git a/aion-mcp-v0.2.11/src/transport/streamable_http.rs b/aion-mcp-host/src/transport/streamable_http.rs
 index 609ec1bd5bb68e6a6550c02f43c714cd12cf6baa..f9b715203c2d62ce92a166e996fcbac87c4fb904 100644
 --- a/aion-mcp-v0.2.11/src/transport/streamable_http.rs

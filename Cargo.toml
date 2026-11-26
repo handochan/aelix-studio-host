@@ -30,7 +30,7 @@ members = [
     "crates/aionui-app",
     "crates/aionui-mcp-http",
 ]
-exclude = ["vendor/aion-mcp"]
+exclude = ["vendor/aion-mcp", "vendor/aws-config"]
 
 [workspace.package]
 version = "0.2.2"
@@ -227,5 +227,8 @@ split-debuginfo = "unpacked"
 incremental = false
 
 # Host #29: carry response limits for the pinned aionrs MCP client.
+[patch.crates-io]
+aws-config = { path = "vendor/aws-config" }
+
 [patch."https://github.com/iOfficeAI/aionrs.git"]
 aion-mcp = { path = "vendor/aion-mcp" }
