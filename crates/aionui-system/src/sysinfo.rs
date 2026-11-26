@@ -83,6 +83,7 @@ pub fn get_system_info() -> SystemInfoResponse {
         log_dir: resolve_log_dir(),
         platform: map_platform().to_owned(),
         arch: map_arch().to_owned(),
+        file_content_binary_post: true,
     }
 }
 

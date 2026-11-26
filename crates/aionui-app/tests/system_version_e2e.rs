@@ -33,6 +33,7 @@ async fn system_info_with_auth() {
     assert!(data["log_dir"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(["darwin", "win32", "linux"].contains(&data["platform"].as_str().unwrap()));
     assert!(["x64", "arm64"].contains(&data["arch"].as_str().unwrap()));
+    assert_eq!(data["file_content_binary_post"], true);
 }
 
 // ===========================================================================

@@ -7,7 +7,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use common::{body_json, build_app, build_app_with_file_roots, json_with_token, setup_and_login};
+use common::{
+    body_json, build_app, build_app_with_file_roots, extract_csrf_token, get_request, json_with_token, setup_and_login,
+};
 
 // ===========================================================================
 // Auth guard
@@ -1103,7 +1105,7 @@ async fn content_download_streams_raw_bytes_with_binary_accept_header() {
     let mut req = json_with_token(
         "POST",
         "/api/fs/content",
-        json!({ "file": local_ref(&fp), "encoding": "base64" }),
+        json!({ "file": local_ref(&fp) }),
         &token,
         &csrf,
     );
@@ -1132,6 +1134,98 @@ async fn content_download_without_csrf_returns_403() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+async fn assert_download_denial_matches_get(
+    app: axum::Router,
+    pe_id: &str,
+    relative_path: &str,
+    token: Option<&str>,
+    csrf: &str,
+    expected: StatusCode,
+) {
+    let legacy_uri = format!("/api/fs/stream?kind=project&pe_id={pe_id}&relative_path={relative_path}");
+    let mut get = get_with_token(&legacy_uri, token.unwrap_or_default(), csrf, None);
+    let mut post = json_with_token(
+        "POST",
+        "/api/fs/content",
+        json!({ "file": { "kind": "project", "pe_id": pe_id, "relative_path": relative_path } }),
+        token.unwrap_or_default(),
+        csrf,
+    );
+    post.headers_mut()
+        .insert("accept", "application/octet-stream".parse().unwrap());
+    if token.is_none() {
+        get.headers_mut().remove("authorization");
+        post.headers_mut().remove("authorization");
+    }
+
+    let get = app.clone().oneshot(get).await.unwrap();
+    let post = app.oneshot(post).await.unwrap();
+    assert_eq!(get.status(), expected);
+    assert_eq!(post.status(), expected);
+    assert_eq!(body_json(post).await, body_json(get).await);
+}
+
+#[tokio::test]
+async fn binary_content_without_session_matches_get_even_with_valid_csrf() {
+    let (app, _) = build_app().await;
+    let status = app.clone().oneshot(get_request("/api/auth/status")).await.unwrap();
+    let csrf = extract_csrf_token(&status).expect("Host-issued CSRF token");
+    assert_download_denial_matches_get(app, "fixture", "original.pdf", None, &csrf, StatusCode::UNAUTHORIZED).await;
+}
+
+#[tokio::test]
+async fn binary_content_denies_another_users_project_like_get() {
+    let (mut app, services) = build_app().await;
+    let (owner_token, owner_csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "other-user", "StrongP@ss2").await;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("original.pdf"), b"owned bytes").unwrap();
+    let project = services
+        .project_service
+        .create_standard(
+            "system_default_user",
+            aionui_project::canonical::to_file_uri(root.path()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let pe_id = project.project_explorer.pe_id;
+    let uri = format!("/api/fs/stream?kind=project&pe_id={pe_id}&relative_path=original.pdf");
+    let owned = app
+        .clone()
+        .oneshot(get_with_token(&uri, &owner_token, &owner_csrf, None))
+        .await
+        .unwrap();
+    assert_eq!(owned.status(), StatusCode::OK);
+    assert_download_denial_matches_get(app, &pe_id, "original.pdf", Some(&token), &csrf, StatusCode::NOT_FOUND).await;
+}
+
+#[tokio::test]
+async fn binary_content_denies_relative_paths_outside_the_project_like_get() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(temp.path().join("outside.pdf"), b"outside bytes").unwrap();
+    let project = services
+        .project_service
+        .create_standard(
+            "system_default_user",
+            aionui_project::canonical::to_file_uri(&root).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_download_denial_matches_get(
+        app,
+        &project.project_explorer.pe_id,
+        "../outside.pdf",
+        Some(&token),
+        &csrf,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
 }
 
 #[tokio::test]

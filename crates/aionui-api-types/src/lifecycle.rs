@@ -10,6 +10,9 @@ pub struct SystemInfoResponse {
     pub platform: String,
     /// CPU architecture: `x64` or `arm64`.
     pub arch: String,
+    /// Whether the Host serves original bytes through POST /api/fs/content.
+    #[serde(default)]
+    pub file_content_binary_post: bool,
 }
 
 /// Request body for `POST /api/system/check-update`.
@@ -74,6 +77,7 @@ mod tests {
             log_dir: "/home/user/.local/state/aionui/logs".into(),
             platform: "linux".into(),
             arch: "x64".into(),
+            file_content_binary_post: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["cache_dir"], "/home/user/.cache/aionui");
@@ -81,6 +85,7 @@ mod tests {
         assert_eq!(json["log_dir"], "/home/user/.local/state/aionui/logs");
         assert_eq!(json["platform"], "linux");
         assert_eq!(json["arch"], "x64");
+        assert_eq!(json["file_content_binary_post"], true);
         // Verify snake_case
         assert!(json.get("cacheDir").is_none());
     }
@@ -93,6 +98,7 @@ mod tests {
             log_dir: "/tmp/logs".into(),
             platform: "darwin".into(),
             arch: "arm64".into(),
+            file_content_binary_post: true,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let parsed: SystemInfoResponse = serde_json::from_str(&serialized).unwrap();
