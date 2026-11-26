@@ -13,7 +13,3 @@ This host includes a modified aion-mcp from iOfficeAI/aionrs v0.2.11
 (commit 8e61a90329fa9f67c4fdf7e97fe02c24dba33f75). The original license
 is retained in vendor/aion-mcp/LICENSE. See vendor/aion-mcp/UPSTREAM.md
 for source and change details.
-
-This host includes a modified aws-config 1.13.0 from the AWS SDK for Rust.
-The original license is retained in vendor/aws-config/LICENSE. See
-vendor/aws-config/UPSTREAM.md for the source pin and Host changes.

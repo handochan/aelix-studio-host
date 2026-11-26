@@ -139,6 +139,14 @@ impl AppServices {
         self
     }
 
+    /// Construct services for the standalone host or a test.
+    ///
+    /// The supported deployment is the standalone binary, which captures
+    /// host settings and removes them from the process environment before
+    /// launching children. Embedders must remove host secrets from their own
+    /// process environment before launching children. The startup capture
+    /// function can retain those settings for host readers when called before
+    /// any threads are started.
     pub async fn from_config(database: Database, config: &AppConfig) -> anyhow::Result<Self> {
         let backend_binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aelix-studio-host"));
         Self::from_config_with_backend_binary_path(database, config, backend_binary_path).await
@@ -149,6 +157,7 @@ impl AppServices {
     /// Runtime entry points should use [`Self::from_config`]. This variant lets
     /// integration tests run the real `aioncore` MCP/helper subcommands instead
     /// of accidentally respawning the test harness returned by `current_exe()`.
+    /// The process environment requirements in [`Self::from_config`] also apply.
     pub async fn from_config_with_backend_binary_path(
         database: Database,
         config: &AppConfig,

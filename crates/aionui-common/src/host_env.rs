@@ -55,8 +55,8 @@ environment_settings! { HostEnv {
 }
 
 // Platform and helper inputs that belong to a child-facing contract. LogDir
-// is shared with the agent's diagnose command. AWS provider variables retain
-// their existing inheritance until host and shell ownership can be distinguished.
+// is shared with the agent's diagnose command. Shell AWS credentials retain
+// their existing inheritance.
 environment_settings! { SharedEnv {
     Path => "PATH",
     Home => "HOME",

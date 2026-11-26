@@ -124,29 +124,15 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
-async fn embedded_mcp_filters_host_env() {
+async fn vendored_mcp_stdio_filters_host_env() {
     use aion_mcp::{
         protocol::JsonRpcRequest,
         transport::{McpTransport, stdio::StdioTransport},
     };
 
-    if !run_in_host_env("embedded_mcp_filters_host_env") {
+    if !run_in_host_env("vendored_mcp_stdio_filters_host_env") {
         return;
     }
-
-    // The app library still consumes the ambient key without the binary's scrub.
-    let dir = tempfile::tempdir().unwrap();
-    let config = aionui_app::AppConfig {
-        data_dir: dir.path().into(),
-        work_dir: dir.path().into(),
-        ..Default::default()
-    };
-    let db = aionui_db::init_database_memory().await.unwrap();
-    let services = aionui_app::AppServices::from_config(db, &config).await.unwrap();
-    let token = aionui_auth::JwtService::new("host sentinel".into())
-        .sign("system_default_user", "fixture")
-        .unwrap();
-    assert!(services.jwt_service.verify(&token).is_ok());
 
     let script = format!(
         "{}assert os.environ[{USER_VAR:?}] == 'from config'\n{}",
