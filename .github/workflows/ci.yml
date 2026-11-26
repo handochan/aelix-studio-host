@@ -175,6 +175,7 @@ jobs:
           cargo test --locked -p aionui-ai-agent --lib sdk_child_filters_host_only_settings
           cargo test --locked -p aionui-ai-agent --lib version_probe_filters_host_env
           cargo test --locked -p aionui-app --test child_process_env_e2e
+          cargo test --locked -p aionui-app --test studio_aelix_builtin_e2e host_start_consumes_the_signing_key_without_forwarding_it
 
   release-scripts:
     name: Release scripts

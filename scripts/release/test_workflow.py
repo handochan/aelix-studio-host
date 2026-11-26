@@ -120,6 +120,16 @@ def mutated(description, old, new):
     return RELEASE.replace(old, new)
 
 
+class HostEnvironmentJobTests(unittest.TestCase):
+    def test_windows_runs_host_start_environment_regression(self):
+        job = reader.read((WORKFLOWS / 'ci.yml').read_text())['jobs']['windows-staging']
+        self.assertTrue(job['runs-on'].startswith('windows-'))
+        self.assertTrue(any(
+            '--test studio_aelix_builtin_e2e host_start_consumes_the_signing_key_without_forwarding_it'
+            in step.get('run', '') for step in job['steps']
+        ), 'Windows CI must run the real-host environment regression')
+
+
 class ReleaseGateTests(unittest.TestCase):
     def check(self, text):
         """Fail unless `text` publishes a release only after the advisory check passed, twice."""

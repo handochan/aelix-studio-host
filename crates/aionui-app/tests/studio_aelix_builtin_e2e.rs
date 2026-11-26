@@ -1,5 +1,5 @@
 //! Product launch and admission regressions against the real host executable and an isolated ACP peer.
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -76,7 +76,8 @@ for raw in sys.stdin:
 "#;
 
 fn python() -> PathBuf {
-    aionui_runtime::resolve_command_path("python3").expect("python3 for the fixture")
+    aionui_runtime::resolve_command_path(if cfg!(windows) { "python" } else { "python3" })
+        .expect("Python for the fixture")
 }
 
 fn runtime(root: &Path, name: &str, failing: bool) -> (PathBuf, String) {
@@ -108,6 +109,10 @@ struct Host {
 
 impl Host {
     async fn start(root: &Path, descriptor: &str, protected: bool) -> Self {
+        Self::start_with_signing_key(root, descriptor, protected, JWT_SECRET).await
+    }
+
+    async fn start_with_signing_key(root: &Path, descriptor: &str, protected: bool, signing_key: &str) -> Self {
         let home = root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let log = root.join("host-capture.log");
@@ -129,7 +134,7 @@ impl Host {
             .arg(root)
             .env("HOME", &home)
             .env("USERPROFILE", &home)
-            .env("JWT_SECRET", JWT_SECRET)
+            .env(if cfg!(windows) { "jwt_secret" } else { "JWT_SECRET" }, signing_key)
             .env("AIONUI_ENCRYPTION_SECRET", "host78-fixture-encryption-root")
             .env("AIONCORE_BOOTSTRAP_SECRET", "host78-fixture-bootstrap-secret")
             .env(aionui_runtime::STUDIO_AELIX_LAUNCH_ENV, descriptor)
@@ -326,7 +331,7 @@ async fn acp_socket_path_error_exposes_structured_details_and_human_readable_hin
             Method::POST,
             "/api/agents/custom",
             json!({
-                "name":"Socket path fixture", "command":"python3",
+                "name":"Socket path fixture", "command":python(),
                 "args":[peer.join("launch.py")]
             }),
             None,
@@ -353,7 +358,7 @@ async fn acp_socket_path_error_exposes_structured_details_and_human_readable_hin
         .call(
             Method::POST,
             "/api/agents/custom/try-connect",
-            json!({"command":"python3","acp_args":[peer.join("launch.py")]}),
+            json!({"command":python(),"acp_args":[peer.join("launch.py")]}),
             None,
         )
         .await;
@@ -485,6 +490,50 @@ async fn host_secrets_and_aelix_descriptor_are_private_to_acp_mcp_and_terminal_c
         ),
         ("private".to_owned(), "private".to_owned())
     );
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn host_start_consumes_the_signing_key_without_forwarding_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = initialized_catalog(dir.path()).await;
+    let generation = sqlx::query_scalar::<_, i64>("SELECT session_generation FROM users WHERE id = ?")
+        .bind(OPERATOR)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    db.close().await;
+    let token = aionui_auth::JwtService::new(JWT_SECRET.into())
+        .sign_with_session_generation(OPERATOR, OPERATOR, generation)
+        .unwrap();
+    let wrong_key = Host::start_with_signing_key(dir.path(), "", false, "different-fixture-signing-key").await;
+    let (status, _) = wrong_key
+        .call(Method::GET, "/api/agents/management", Value::Null, Some(&token))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "control: the host has a different key"
+    );
+    wrong_key.stop().await;
+
+    let host = Host::start(dir.path(), "", false).await;
+    let (status, _) = host
+        .call(Method::GET, "/api/agents/management", Value::Null, Some(&token))
+        .await;
+    assert_eq!(status, StatusCode::OK, "the host must use the env signing key");
+    let marker = dir.path().join("host-start-env");
+    let script = "import os,pathlib,sys; pathlib.Path(sys.argv[1]).write_text('inherited' if 'JWT_SECRET' in os.environ else 'private')";
+    host.call(
+        Method::POST,
+        "/api/mcp/test-connection",
+        json!({
+            "name":"host-start-env", "transport":{"type":"stdio","command":python(),"args":["-c",script,marker]}
+        }),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "private");
     host.stop().await;
 }
 
