@@ -717,12 +717,11 @@ tokio runtime starts, so every downstream `which::which(...)` and
 workspace — inherits an enriched `PATH`. Three layers are merged in priority
 order: interactive login-shell `$PATH` (Unix, 3 s timeout) → current inherited
 PATH → platform fallback bins (`~/.cargo/bin`, `~/.local/bin`, version-manager
-installations, Windows `%APPDATA%\npm`, Git, Scoop, …). The call is
-`unsafe` because Rust 2024 requires a single-threaded precondition for
-`env::set_var`; The standalone entry point captures
-host settings before enhancing PATH and starting the runtime. A `startup: PATH ready path_segments=… path_len=…`
-info log confirms the enhancement at each run (no full PATH content is
-logged at `info` level).
+installations, Windows `%APPDATA%\npm`, Git, Scoop, …). The standalone
+entry point captures host settings, then enhances PATH before starting the
+runtime. Both steps modify the process environment and run while startup
+is single-threaded. The `startup: PATH ready` info log reports the segment
+count and length.
 
 ### Host Environment at Startup
 

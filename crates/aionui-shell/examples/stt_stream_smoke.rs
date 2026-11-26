@@ -1,5 +1,5 @@
 //! Manual smoke test for the STT streaming upstream adapters against REAL APIs.
-//! Not committed / not part of CI. Run:
+//! Run manually with fixture credentials:
 //!   STT_SMOKE_API_KEY=sk-... STT_SMOKE_MODEL=gpt-4o-mini-transcribe \
 //!   cargo run -p aionui-shell --example stt_stream_smoke -- /path/to/pcm16-24k-mono.wav
 
@@ -26,6 +26,10 @@ fn wav_pcm_payload(bytes: &[u8]) -> &[u8] {
 }
 
 #[tokio::main]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "manual STT example reads only STT_SMOKE fixture settings"
+)]
 async fn main() {
     let provider = std::env::var("STT_SMOKE_PROVIDER").unwrap_or_else(|_| "openai".into());
     let api_key = std::env::var("STT_SMOKE_API_KEY").expect("STT_SMOKE_API_KEY required");
